@@ -3,461 +3,712 @@
 .SYNOPSIS
     Local testing framework for the Intune Win32 deployment package.
 .DESCRIPTION
-    Simulates the Intune execution environment for local validation.
-    Supports testing installation, detection, uninstallation, requirements,
-    validation, and logging without deploying through Intune.
+    Tests package validity, detection, requirements, and optionally performs
+    live installation/uninstallation using the same engine as Install.ps1
+    and Uninstall.ps1. Never modifies Configuration.psd1.
 
-.PARAMETER Test
-    The test to run. Valid values:
-    All, Install, Uninstall, Detection, Requirements, Validation, Logging, Package
+.PARAMETER Diagnostics
+    Runs all non-destructive diagnostics: package validation, configuration
+    schema, detection status, requirements, identity context, and installer
+    file verification.
 
-.PARAMETER EnableTestMode
-    Temporarily enables Testing.AllowNonSystemExecution so scripts
-    run under the current user context instead of requiring SYSTEM.
+.PARAMETER ListInstallers
+    Lists all files in the Files\ directory and shows which one is configured.
+
+.PARAMETER Install
+    Performs a live installation using the shared Invoke-Installation engine.
+    Requires elevation. Prompts for confirmation unless -Force is specified.
+
+.PARAMETER Uninstall
+    Performs a live uninstallation using the shared Invoke-Uninstallation engine.
+    Requires elevation. Prompts for confirmation unless -Force is specified.
+
+.PARAMETER FullCycle
+    Runs the full lifecycle: Install -> Detect -> Validate -> Uninstall -> Detect.
+    Requires elevation. Prompts for confirmation unless -Force is specified.
+
+.PARAMETER Force
+    Bypasses confirmation prompts for Install, Uninstall, and FullCycle.
+
+.PARAMETER RollbackOnFailure
+    If installation fails, attempts to uninstall/rollback to the pre-install state.
 
 .EXAMPLE
-    .\Test-Local.ps1 -Test All -EnableTestMode
-    .\Test-Local.ps1 -Test Detection
-    .\Test-Local.ps1 -Test Install -EnableTestMode
+    .\Test-Local.ps1 -Diagnostics
+    .\Test-Local.ps1 -ListInstallers
+    .\Test-Local.ps1 -Install -Force
+    .\Test-Local.ps1 -FullCycle -Force -RollbackOnFailure
 #>
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Diagnostics')]
 param(
-    [ValidateSet('All','Install','Uninstall','Detection','Requirements','Validation','Logging','Package')]
-    [string]$Test = 'All',
+    [Parameter(ParameterSetName = 'Diagnostics')]
+    [switch]$Diagnostics,
 
-    [switch]$EnableTestMode
+    [Parameter(ParameterSetName = 'ListInstallers')]
+    [switch]$ListInstallers,
+
+    [Parameter(ParameterSetName = 'Install')]
+    [switch]$Install,
+
+    [Parameter(ParameterSetName = 'Uninstall')]
+    [switch]$Uninstall,
+
+    [Parameter(ParameterSetName = 'FullCycle')]
+    [switch]$FullCycle,
+
+    [switch]$Force,
+
+    [Parameter(ParameterSetName = 'Install')]
+    [Parameter(ParameterSetName = 'FullCycle')]
+    [switch]$RollbackOnFailure
 )
 
 $ErrorActionPreference = 'Stop'
 $PackagePath = $PSScriptRoot
-$Results = @()
+$script:Results = @()
+$script:OverallSuccess = $true
 
-function Write-TestHeader {
+# --- Output Helpers ---
+
+function Write-Section {
     param([string]$Name)
     Write-Host ""
     Write-Host ("=" * 70) -ForegroundColor Cyan
-    Write-Host "  TEST: $Name" -ForegroundColor Cyan
+    Write-Host "  $Name" -ForegroundColor Cyan
     Write-Host ("=" * 70) -ForegroundColor Cyan
 }
 
 function Write-TestResult {
-    param([string]$Name, [bool]$Passed, [string]$Detail = '')
-    $color = if ($Passed) { 'Green' } else { 'Red' }
-    $status = if ($Passed) { 'PASS' } else { 'FAIL' }
-    Write-Host "  [$status] $Name" -ForegroundColor $color
+    param(
+        [string]$Name,
+        [ValidateSet('PASS','FAIL','INFO','WARN')]
+        [string]$Status,
+        [string]$Detail = ''
+    )
+    $color = switch ($Status) {
+        'PASS' { 'Green'  }
+        'FAIL' { 'Red'    }
+        'INFO' { 'Cyan'   }
+        'WARN' { 'Yellow' }
+    }
+    Write-Host "  [$Status] $Name" -ForegroundColor $color
     if ($Detail) { Write-Host "         $Detail" -ForegroundColor Gray }
-    $script:Results += [PSCustomObject]@{ Test = $Name; Passed = $Passed; Detail = $Detail }
+    $script:Results += [PSCustomObject]@{ Test = $Name; Status = $Status; Detail = $Detail }
+    if ($Status -eq 'FAIL') { $script:OverallSuccess = $false }
 }
 
-# Detect execution context
-$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-$isSystem = $identity.Name -eq 'NT AUTHORITY\SYSTEM'
-$isAdmin = ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# --- Load Configuration ---
+
+$configPath = Join-Path $PackagePath 'Configuration.psd1'
+$Config = $null
+
+if (-not (Test-Path $configPath)) {
+    Write-Host "ERROR: Configuration.psd1 not found at $configPath" -ForegroundColor Red
+    exit 1
+}
+
+try {
+    $Config = Import-PowerShellDataFile -Path $configPath
+}
+catch {
+    Write-Host "ERROR: Failed to parse Configuration.psd1: $_" -ForegroundColor Red
+    exit 1
+}
+
+# --- Load Framework Modules ---
+
+. (Join-Path $PackagePath 'Logging.ps1')
+. (Join-Path $PackagePath 'Detection.ps1')
+. (Join-Path $PackagePath 'Validation.ps1')
+. (Join-Path $PackagePath 'Requirements.ps1')
+. (Join-Path $PackagePath 'Helpers.ps1')
+
+# --- Detect Identity ---
+
+$isSystem  = Test-IsSystem
+$isElevated = Test-IsElevated
+$identity  = [Security.Principal.WindowsIdentity]::GetCurrent()
+
+# --- Header ---
 
 Write-Host ""
 Write-Host "Intune Win32 Deployment Framework - Local Test Runner" -ForegroundColor Yellow
 Write-Host ("=" * 70) -ForegroundColor Yellow
-Write-Host "  Package Path : $PackagePath"
-Write-Host "  Identity     : $($identity.Name)"
-Write-Host "  Is SYSTEM    : $isSystem"
-Write-Host "  Is Admin     : $isAdmin"
-Write-Host "  Test Mode    : $EnableTestMode"
-Write-Host "  Test         : $Test"
+Write-Host "  Package    : $PackagePath"
+Write-Host "  App Name   : $($Config.Application.Name)"
+Write-Host "  App Version: $($Config.Application.Version)"
+Write-Host "  Identity   : $($identity.Name)"
+Write-Host "  Is SYSTEM  : $isSystem"
+Write-Host "  Is Elevated: $isElevated"
+Write-Host "  Mode       : $($PSCmdlet.ParameterSetName)"
 Write-Host ("=" * 70) -ForegroundColor Yellow
 
-# Load configuration
-$configPath = Join-Path $PackagePath 'Configuration.psd1'
-$Config = $null
-if (Test-Path $configPath) {
-    try {
-        $Config = Import-PowerShellDataFile -Path $configPath
-        Write-Host "  App Name     : $($Config.Application.Name)" -ForegroundColor Green
-        Write-Host "  App Version  : $($Config.Application.Version)" -ForegroundColor Green
-        Write-Host "  Privileges   : InstallAsSystem=$($Config.Privileges.InstallAsSystem)" -ForegroundColor Green
+# =========================================================================
+# LIST INSTALLERS MODE
+# =========================================================================
+if ($ListInstallers) {
+    Write-Section "Available Installer Files"
+
+    $filesDir = Join-Path $PackagePath 'Files'
+    $configuredFile = $Config.Installer.File
+
+    Write-Host ""
+    Write-Host "  Configured installer: $configuredFile" -ForegroundColor White
+    Write-Host "  Expected path: $(Join-Path $filesDir $configuredFile)" -ForegroundColor White
+    Write-Host ""
+
+    if (Test-Path $filesDir) {
+        $files = Get-ChildItem -Path $filesDir -File -Recurse
+        if ($files.Count -eq 0) {
+            Write-Host "  Files\ directory is empty." -ForegroundColor Yellow
+        }
+        else {
+            Write-Host "  Files in package:" -ForegroundColor White
+            foreach ($f in $files) {
+                $relativePath = $f.FullName.Substring($filesDir.Length + 1)
+                $sizeStr = if ($f.Length -ge 1MB) {
+                    "$([math]::Round($f.Length / 1MB, 2)) MB"
+                } else {
+                    "$([math]::Round($f.Length / 1KB, 2)) KB"
+                }
+                $marker = if ($relativePath -eq $configuredFile) { ' <-- CONFIGURED' } else { '' }
+                Write-Host "    $relativePath ($sizeStr)$marker" -ForegroundColor $(if ($marker) { 'Green' } else { 'Gray' })
+            }
+        }
     }
-    catch {
-        Write-Host "  ERROR: Failed to load Configuration.psd1: $_" -ForegroundColor Red
+    else {
+        Write-Host "  Files\ directory does not exist." -ForegroundColor Red
     }
+
+    Write-Host ""
+    exit 0
 }
 
 # =========================================================================
-# PACKAGE VALIDATION TEST
+# DIAGNOSTICS MODE (also the default when no switches are provided)
 # =========================================================================
-if ($Test -in 'All', 'Package') {
-    Write-TestHeader "Package Validation"
+if ($Diagnostics -or $PSCmdlet.ParameterSetName -eq 'Diagnostics') {
+
+    # Initialize logging for diagnostics
+    $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
+    Initialize-Logging `
+        -ApplicationName    $Config.Application.Name `
+        -CompanyName        $Config.CompanyName `
+        -ScriptName         'Test-Local' `
+        -ApplicationVersion $Config.Application.Version `
+        -LoggingConfig      $loggingConfig `
+        -DebugLogging       $true
+
+    # --- Identity Context ---
+    Write-Section "Identity Context"
+
+    if ($isSystem) {
+        Write-TestResult -Name "Execution context" -Status 'PASS' `
+            -Detail "Running as NT AUTHORITY\SYSTEM"
+    }
+    else {
+        Write-TestResult -Name "Execution context" -Status 'INFO' `
+            -Detail "Running as $($identity.Name) (not SYSTEM - expected for local testing)"
+    }
+
+    if ($isElevated) {
+        Write-TestResult -Name "Elevation" -Status 'PASS' -Detail "Running elevated (Administrator)"
+    }
+    else {
+        Write-TestResult -Name "Elevation" -Status 'INFO' `
+            -Detail "Not elevated - installation tests require elevation"
+    }
+
+    $requireSystem = if ($Config.Privileges) { [bool]$Config.Privileges.InstallAsSystem } else { $true }
+    Write-TestResult -Name "Privileges.InstallAsSystem" -Status 'INFO' `
+        -Detail "Production requires SYSTEM: $requireSystem"
+
+    $allowNonSystem = [bool]$Config.Testing.AllowNonSystemExecution
+    Write-TestResult -Name "Testing.AllowNonSystemExecution" -Status 'INFO' `
+        -Detail "Non-SYSTEM testing allowed: $allowNonSystem"
+
+    # --- Package Files ---
+    Write-Section "Package Validation"
 
     $requiredFiles = @(
-        'Configuration.psd1'
-        'Install.ps1'
-        'Uninstall.ps1'
-        'Detection.ps1'
-        'Validation.ps1'
-        'Logging.ps1'
-        'Requirements.ps1'
-        'Helpers.ps1'
+        'Configuration.psd1', 'Install.ps1', 'Uninstall.ps1', 'Detection.ps1',
+        'Validation.ps1', 'Logging.ps1', 'Requirements.ps1', 'Helpers.ps1'
     )
 
     foreach ($file in $requiredFiles) {
         $filePath = Join-Path $PackagePath $file
-        $exists = Test-Path $filePath
-        Write-TestResult -Name "File exists: $file" -Passed $exists `
-            -Detail $(if ($exists) { "Found at $filePath" } else { "Missing: $filePath" })
+        if (Test-Path $filePath) {
+            Write-TestResult -Name "File: $file" -Status 'PASS'
+        }
+        else {
+            Write-TestResult -Name "File: $file" -Status 'FAIL' -Detail "Missing: $filePath"
+        }
     }
 
-    if ($Config) {
-        Write-TestResult -Name "Configuration has Application.Name" `
-            -Passed ([bool]$Config.Application.Name) `
-            -Detail $Config.Application.Name
+    # Config structure
+    Write-TestResult -Name "Application.Name" `
+        -Status $(if ($Config.Application.Name) { 'PASS' } else { 'FAIL' }) `
+        -Detail $Config.Application.Name
 
-        Write-TestResult -Name "Configuration has CompanyName" `
-            -Passed ([bool]$Config.CompanyName) `
-            -Detail $Config.CompanyName
+    Write-TestResult -Name "CompanyName" `
+        -Status $(if ($Config.CompanyName) { 'PASS' } else { 'FAIL' }) `
+        -Detail $Config.CompanyName
 
-        Write-TestResult -Name "Configuration has Installer section" `
-            -Passed ([bool]$Config.Installer) `
-            -Detail $(if ($Config.Installer) { "Type: $($Config.Installer.Type)" } else { "Missing" })
+    Write-TestResult -Name "Installer section" `
+        -Status $(if ($Config.Installer) { 'PASS' } else { 'FAIL' }) `
+        -Detail $(if ($Config.Installer) { "Type: $($Config.Installer.Type)" } else { 'Missing' })
 
-        Write-TestResult -Name "Configuration has Detection section" `
-            -Passed ([bool]$Config.Detection) `
-            -Detail $(if ($Config.Detection) { "Type: $($Config.Detection.Type)" } else { "Missing" })
+    Write-TestResult -Name "Detection section" `
+        -Status $(if ($Config.Detection) { 'PASS' } else { 'FAIL' }) `
+        -Detail $(if ($Config.Detection) { "Type: $($Config.Detection.Type)" } else { 'Missing' })
 
-        Write-TestResult -Name "Configuration has Privileges section" `
-            -Passed ([bool]$Config.Privileges) `
-            -Detail $(if ($Config.Privileges) { "InstallAsSystem: $($Config.Privileges.InstallAsSystem), RequireElevation: $($Config.Privileges.RequireElevation)" } else { "Missing (defaults to InstallAsSystem=true)" })
+    Write-TestResult -Name "Privileges section" `
+        -Status $(if ($Config.Privileges) { 'PASS' } else { 'WARN' }) `
+        -Detail $(if ($Config.Privileges) { "InstallAsSystem=$($Config.Privileges.InstallAsSystem)" } else { 'Missing (defaults to InstallAsSystem=$true)' })
 
-        # MSI validation
-        if ($Config.Installer.Type -eq 'MSI') {
-            Write-TestResult -Name "MSI has ProductCode" `
-                -Passed ([bool]$Config.Installer.ProductCode) `
-                -Detail $(if ($Config.Installer.ProductCode) { $Config.Installer.ProductCode } else { "Missing - required for MSI" })
-        }
+    # --- Installer File ---
+    Write-Section "Installer File"
 
-        # Installer file check
-        if ($Config.Installer -and $Config.Installer.File) {
-            $installerPath = Join-Path $PackagePath (Join-Path 'Files' $Config.Installer.File)
-            $installerExists = Test-Path $installerPath
-            Write-TestResult -Name "Installer file exists" -Passed $installerExists `
-                -Detail $(if ($installerExists) { $installerPath } else { "Not found: $installerPath" })
+    if ($Config.Installer -and $Config.Installer.File) {
+        $installerPath = Join-Path $PackagePath (Join-Path 'Files' $Config.Installer.File)
 
-            # Hash validation
-            if ($installerExists -and $Config.Installer.SHA256) {
+        if (Test-Path $installerPath) {
+            $fileInfo = Get-Item $installerPath
+            $sizeStr = "$([math]::Round($fileInfo.Length / 1MB, 2)) MB"
+            Write-TestResult -Name "Installer file exists" -Status 'PASS' `
+                -Detail "$($Config.Installer.File) ($sizeStr)"
+
+            # SHA256 verification
+            if ($Config.Installer.SHA256) {
                 $actualHash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash
-                $hashMatch = $actualHash -eq $Config.Installer.SHA256
-                Write-TestResult -Name "Installer SHA256 integrity" -Passed $hashMatch `
-                    -Detail $(if ($hashMatch) { "Hash verified" } else { "Expected: $($Config.Installer.SHA256) | Actual: $actualHash" })
+                if ($actualHash -eq $Config.Installer.SHA256) {
+                    Write-TestResult -Name "SHA256 integrity" -Status 'PASS' -Detail "Hash verified"
+                }
+                else {
+                    Write-TestResult -Name "SHA256 integrity" -Status 'FAIL' `
+                        -Detail "Expected: $($Config.Installer.SHA256) | Actual: $actualHash"
+                }
+            }
+            else {
+                Write-TestResult -Name "SHA256 integrity" -Status 'INFO' -Detail "No hash configured"
             }
         }
+        else {
+            Write-TestResult -Name "Installer file exists" -Status 'FAIL' `
+                -Detail "Configured: $($Config.Installer.File) | Path: $installerPath"
 
-        # Architecture validation
-        if ($Config.Requirements.Architecture) {
-            $arch = $Config.Requirements.Architecture
-            $isArray = $arch -is [array]
-            Write-TestResult -Name "Architecture is array format" -Passed $isArray `
-                -Detail $(if ($isArray) { "Values: $($arch -join ', ')" } else { "Should be @('x64') not '$arch'" })
-        }
-
-        # FileAssociations validation
-        if ($Config.FileAssociations) {
-            $validModes = @('Installer', 'Framework', 'None')
-            $modeValid = $Config.FileAssociations.Mode -in $validModes
-            Write-TestResult -Name "FileAssociations.Mode is valid" -Passed $modeValid `
-                -Detail "Mode: $($Config.FileAssociations.Mode)"
-
-            if ($Config.FileAssociations.Mode -eq 'Framework' -and $Config.FileAssociations.Associations) {
-                Write-TestResult -Name "Framework associations configured" -Passed ($Config.FileAssociations.Associations.Count -gt 0) `
-                    -Detail "$($Config.FileAssociations.Associations.Count) extension(s)"
+            # Show available files
+            $filesDir = Join-Path $PackagePath 'Files'
+            if (Test-Path $filesDir) {
+                $available = Get-ChildItem -Path $filesDir -File | Select-Object -ExpandProperty Name
+                if ($available.Count -gt 0) {
+                    Write-TestResult -Name "Available files in Files\" -Status 'INFO' `
+                        -Detail ($available -join ', ')
+                }
+                else {
+                    Write-TestResult -Name "Files\ directory" -Status 'INFO' -Detail "Empty"
+                }
             }
-        }
-
-        # Environment PATH entries
-        if ($Config.Environment -and $Config.Environment.AddToMachinePath -and $Config.Environment.AddToMachinePath.Count -gt 0) {
-            Write-TestResult -Name "AddToMachinePath configured" -Passed $true `
-                -Detail "$($Config.Environment.AddToMachinePath.Count) entries: $($Config.Environment.AddToMachinePath -join ', ')"
-        }
-
-        # Environment variables
-        if ($Config.Environment -and $Config.Environment.Variables -and $Config.Environment.Variables.Count -gt 0) {
-            Write-TestResult -Name "Environment variables configured" -Passed $true `
-                -Detail "$($Config.Environment.Variables.Count) variable(s)"
-        }
-
-        # ProcessesToStop
-        if ($Config.ProcessesToStop -and $Config.ProcessesToStop.Count -gt 0) {
-            Write-TestResult -Name "ProcessesToStop configured" -Passed $true `
-                -Detail "$($Config.ProcessesToStop.Count) process(es): $($Config.ProcessesToStop -join ', ')"
-        }
-
-        # ServicesToStop
-        if ($Config.ServicesToStop -and $Config.ServicesToStop.Count -gt 0) {
-            Write-TestResult -Name "ServicesToStop configured" -Passed $true `
-                -Detail "$($Config.ServicesToStop.Count) service(s): $($Config.ServicesToStop -join ', ')"
-        }
-
-        # Registry
-        if ($Config.Registry) {
-            if ($Config.Registry.Add -and $Config.Registry.Add.Count -gt 0) {
-                Write-TestResult -Name "Registry.Add configured" -Passed $true `
-                    -Detail "$($Config.Registry.Add.Count) entries"
+            else {
+                Write-TestResult -Name "Files\ directory" -Status 'WARN' -Detail "Directory does not exist"
             }
-            if ($Config.Registry.Remove -and $Config.Registry.Remove.Count -gt 0) {
-                Write-TestResult -Name "Registry.Remove configured" -Passed $true `
-                    -Detail "$($Config.Registry.Remove.Count) entries"
-            }
-        }
-
-        # Shortcuts
-        if ($Config.Shortcuts -and $Config.Shortcuts.Create -and $Config.Shortcuts.Create.Count -gt 0) {
-            Write-TestResult -Name "Shortcuts.Create configured" -Passed $true `
-                -Detail "$($Config.Shortcuts.Create.Count) shortcuts"
-        }
-
-        # PostInstall
-        if ($Config.PostInstall) {
-            Write-TestResult -Name "PostInstall configured" -Passed $true `
-                -Detail "Validate: $($Config.PostInstall.Validate), Actions: $($Config.PostInstall.Actions.Count)"
-        }
-
-        # UserExperience
-        if ($Config.UserExperience) {
-            Write-TestResult -Name "UserExperience configured" -Passed $true `
-                -Detail "StartMenu: $($Config.UserExperience.CreateStartMenuShortcut), Desktop: $($Config.UserExperience.CreateDesktopShortcut)"
         }
     }
-}
+    else {
+        Write-TestResult -Name "Installer file" -Status 'FAIL' -Detail "Installer.File not configured"
+    }
 
-# =========================================================================
-# LOGGING TEST
-# =========================================================================
-if ($Test -in 'All', 'Logging') {
-    Write-TestHeader "Logging"
+    # --- Requirements ---
+    Write-Section "Requirements"
+
+    if ($Config.Requirements) {
+        $reqResult = Test-Requirements -Configuration $Config
+        Write-TestResult -Name "Requirements validation" `
+            -Status $(if ($reqResult) { 'PASS' } else { 'FAIL' }) `
+            -Detail $(if ($reqResult) { "All requirements met" } else { "Some requirements not met" })
+    }
+    else {
+        Write-TestResult -Name "Requirements" -Status 'PASS' -Detail "No requirements configured"
+    }
+
+    # --- Detection ---
+    Write-Section "Detection"
+
+    if ($Config.Detection) {
+        Write-TestResult -Name "Detection type" -Status 'INFO' `
+            -Detail "$($Config.Detection.Type)"
+
+        if ($Config.Detection.Type -eq 'File' -and $Config.Detection.Path) {
+            $detPath = if ($Config.Detection.FileName) {
+                Join-Path $Config.Detection.Path $Config.Detection.FileName
+            } else { $Config.Detection.Path }
+            Write-TestResult -Name "Detection target" -Status 'INFO' -Detail $detPath
+        }
+
+        $detResult = Invoke-Detection -DetectionConfig $Config.Detection
+        if ($detResult.Detected) {
+            Write-TestResult -Name "Application detected" -Status 'PASS' `
+                -Detail $detResult.Detail
+        }
+        else {
+            Write-TestResult -Name "Application detected" -Status 'INFO' `
+                -Detail "Application not installed: $($detResult.Detail)"
+        }
+    }
+    else {
+        Write-TestResult -Name "Detection" -Status 'FAIL' -Detail "No detection configuration"
+    }
+
+    # --- Pre-Install Validation ---
+    Write-Section "Pre-Install Validation"
+
+    $testConfig = $Config.Clone()
+    if (-not $testConfig.Testing) { $testConfig.Testing = @{} }
+    $testConfig.Testing.AllowNonSystemExecution = $true
+
+    $preVal = Test-PreInstallValidation -Configuration $testConfig -PackagePath $PackagePath
+    if ($preVal.Passed) {
+        Write-TestResult -Name "Pre-install validation" -Status 'PASS' -Detail "All checks passed"
+    }
+    else {
+        foreach ($failure in $preVal.Failures) {
+            Write-TestResult -Name "Pre-install validation" -Status 'FAIL' -Detail $failure
+        }
+    }
+
+    # --- Logging ---
+    Write-Section "Logging"
 
     try {
-        . (Join-Path $PackagePath 'Logging.ps1')
-
-        $testCompany = if ($Config.CompanyName) { $Config.CompanyName } else { 'TestCompany' }
-        $testApp = if ($Config.Application.Name) { $Config.Application.Name } else { 'TestApp' }
-        $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
-
-        Initialize-Logging -ApplicationName $testApp -CompanyName $testCompany `
-            -ScriptName 'Test-Local' -ApplicationVersion '1.0.0' -LoggingConfig $loggingConfig
-
         $logDir = Get-LogDirectory
         $logFile = Get-LogFilePath
-
-        Write-TestResult -Name "Logging initialized" -Passed $true -Detail "Log dir: $logDir"
-
-        Write-Log -Message "Test log entry - Info" -Level 'Info'
-        Write-Log -Message "Test log entry - Warning" -Level 'Warning'
-
-        $logExists = Test-Path $logFile
-        Write-TestResult -Name "Log file created" -Passed $logExists -Detail $logFile
-
-        if ($logExists) {
-            $content = Get-Content $logFile -Tail 5
-            $hasEntries = $content.Count -gt 0
-            Write-TestResult -Name "Log entries written" -Passed $hasEntries `
-                -Detail "Last entry: $($content[-1])"
-        }
-
-        Write-DeploymentSummary -Action 'Test' -ExitCode 0 `
-            -DetectionResult 'Test' -ValidationResult 'Test'
-
-        $summaryFile = Join-Path $logDir 'DeploymentSummary.log'
-        Write-TestResult -Name "Deployment summary written" -Passed (Test-Path $summaryFile) `
-            -Detail $summaryFile
+        Write-TestResult -Name "Log directory" -Status 'PASS' -Detail $logDir
+        Write-TestResult -Name "Log file" -Status 'PASS' -Detail $logFile
     }
     catch {
-        Write-TestResult -Name "Logging" -Passed $false -Detail $_.Exception.Message
+        Write-TestResult -Name "Logging" -Status 'FAIL' -Detail $_.Exception.Message
     }
-}
 
-# =========================================================================
-# REQUIREMENTS TEST
-# =========================================================================
-if ($Test -in 'All', 'Requirements') {
-    Write-TestHeader "Requirements"
+    # --- Return Codes ---
+    Write-Section "Return Code Configuration"
 
-    try {
-        . (Join-Path $PackagePath 'Logging.ps1')
-        . (Join-Path $PackagePath 'Requirements.ps1')
+    if ($Config.ReturnCodes) {
+        Write-TestResult -Name "Success codes" -Status 'INFO' `
+            -Detail ($Config.ReturnCodes.Success -join ', ')
+        Write-TestResult -Name "Reboot codes" -Status 'INFO' `
+            -Detail ($Config.ReturnCodes.SuccessWithReboot -join ', ')
 
-        if (-not $script:LogState.Initialized) {
-            $testCompany = if ($Config.CompanyName) { $Config.CompanyName } else { 'TestCompany' }
-            $testApp = if ($Config.Application.Name) { $Config.Application.Name } else { 'TestApp' }
-            $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
-            Initialize-Logging -ApplicationName $testApp -CompanyName $testCompany `
-                -ScriptName 'Test-Requirements' -ApplicationVersion '1.0.0' -LoggingConfig $loggingConfig
-        }
+        $testExit = Get-ExitCodeResult -ExitCode 0 -ReturnCodes $Config.ReturnCodes
+        Write-TestResult -Name "Exit code 0 evaluation" `
+            -Status $(if ($testExit.Success) { 'PASS' } else { 'WARN' }) `
+            -Detail $testExit.Description
 
-        if ($Config -and $Config.Requirements) {
-            $reqResult = Test-Requirements -Configuration $Config
-            Write-TestResult -Name "Requirements validation" -Passed $reqResult `
-                -Detail $(if ($reqResult) { "All requirements met" } else { "Some requirements not met" })
-        }
-        else {
-            Write-TestResult -Name "Requirements validation" -Passed $true `
-                -Detail "No requirements configured"
-        }
-    }
-    catch {
-        Write-TestResult -Name "Requirements" -Passed $false -Detail $_.Exception.Message
-    }
-}
-
-# =========================================================================
-# DETECTION TEST
-# =========================================================================
-if ($Test -in 'All', 'Detection') {
-    Write-TestHeader "Detection"
-
-    try {
-        . (Join-Path $PackagePath 'Detection.ps1')
-
-        if ($Config -and $Config.Detection) {
-            $detResult = Invoke-Detection -DetectionConfig $Config.Detection
-            Write-TestResult -Name "Detection ($($Config.Detection.Type))" `
-                -Passed $detResult.Detected -Detail $detResult.Detail
-
-            if ($Config.Detection.VersionComparison) {
-                Write-TestResult -Name "Version comparison mode" -Passed $true `
-                    -Detail $Config.Detection.VersionComparison
-            }
-        }
-        else {
-            Write-TestResult -Name "Detection" -Passed $false `
-                -Detail "No detection configuration found"
-        }
-    }
-    catch {
-        Write-TestResult -Name "Detection" -Passed $false -Detail $_.Exception.Message
-    }
-}
-
-# =========================================================================
-# VALIDATION TEST
-# =========================================================================
-if ($Test -in 'All', 'Validation') {
-    Write-TestHeader "Validation"
-
-    try {
-        . (Join-Path $PackagePath 'Logging.ps1')
-        . (Join-Path $PackagePath 'Detection.ps1')
-        . (Join-Path $PackagePath 'Validation.ps1')
-
-        if (-not $script:LogState.Initialized) {
-            $testCompany = if ($Config.CompanyName) { $Config.CompanyName } else { 'TestCompany' }
-            $testApp = if ($Config.Application.Name) { $Config.Application.Name } else { 'TestApp' }
-            $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
-            Initialize-Logging -ApplicationName $testApp -CompanyName $testCompany `
-                -ScriptName 'Test-Validation' -ApplicationVersion '1.0.0' -LoggingConfig $loggingConfig
-        }
-
-        # SYSTEM context test
-        $sysResult = Test-SystemContext -AllowNonSystem $EnableTestMode.IsPresent
-        Write-TestResult -Name "SYSTEM context check" -Passed $sysResult `
-            -Detail "Identity: $($identity.Name), AllowNonSystem: $($EnableTestMode.IsPresent)"
-
-        # Pre-install validation
-        if ($Config) {
-            $testConfig = $Config.Clone()
-            if ($EnableTestMode) {
-                if (-not $testConfig.Testing) { $testConfig.Testing = @{} }
-                $testConfig.Testing.AllowNonSystemExecution = $true
-            }
-
-            $preVal = Test-PreInstallValidation -Configuration $testConfig -PackagePath $PackagePath
-            Write-TestResult -Name "Pre-install validation" -Passed $preVal.Passed `
-                -Detail $(if ($preVal.Passed) { "All checks passed" } else { $preVal.Failures -join '; ' })
-        }
-    }
-    catch {
-        Write-TestResult -Name "Validation" -Passed $false -Detail $_.Exception.Message
-    }
-}
-
-# =========================================================================
-# INSTALL TEST
-# =========================================================================
-if ($Test -eq 'Install') {
-    Write-TestHeader "Installation (LIVE)"
-
-    if (-not $isSystem -and -not $EnableTestMode) {
-        Write-Host "  WARNING: Not running as SYSTEM. Use -EnableTestMode to allow." -ForegroundColor Yellow
-        Write-Host "  For SYSTEM testing, use: PsExec.exe -s powershell.exe -File `"$PackagePath\Test-Local.ps1`" -Test Install" -ForegroundColor Yellow
-        Write-TestResult -Name "Install" -Passed $false -Detail "Not running as SYSTEM and test mode not enabled"
+        $testReboot = Get-ExitCodeResult -ExitCode 3010 -ReturnCodes $Config.ReturnCodes
+        Write-TestResult -Name "Exit code 3010 evaluation" `
+            -Status $(if ($testReboot.Success) { 'PASS' } else { 'WARN' }) `
+            -Detail "$($testReboot.Description) (RebootRequired: $($testReboot.RebootRequired))"
     }
     else {
-        Write-Host "  This will execute the actual installer. Proceed? (Y/N): " -ForegroundColor Yellow -NoNewline
+        Write-TestResult -Name "ReturnCodes" -Status 'WARN' -Detail "Not configured"
+    }
+}
+
+# =========================================================================
+# INSTALL MODE
+# =========================================================================
+if ($Install -or $FullCycle) {
+    Write-Section "Installation"
+
+    # Require elevation
+    if (-not $isElevated) {
+        Write-TestResult -Name "Elevation check" -Status 'FAIL' `
+            -Detail "Installation requires elevation. Run as Administrator."
+        Write-Host ""
+        Write-Host "  TIP: Right-click PowerShell -> Run as Administrator" -ForegroundColor Cyan
+        Write-Host "  For SYSTEM: PsExec.exe -s -i powershell.exe -ExecutionPolicy Bypass -File `"$PackagePath\Test-Local.ps1`" -Install" -ForegroundColor Cyan
+        Write-Host ""
+        exit 1
+    }
+
+    # Initialize logging
+    $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
+    Initialize-Logging `
+        -ApplicationName    $Config.Application.Name `
+        -CompanyName        $Config.CompanyName `
+        -ScriptName         'Test-Local-Install' `
+        -ApplicationVersion $Config.Application.Version `
+        -LoggingConfig      $loggingConfig `
+        -DebugLogging       $true
+
+    # Pre-install summary
+    $installerPath = Join-Path $PackagePath (Join-Path 'Files' $Config.Installer.File)
+    $installerType = if ($Config.Installer.Type) { $Config.Installer.Type } else { 'EXE' }
+
+    Write-Host ""
+    Write-Host "  Installation Summary:" -ForegroundColor White
+    Write-Host "    Application  : $($Config.Application.Name) $($Config.Application.Version)" -ForegroundColor Gray
+    Write-Host "    Installer    : $($Config.Installer.File)" -ForegroundColor Gray
+    Write-Host "    Type         : $installerType" -ForegroundColor Gray
+    Write-Host "    Arguments    : $($Config.Installer.Arguments)" -ForegroundColor Gray
+    Write-Host "    Identity     : $($identity.Name)" -ForegroundColor Gray
+    Write-Host "    Elevated     : $isElevated" -ForegroundColor Gray
+    Write-Host "    SYSTEM       : $isSystem" -ForegroundColor Gray
+    Write-Host ""
+
+    # Confirmation prompt
+    $proceedInstall = $Force
+    if (-not $Force) {
+        Write-Host "  This will execute the installer on this machine." -ForegroundColor Yellow
+        Write-Host "  Proceed? (Y/N): " -ForegroundColor Yellow -NoNewline
         $confirm = Read-Host
         if ($confirm -eq 'Y') {
-            if ($EnableTestMode -and $Config) {
-                $envFile = Join-Path $PackagePath 'Configuration.psd1'
-                $originalContent = Get-Content $envFile -Raw
-                try {
-                    $content = $originalContent -replace 'AllowNonSystemExecution\s*=\s*\$false', 'AllowNonSystemExecution = $true'
-                    Set-Content -Path $envFile -Value $content
-                    & (Join-Path $PackagePath 'Install.ps1')
-                    $installResult = $LASTEXITCODE
-                    Write-TestResult -Name "Installation" -Passed ($installResult -eq 0) `
-                        -Detail "Exit code: $installResult"
-                }
-                finally {
-                    Set-Content -Path $envFile -Value $originalContent
-                }
-            }
-            else {
-                & (Join-Path $PackagePath 'Install.ps1')
-                $installResult = $LASTEXITCODE
-                Write-TestResult -Name "Installation" -Passed ($installResult -eq 0) `
-                    -Detail "Exit code: $installResult"
-            }
+            $proceedInstall = $true
         }
         else {
-            Write-TestResult -Name "Installation" -Passed $false -Detail "Skipped by user"
+            Write-TestResult -Name "Installation" -Status 'INFO' -Detail "Cancelled by user"
+        }
+    }
+
+    if ($proceedInstall) {
+        # Validate installer file exists
+        if (-not (Test-Path $installerPath)) {
+            Write-TestResult -Name "Installer file" -Status 'FAIL' `
+                -Detail "Not found: $installerPath"
+
+            $filesDir = Join-Path $PackagePath 'Files'
+            if (Test-Path $filesDir) {
+                $available = Get-ChildItem -Path $filesDir -File | Select-Object -ExpandProperty Name
+                if ($available.Count -gt 0) {
+                    Write-TestResult -Name "Available files" -Status 'INFO' -Detail ($available -join ', ')
+                }
+            }
+            $proceedInstall = $false
+        }
+    }
+
+    if ($proceedInstall -and $Config.Installer.SHA256) {
+        $actualHash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash
+        if ($actualHash -ne $Config.Installer.SHA256) {
+            Write-TestResult -Name "SHA256 integrity" -Status 'FAIL' `
+                -Detail "Expected: $($Config.Installer.SHA256) | Actual: $actualHash"
+            $proceedInstall = $false
+        }
+        else {
+            Write-TestResult -Name "SHA256 integrity" -Status 'PASS' -Detail "Hash verified"
+        }
+    }
+
+    if ($proceedInstall) {
+        # Pre-install detection state
+        if ($Config.Detection) {
+            $preDetection = Invoke-Detection -DetectionConfig $Config.Detection
+            Write-TestResult -Name "Pre-install detection" -Status 'INFO' `
+                -Detail $(if ($preDetection.Detected) { "Already installed: $($preDetection.Detail)" } else { "Not installed: $($preDetection.Detail)" })
+        }
+
+        # Stop configured processes
+        if ($Config.ProcessesToStop -and $Config.ProcessesToStop.Count -gt 0) {
+            Write-TestResult -Name "Stopping processes" -Status 'INFO' `
+                -Detail ($Config.ProcessesToStop -join ', ')
+            Stop-ConfiguredProcesses -ProcessNames $Config.ProcessesToStop
+        }
+        if ($Config.ServicesToStop -and $Config.ServicesToStop.Count -gt 0) {
+            Write-TestResult -Name "Stopping services" -Status 'INFO' `
+                -Detail ($Config.ServicesToStop -join ', ')
+            Stop-ConfiguredServices -ServiceNames $Config.ServicesToStop
+        }
+
+        # Execute installation via shared engine
+        Write-Host ""
+        Write-Host "  Executing installer..." -ForegroundColor White
+        $installStart = Get-Date
+
+        try {
+            $installExitCode = Invoke-Installation -InstallerConfig $Config.Installer -PackagePath $PackagePath
+            $installEnd = Get-Date
+            $installDuration = $installEnd - $installStart
+
+            Write-Host ""
+            Write-TestResult -Name "Installer exit code" -Status 'INFO' -Detail "$installExitCode"
+            Write-TestResult -Name "Installer duration" -Status 'INFO' `
+                -Detail "$([math]::Round($installDuration.TotalSeconds, 1)) seconds"
+
+            # Evaluate exit code
+            $exitResult = Get-ExitCodeResult -ExitCode $installExitCode -ReturnCodes $Config.ReturnCodes
+
+            if ($exitResult.RebootRequired) {
+                Write-TestResult -Name "Installation result" -Status 'PASS' `
+                    -Detail "Success - REBOOT REQUIRED (exit code $installExitCode)"
+            }
+            elseif ($exitResult.Success) {
+                Write-TestResult -Name "Installation result" -Status 'PASS' `
+                    -Detail "Success (exit code $installExitCode)"
+            }
+            else {
+                Write-TestResult -Name "Installation result" -Status 'FAIL' `
+                    -Detail "Failed with exit code $installExitCode"
+
+                if ($RollbackOnFailure -and $Config.Uninstaller) {
+                    Write-Host ""
+                    Write-Host "  Attempting rollback..." -ForegroundColor Yellow
+                    try {
+                        $rollbackCode = Invoke-Uninstallation -Config $Config -PackagePath $PackagePath
+                        $rollbackResult = Get-ExitCodeResult -ExitCode $rollbackCode -ReturnCodes $Config.ReturnCodes
+                        Write-TestResult -Name "Rollback" `
+                            -Status $(if ($rollbackResult.Success) { 'PASS' } else { 'WARN' }) `
+                            -Detail "Uninstaller exit code: $rollbackCode"
+                    }
+                    catch {
+                        Write-TestResult -Name "Rollback" -Status 'FAIL' -Detail $_.Exception.Message
+                    }
+                }
+            }
+
+            # Post-install detection
+            if ($exitResult.Success -and $Config.Detection) {
+                Write-Host ""
+                Start-Sleep -Seconds 2
+                $postDetection = Invoke-Detection -DetectionConfig $Config.Detection
+                if ($postDetection.Detected) {
+                    Write-TestResult -Name "Post-install detection" -Status 'PASS' `
+                        -Detail $postDetection.Detail
+                }
+                else {
+                    Write-TestResult -Name "Post-install detection" -Status 'WARN' `
+                        -Detail "Not detected after install: $($postDetection.Detail)"
+                }
+
+                # Post-install validation
+                if ($Config.PostInstall.Validate) {
+                    $postVal = Test-PostInstallValidation -Configuration $Config -InstallerExitCode $installExitCode
+                    Write-TestResult -Name "Post-install validation" `
+                        -Status $(if ($postVal.Passed) { 'PASS' } else { 'WARN' }) `
+                        -Detail $(if ($postVal.Passed) { "All checks passed" } else { $postVal.Failures -join '; ' })
+                }
+
+                # Version check
+                if ($Config.Application.Version -and $postDetection.Detail -match 'Version:\s*([\d.]+)') {
+                    $detectedVersion = $Matches[1]
+                    Write-TestResult -Name "Version verification" -Status 'INFO' `
+                        -Detail "Configured: $($Config.Application.Version) | Detected: $detectedVersion"
+                }
+            }
+        }
+        catch {
+            Write-TestResult -Name "Installation" -Status 'FAIL' -Detail $_.Exception.Message
         }
     }
 }
 
 # =========================================================================
-# UNINSTALL TEST
+# UNINSTALL MODE
 # =========================================================================
-if ($Test -eq 'Uninstall') {
-    Write-TestHeader "Uninstallation (LIVE)"
+if ($Uninstall -or ($FullCycle -and $script:OverallSuccess)) {
+    Write-Section "Uninstallation"
 
-    if (-not $isSystem -and -not $EnableTestMode) {
-        Write-Host "  WARNING: Not running as SYSTEM. Use -EnableTestMode to allow." -ForegroundColor Yellow
-        Write-TestResult -Name "Uninstall" -Passed $false -Detail "Not running as SYSTEM and test mode not enabled"
+    # Require elevation
+    $proceedUninstall = $true
+    if (-not $isElevated) {
+        Write-TestResult -Name "Elevation check" -Status 'FAIL' `
+            -Detail "Uninstallation requires elevation. Run as Administrator."
+        $proceedUninstall = $false
     }
-    else {
-        Write-Host "  This will execute the actual uninstaller. Proceed? (Y/N): " -ForegroundColor Yellow -NoNewline
-        $confirm = Read-Host
-        if ($confirm -eq 'Y') {
-            if ($EnableTestMode -and $Config) {
-                $envFile = Join-Path $PackagePath 'Configuration.psd1'
-                $originalContent = Get-Content $envFile -Raw
-                try {
-                    $content = $originalContent -replace 'AllowNonSystemExecution\s*=\s*\$false', 'AllowNonSystemExecution = $true'
-                    Set-Content -Path $envFile -Value $content
-                    & (Join-Path $PackagePath 'Uninstall.ps1')
-                    $uninstallResult = $LASTEXITCODE
-                    Write-TestResult -Name "Uninstallation" -Passed ($uninstallResult -eq 0) `
-                        -Detail "Exit code: $uninstallResult"
-                }
-                finally {
-                    Set-Content -Path $envFile -Value $originalContent
-                }
+
+    if ($proceedUninstall) {
+        # Initialize logging if not already done
+        if (-not $script:LogState -or -not $script:LogState.Initialized) {
+            $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
+            Initialize-Logging `
+                -ApplicationName    $Config.Application.Name `
+                -CompanyName        $Config.CompanyName `
+                -ScriptName         'Test-Local-Uninstall' `
+                -ApplicationVersion $Config.Application.Version `
+                -LoggingConfig      $loggingConfig `
+                -DebugLogging       $true
+        }
+
+        # Pre-uninstall detection
+        if ($Config.Detection) {
+            $preUninstallDetection = Invoke-Detection -DetectionConfig $Config.Detection
+            if ($preUninstallDetection.Detected) {
+                Write-TestResult -Name "Pre-uninstall detection" -Status 'INFO' `
+                    -Detail "Application installed: $($preUninstallDetection.Detail)"
             }
             else {
-                & (Join-Path $PackagePath 'Uninstall.ps1')
-                $uninstallResult = $LASTEXITCODE
-                Write-TestResult -Name "Uninstallation" -Passed ($uninstallResult -eq 0) `
-                    -Detail "Exit code: $uninstallResult"
+                Write-TestResult -Name "Pre-uninstall detection" -Status 'INFO' `
+                    -Detail "Application not installed: $($preUninstallDetection.Detail)"
             }
         }
-        else {
-            Write-TestResult -Name "Uninstallation" -Passed $false -Detail "Skipped by user"
+
+        # Confirmation prompt (skip in FullCycle since already confirmed)
+        if (-not $Force -and -not $FullCycle) {
+            Write-Host ""
+            Write-Host "  This will execute the uninstaller on this machine." -ForegroundColor Yellow
+            Write-Host "  Proceed? (Y/N): " -ForegroundColor Yellow -NoNewline
+            $confirm = Read-Host
+            if ($confirm -ne 'Y') { $proceedUninstall = $false }
         }
+    }
+
+    if ($proceedUninstall) {
+        # Stop configured processes
+        if ($Config.ProcessesToStop -and $Config.ProcessesToStop.Count -gt 0) {
+            Stop-ConfiguredProcesses -ProcessNames $Config.ProcessesToStop
+        }
+        if ($Config.ServicesToStop -and $Config.ServicesToStop.Count -gt 0) {
+            Stop-ConfiguredServices -ServiceNames $Config.ServicesToStop
+        }
+
+        Write-Host ""
+        Write-Host "  Executing uninstaller..." -ForegroundColor White
+        $uninstallStart = Get-Date
+
+        try {
+            $uninstallExitCode = Invoke-Uninstallation -Config $Config -PackagePath $PackagePath
+            $uninstallEnd = Get-Date
+            $uninstallDuration = $uninstallEnd - $uninstallStart
+
+            Write-Host ""
+            Write-TestResult -Name "Uninstaller exit code" -Status 'INFO' -Detail "$uninstallExitCode"
+            Write-TestResult -Name "Uninstaller duration" -Status 'INFO' `
+                -Detail "$([math]::Round($uninstallDuration.TotalSeconds, 1)) seconds"
+
+            $exitResult = Get-ExitCodeResult -ExitCode $uninstallExitCode -ReturnCodes $Config.ReturnCodes
+
+            if ($exitResult.RebootRequired) {
+                Write-TestResult -Name "Uninstallation result" -Status 'PASS' `
+                    -Detail "Success - REBOOT REQUIRED (exit code $uninstallExitCode)"
+            }
+            elseif ($exitResult.Success) {
+                Write-TestResult -Name "Uninstallation result" -Status 'PASS' `
+                    -Detail "Success (exit code $uninstallExitCode)"
+            }
+            else {
+                Write-TestResult -Name "Uninstallation result" -Status 'FAIL' `
+                    -Detail "Failed with exit code $uninstallExitCode"
+            }
+
+            # Post-uninstall detection
+            if ($exitResult.Success -and $Config.Detection) {
+                Start-Sleep -Seconds 2
+                $postUninstallDetection = Invoke-Detection -DetectionConfig $Config.Detection
+                if ($postUninstallDetection.Detected) {
+                    Write-TestResult -Name "Post-uninstall detection" -Status 'WARN' `
+                        -Detail "Still detected: $($postUninstallDetection.Detail)"
+                }
+                else {
+                    Write-TestResult -Name "Post-uninstall detection" -Status 'PASS' `
+                        -Detail "Application removed: $($postUninstallDetection.Detail)"
+                }
+            }
+        }
+        catch {
+            Write-TestResult -Name "Uninstallation" -Status 'FAIL' -Detail $_.Exception.Message
+        }
+    }
+    else {
+        Write-TestResult -Name "Uninstallation" -Status 'INFO' -Detail "Cancelled by user"
     }
 }
 
@@ -469,23 +720,37 @@ Write-Host ("=" * 70) -ForegroundColor Yellow
 Write-Host "  TEST SUMMARY" -ForegroundColor Yellow
 Write-Host ("=" * 70) -ForegroundColor Yellow
 
-$passed = ($Results | Where-Object { $_.Passed }).Count
-$failed = ($Results | Where-Object { -not $_.Passed }).Count
-$total  = $Results.Count
+$passed = @($script:Results | Where-Object { $_.Status -eq 'PASS' }).Count
+$failed = @($script:Results | Where-Object { $_.Status -eq 'FAIL' }).Count
+$info   = @($script:Results | Where-Object { $_.Status -eq 'INFO' }).Count
+$warned = @($script:Results | Where-Object { $_.Status -eq 'WARN' }).Count
+$total  = $script:Results.Count
 
-Write-Host "  Total: $total | Passed: $passed | Failed: $failed" -ForegroundColor $(if ($failed -eq 0) { 'Green' } else { 'Red' })
+Write-Host ""
+Write-Host "  Total: $total | Passed: $passed | Failed: $failed | Warnings: $warned | Info: $info" `
+    -ForegroundColor $(if ($failed -eq 0) { 'Green' } else { 'Red' })
 Write-Host ""
 
 if ($failed -gt 0) {
     Write-Host "  Failed Tests:" -ForegroundColor Red
-    $Results | Where-Object { -not $_.Passed } | ForEach-Object {
+    $script:Results | Where-Object { $_.Status -eq 'FAIL' } | ForEach-Object {
         Write-Host "    - $($_.Test): $($_.Detail)" -ForegroundColor Red
     }
     Write-Host ""
 }
 
-if (-not $isSystem) {
-    Write-Host "  TIP: For SYSTEM-context testing, run:" -ForegroundColor Cyan
-    Write-Host "    PsExec.exe -s -i powershell.exe -ExecutionPolicy Bypass -File `"$PackagePath\Test-Local.ps1`" -Test All" -ForegroundColor Gray
+if ($warned -gt 0) {
+    Write-Host "  Warnings:" -ForegroundColor Yellow
+    $script:Results | Where-Object { $_.Status -eq 'WARN' } | ForEach-Object {
+        Write-Host "    - $($_.Test): $($_.Detail)" -ForegroundColor Yellow
+    }
     Write-Host ""
 }
+
+if (-not $isSystem -and -not $Install -and -not $Uninstall -and -not $FullCycle) {
+    Write-Host "  TIP: For SYSTEM-context testing, run:" -ForegroundColor Cyan
+    Write-Host "    PsExec.exe -s -i powershell.exe -ExecutionPolicy Bypass -File `"$PackagePath\Test-Local.ps1`" -Diagnostics" -ForegroundColor Gray
+    Write-Host ""
+}
+
+exit $failed

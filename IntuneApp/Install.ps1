@@ -142,12 +142,11 @@ try {
     }
 
     # =====================================================================
-    # INSTALL: Build and execute installer command
+    # INSTALL: Execute installer via shared engine
     # =====================================================================
     $installerConfig = $Config.Installer
     $installerFile   = Join-Path $PackagePath (Join-Path 'Files' $installerConfig.File)
     $installerType   = if ($installerConfig.Type) { $installerConfig.Type } else { 'EXE' }
-    $timeoutSeconds  = if ($installerConfig.TimeoutSeconds) { $installerConfig.TimeoutSeconds } else { 3600 }
 
     Write-Log -Message "Installer type: $installerType" -Level 'Info'
     Write-Log -Message "Installer file: $installerFile" -Level 'Info'
@@ -168,87 +167,17 @@ try {
         Write-Log -Message "Installer integrity verified (SHA256 match)." -Level 'Info'
     }
 
-    # Execute installer
-    $installExitCode = 0
-    switch ($installerType.ToUpper()) {
-        'MSI' {
-            $msiArgs = @('/i', "`"$installerFile`"")
-            if ($installerConfig.InstallArguments) {
-                $msiArgs += $installerConfig.InstallArguments -split ' '
-            }
-            else {
-                $msiArgs += @('/qn', '/norestart')
-            }
-
-            Write-Log -Message "Executing: msiexec.exe $($msiArgs -join ' ')" -Level 'Info'
-            $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs `
-                -Wait -PassThru -NoNewWindow -ErrorAction Stop
-            $installExitCode = $process.ExitCode
-        }
-
-        'MSIX' {
-            Write-Log -Message "Executing MSIX: Add-AppxPackage -Path `"$installerFile`"" -Level 'Info'
-            try {
-                Add-AppxPackage -Path $installerFile -ErrorAction Stop
-                $installExitCode = 0
-            }
-            catch {
-                Write-Log -Message "MSIX installation failed: $_" -Level 'Error'
-                $installExitCode = 1
-            }
-        }
-
-        'PS1' {
-            Write-Log -Message "Executing PowerShell installer: $installerFile" -Level 'Info'
-            try {
-                & $installerFile
-                $installExitCode = $LASTEXITCODE
-                if ($null -eq $installExitCode) { $installExitCode = 0 }
-            }
-            catch {
-                Write-Log -Message "PowerShell installer failed: $_" -Level 'Error'
-                $installExitCode = 1
-            }
-        }
-
-        { $_ -in 'CMD', 'BAT' } {
-            Write-Log -Message "Executing: cmd.exe /c `"$installerFile`" $($installerConfig.Arguments)" -Level 'Info'
-            $process = Start-Process -FilePath 'cmd.exe' `
-                -ArgumentList "/c `"$installerFile`" $($installerConfig.Arguments)" `
-                -Wait -PassThru -NoNewWindow -ErrorAction Stop
-            $installExitCode = $process.ExitCode
-        }
-
-        default {
-            $startParams = @{
-                FilePath    = $installerFile
-                Wait        = $true
-                PassThru    = $true
-                NoNewWindow = $true
-                ErrorAction = 'Stop'
-            }
-            if ($installerConfig.Arguments) {
-                $startParams.ArgumentList = $installerConfig.Arguments
-            }
-
-            Write-Log -Message "Executing: $installerFile $($installerConfig.Arguments)" -Level 'Info'
-            $process = Start-Process @startParams
-            $installExitCode = $process.ExitCode
-        }
-    }
-
+    $installExitCode = Invoke-Installation -InstallerConfig $installerConfig -PackagePath $PackagePath
     Write-Log -Message "Installer exit code: $installExitCode" -Level 'Info'
 
-    # Evaluate exit code
-    $returnCodes = $Config.ReturnCodes
-    $isSuccess = $installExitCode -in $returnCodes.Success
-    $isReboot  = $installExitCode -in $returnCodes.SuccessWithReboot
+    # Evaluate exit code via shared helper
+    $exitResult = Get-ExitCodeResult -ExitCode $installExitCode -ReturnCodes $Config.ReturnCodes
 
-    if ($isReboot) {
+    if ($exitResult.RebootRequired) {
         Write-Log -Message "Installation succeeded. Reboot required (exit code $installExitCode)." -Level 'Warning'
         $script:ExitCode = $installExitCode
     }
-    elseif ($isSuccess) {
+    elseif ($exitResult.Success) {
         Write-Log -Message "Installation succeeded." -Level 'Info'
         $script:ExitCode = 0
     }

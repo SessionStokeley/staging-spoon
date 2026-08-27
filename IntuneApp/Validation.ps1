@@ -21,9 +21,9 @@ function Test-PreInstallValidation {
     $requireSystem = if ($privileges) { [bool]$privileges.InstallAsSystem } else { $true }
 
     if ($requireSystem) {
-        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-        if ($identity.Name -ne 'NT AUTHORITY\SYSTEM') {
+        if (-not (Test-IsSystem)) {
             if (-not $Configuration.Testing.AllowNonSystemExecution) {
+                $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
                 $failures += "Not running as SYSTEM. Current identity: $($identity.Name)"
             }
         }
@@ -205,16 +205,17 @@ function Test-SystemContext {
         [bool]$AllowNonSystem = $false
     )
 
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $isSystem = $identity.Name -eq 'NT AUTHORITY\SYSTEM'
+    $isSystem = Test-IsSystem
 
     if (-not $isSystem -and -not $AllowNonSystem) {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
         Write-Log -Message "Script must run as SYSTEM. Current identity: $($identity.Name)" -Level 'Error'
         Write-Log -Message "Set Testing.AllowNonSystemExecution = `$true in Configuration.psd1 for local testing." -Level 'Info'
         return $false
     }
 
     if (-not $isSystem -and $AllowNonSystem) {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
         Write-Log -Message "Running as $($identity.Name) (non-SYSTEM testing mode enabled)." -Level 'Warning'
     }
 
