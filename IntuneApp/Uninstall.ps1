@@ -1,0 +1,370 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Generic Intune Win32 application uninstaller.
+.DESCRIPTION
+    Configuration-driven uninstallation script supporting Executable, MSI,
+    Registry-discovered, and Custom uninstall mechanisms.
+    Designed to run as NT AUTHORITY\SYSTEM via the Intune Management Extension.
+#>
+
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = 'Stop'
+$script:ExitCode = 1
+
+try {
+    $PackagePath = $PSScriptRoot
+
+    # Load framework modules
+    . (Join-Path $PackagePath 'Logging.ps1')
+    . (Join-Path $PackagePath 'Detection.ps1')
+    . (Join-Path $PackagePath 'Validation.ps1')
+    . (Join-Path $PackagePath 'Requirements.ps1')
+
+    # Load configuration
+    $configPath = Join-Path $PackagePath 'Configuration.psd1'
+    if (-not (Test-Path $configPath)) {
+        Write-Error "Configuration.psd1 not found at $configPath"
+        exit 1
+    }
+    $Config = Import-PowerShellDataFile -Path $configPath
+
+    # Initialize logging
+    Initialize-Logging `
+        -ApplicationName    $Config.ApplicationName `
+        -CompanyName        $Config.CompanyName `
+        -ScriptName         'Uninstall' `
+        -ApplicationVersion $Config.ApplicationVersion
+
+    Write-Log -Message "Package path: $PackagePath" -Level 'Info'
+
+    # Validate SYSTEM context
+    $allowNonSystem = [bool]$Config.Testing.AllowNonSystemExecution
+    if (-not (Test-SystemContext -AllowNonSystem $allowNonSystem)) {
+        $script:ExitCode = 1
+        Write-DeploymentSummary -Action 'Uninstall' -ExitCode $script:ExitCode -ErrorDetail 'Not running as SYSTEM'
+        exit $script:ExitCode
+    }
+
+    # Check if application is present
+    Write-Log -Message "Checking if application is installed..." -Level 'Info'
+    if ($Config.Detection) {
+        $detection = Invoke-Detection -DetectionConfig $Config.Detection
+        if (-not $detection.Detected) {
+            Write-Log -Message "Application not detected. Nothing to uninstall: $($detection.Detail)" -Level 'Info'
+            $script:ExitCode = 0
+            Write-DeploymentSummary -Action 'Uninstall' -ExitCode $script:ExitCode `
+                -DetectionResult 'Not Installed' -ValidationResult 'PASS'
+            exit $script:ExitCode
+        }
+        Write-Log -Message "Application detected: $($detection.Detail)" -Level 'Info'
+    }
+
+    # Stop configured processes
+    if ($Config.ProcessesToStop -and $Config.ProcessesToStop.Count -gt 0) {
+        Write-Log -Message "Stopping configured processes..." -Level 'Info'
+        Stop-ConfiguredProcesses -ProcessNames $Config.ProcessesToStop `
+            -Force ([bool]$Config.ForceStopProcesses) `
+            -TimeoutSeconds ($Config.GracefulStopTimeoutSeconds)
+    }
+
+    # Stop configured services
+    if ($Config.ServicesToStop -and $Config.ServicesToStop.Count -gt 0) {
+        Write-Log -Message "Stopping configured services..." -Level 'Info'
+        Stop-ConfiguredServices -ServiceNames $Config.ServicesToStop
+    }
+
+    # Execute uninstall
+    $uninstallerConfig = $Config.Uninstaller
+    $uninstallType = if ($uninstallerConfig.Type) { $uninstallerConfig.Type } else { 'Executable' }
+    $timeoutSeconds = if ($uninstallerConfig.TimeoutSeconds) { $uninstallerConfig.TimeoutSeconds } else { 3600 }
+    $uninstallExitCode = 0
+
+    Write-Log -Message "Uninstall type: $uninstallType" -Level 'Info'
+
+    switch ($uninstallType) {
+        'MSI' {
+            $productCode = $uninstallerConfig.ProductCode
+            if (-not $productCode) {
+                # Try to get from detection config
+                if ($Config.Detection.Type -eq 'MSI' -and $Config.Detection.ProductCode) {
+                    $productCode = $Config.Detection.ProductCode
+                }
+            }
+            if (-not $productCode) {
+                throw "MSI uninstall requires ProductCode in Uninstaller or Detection configuration."
+            }
+
+            $msiArgs = @('/x', $productCode)
+            if ($uninstallerConfig.UninstallArguments) {
+                $msiArgs += $uninstallerConfig.UninstallArguments -split ' '
+            }
+            else {
+                $msiArgs += @('/qn', '/norestart')
+            }
+
+            Write-Log -Message "Executing: msiexec.exe $($msiArgs -join ' ')" -Level 'Info'
+            $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs `
+                -Wait -PassThru -NoNewWindow -ErrorAction Stop
+            $uninstallExitCode = $process.ExitCode
+        }
+
+        'Registry' {
+            $uninstallExitCode = Invoke-RegistryUninstall -Config $Config
+        }
+
+        'Custom' {
+            $customCmd = $uninstallerConfig.Command
+            $customArgs = $uninstallerConfig.Arguments
+            if (-not $customCmd) {
+                throw "Custom uninstall requires Command in Uninstaller configuration."
+            }
+
+            Write-Log -Message "Executing custom: $customCmd $customArgs" -Level 'Info'
+            $startParams = @{
+                FilePath    = $customCmd
+                Wait        = $true
+                PassThru    = $true
+                NoNewWindow = $true
+                ErrorAction = 'Stop'
+            }
+            if ($customArgs) { $startParams.ArgumentList = $customArgs }
+
+            $process = Start-Process @startParams
+            $uninstallExitCode = $process.ExitCode
+        }
+
+        default {
+            # Executable type
+            $uninstallFile = $uninstallerConfig.File
+            $uninstallArgs = $uninstallerConfig.Arguments
+
+            if (-not $uninstallFile) {
+                throw "Executable uninstall requires File in Uninstaller configuration."
+            }
+
+            # Resolve path: check if absolute, then relative to package
+            if (-not [System.IO.Path]::IsPathRooted($uninstallFile)) {
+                $candidatePaths = @(
+                    (Join-Path $PackagePath (Join-Path 'Files' $uninstallFile))
+                    (Join-Path $PackagePath $uninstallFile)
+                )
+                $resolvedPath = $candidatePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+                if ($resolvedPath) {
+                    $uninstallFile = $resolvedPath
+                }
+            }
+
+            Write-Log -Message "Executing: $uninstallFile $uninstallArgs" -Level 'Info'
+            $startParams = @{
+                FilePath    = $uninstallFile
+                Wait        = $true
+                PassThru    = $true
+                NoNewWindow = $true
+                ErrorAction = 'Stop'
+            }
+            if ($uninstallArgs) { $startParams.ArgumentList = $uninstallArgs }
+
+            $process = Start-Process @startParams
+            $uninstallExitCode = $process.ExitCode
+        }
+    }
+
+    Write-Log -Message "Uninstaller exit code: $uninstallExitCode" -Level 'Info'
+
+    # Evaluate exit code
+    $returnCodes = $Config.ReturnCodes
+    $isSuccess = $uninstallExitCode -in $returnCodes.Success
+    $isReboot  = $uninstallExitCode -in $returnCodes.SuccessWithReboot
+
+    if ($isReboot) {
+        Write-Log -Message "Uninstall succeeded. Reboot required (exit code $uninstallExitCode)." -Level 'Warning'
+        $script:ExitCode = $uninstallExitCode
+    }
+    elseif ($isSuccess) {
+        Write-Log -Message "Uninstall succeeded." -Level 'Info'
+        $script:ExitCode = 0
+    }
+    else {
+        Write-Log -Message "Uninstall FAILED with exit code $uninstallExitCode." -Level 'Error'
+        $script:ExitCode = $uninstallExitCode
+        Write-DeploymentSummary -Action 'Uninstall' -ExitCode $script:ExitCode `
+            -ErrorDetail "Uninstaller returned exit code $uninstallExitCode"
+        exit $script:ExitCode
+    }
+
+    # Post-uninstall detection
+    $detectionResult = 'N/A'
+    if ($Config.Detection) {
+        Write-Log -Message "Running post-uninstall detection..." -Level 'Info'
+        Start-Sleep -Seconds 2
+        $postDetection = Invoke-Detection -DetectionConfig $Config.Detection
+        if ($postDetection.Detected) {
+            $detectionResult = "Still detected: $($postDetection.Detail)"
+            Write-Log -Message "WARNING: Application still detected after uninstall." -Level 'Warning'
+        }
+        else {
+            $detectionResult = "Removed: $($postDetection.Detail)"
+            Write-Log -Message "Application successfully removed." -Level 'Info'
+        }
+    }
+
+    Write-DeploymentSummary -Action 'Uninstall' -ExitCode $script:ExitCode `
+        -DetectionResult $detectionResult -ValidationResult 'PASS'
+
+    exit $script:ExitCode
+}
+catch {
+    $errorMessage = "Unhandled exception: $($_.Exception.Message)"
+
+    try {
+        Write-Log -Message $errorMessage -Level 'Error'
+        Write-Log -Message "Stack trace: $($_.ScriptStackTrace)" -Level 'Error'
+        Write-DeploymentSummary -Action 'Uninstall' -ExitCode 1 `
+            -ErrorDetail $errorMessage
+    }
+    catch {
+        $fallbackLog = Join-Path $env:ProgramData "IntuneApp_Uninstall_Error.log"
+        "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] $errorMessage" | Out-File -FilePath $fallbackLog -Append
+    }
+
+    exit 1
+}
+
+# --- Helper Functions ---
+
+function Invoke-RegistryUninstall {
+    [CmdletBinding()]
+    param([hashtable]$Config)
+
+    $displayName = $Config.Uninstaller.DisplayName
+    if (-not $displayName) { $displayName = $Config.ApplicationName }
+
+    $searchPaths = @(
+        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+
+    $entry = $null
+    foreach ($path in $searchPaths) {
+        $entry = Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like "*$displayName*" } |
+            Select-Object -First 1
+        if ($entry) { break }
+    }
+
+    if (-not $entry) {
+        Write-Log -Message "No registry uninstall entry found for '$displayName'." -Level 'Warning'
+        return 0
+    }
+
+    $uninstallString = $entry.UninstallString
+    if (-not $uninstallString) {
+        Write-Log -Message "No UninstallString found in registry for '$displayName'." -Level 'Error'
+        return 1
+    }
+
+    Write-Log -Message "Found registry uninstall: $uninstallString" -Level 'Info'
+
+    # Parse the uninstall string
+    $uninstallString = $uninstallString.Trim('"')
+
+    # Handle MsiExec entries
+    if ($uninstallString -match 'msiexec' -or $uninstallString -match '/[Ii]') {
+        $guidMatch = [regex]::Match($uninstallString, '\{[0-9A-Fa-f\-]+\}')
+        if ($guidMatch.Success) {
+            $msiArgs = @('/x', $guidMatch.Value, '/qn', '/norestart')
+            Write-Log -Message "Executing: msiexec.exe $($msiArgs -join ' ')" -Level 'Info'
+            $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs `
+                -Wait -PassThru -NoNewWindow -ErrorAction Stop
+            return $process.ExitCode
+        }
+    }
+
+    # Handle EXE entries - append silent flags
+    $silentFlags = $Config.Uninstaller.Arguments
+    if (-not $silentFlags) { $silentFlags = '/quiet /norestart' }
+
+    # Separate executable and existing arguments
+    if ($uninstallString -match '^"?(.+\.exe)"?\s*(.*)$') {
+        $exePath = $Matches[1]
+        $existingArgs = $Matches[2]
+        $allArgs = "$existingArgs $silentFlags".Trim()
+
+        Write-Log -Message "Executing: $exePath $allArgs" -Level 'Info'
+        $process = Start-Process -FilePath $exePath -ArgumentList $allArgs `
+            -Wait -PassThru -NoNewWindow -ErrorAction Stop
+        return $process.ExitCode
+    }
+
+    Write-Log -Message "Unable to parse uninstall string: $uninstallString" -Level 'Error'
+    return 1
+}
+
+function Stop-ConfiguredProcesses {
+    [CmdletBinding()]
+    param(
+        [string[]]$ProcessNames,
+        [bool]$Force = $false,
+        [int]$TimeoutSeconds = 30
+    )
+
+    foreach ($procName in $ProcessNames) {
+        $processes = Get-Process -Name $procName -ErrorAction SilentlyContinue
+        if (-not $processes) {
+            Write-Log -Message "Process '$procName' not running." -Level 'Info'
+            continue
+        }
+
+        Write-Log -Message "Requesting graceful close for process '$procName'..." -Level 'Info'
+        foreach ($proc in $processes) {
+            try { $proc.CloseMainWindow() | Out-Null } catch {}
+        }
+
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
+            $remaining = Get-Process -Name $procName -ErrorAction SilentlyContinue
+            if (-not $remaining) { break }
+            Start-Sleep -Milliseconds 500
+        }
+
+        $remaining = Get-Process -Name $procName -ErrorAction SilentlyContinue
+        if ($remaining -and $Force) {
+            Write-Log -Message "Force-stopping process '$procName'..." -Level 'Warning'
+            $remaining | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
+        elseif ($remaining) {
+            Write-Log -Message "Process '$procName' still running after timeout." -Level 'Warning'
+        }
+        else {
+            Write-Log -Message "Process '$procName' stopped." -Level 'Info'
+        }
+    }
+}
+
+function Stop-ConfiguredServices {
+    [CmdletBinding()]
+    param([string[]]$ServiceNames)
+
+    foreach ($svcName in $ServiceNames) {
+        $service = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if (-not $service) {
+            Write-Log -Message "Service '$svcName' not found." -Level 'Info'
+            continue
+        }
+        if ($service.Status -eq 'Stopped') {
+            Write-Log -Message "Service '$svcName' already stopped." -Level 'Info'
+            continue
+        }
+        Write-Log -Message "Stopping service '$svcName'..." -Level 'Info'
+        try {
+            Stop-Service -Name $svcName -Force -ErrorAction Stop
+            Write-Log -Message "Service '$svcName' stopped." -Level 'Info'
+        }
+        catch {
+            Write-Log -Message "Failed to stop service '$svcName': $_" -Level 'Warning'
+        }
+    }
+}
