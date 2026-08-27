@@ -111,6 +111,18 @@ if ($Config) {
         Add-ValidationError "CompanyName is empty or missing (required for log paths)"
     }
 
+    # --- Install privilege ---
+    if ($Config.InstallPrivilege) {
+        $validPrivileges = @('System', 'Administrator', 'User')
+        if ($Config.InstallPrivilege -in $validPrivileges) {
+            Add-ValidationPass "InstallPrivilege: $($Config.InstallPrivilege)"
+        } else {
+            Add-ValidationError "Invalid InstallPrivilege: $($Config.InstallPrivilege). Valid: $($validPrivileges -join ', ')"
+        }
+    } else {
+        Add-ValidationWarning "InstallPrivilege not set (defaults to System)"
+    }
+
     # --- Install scope ---
     if ($Config.InstallScope) {
         $validScopes = @('Machine', 'User')
@@ -302,6 +314,35 @@ if ($Config) {
     # --- Logging section ---
     if ($Config.Logging) {
         Add-ValidationPass "Logging section present (Enabled: $($Config.Logging.Enabled))"
+    }
+
+    # --- PATH entries ---
+    if ($Config.PathEntries -and $Config.PathEntries.Count -gt 0) {
+        Add-ValidationPass "PathEntries configured: $($Config.PathEntries.Count) entries"
+        foreach ($pathEntry in $Config.PathEntries) {
+            if ($pathEntry -and -not [System.IO.Path]::IsPathRooted($pathEntry)) {
+                Add-ValidationWarning "PathEntry is not an absolute path: $pathEntry"
+            }
+        }
+    }
+
+    # --- File associations ---
+    if ($Config.FileAssociations -and $Config.FileAssociations.Count -gt 0) {
+        Add-ValidationPass "FileAssociations configured: $($Config.FileAssociations.Count) extension(s)"
+        foreach ($ext in $Config.FileAssociations.Keys) {
+            if (-not $ext.StartsWith('.')) {
+                Add-ValidationWarning "FileAssociation key '$ext' should start with a dot (e.g., '.java')"
+            }
+            $assocExe = $Config.FileAssociations[$ext]
+            if (-not $assocExe -or -not [System.IO.Path]::IsPathRooted($assocExe)) {
+                Add-ValidationWarning "FileAssociation for '$ext' should be an absolute path to the executable"
+            }
+        }
+    }
+
+    # --- Persistent environment variables ---
+    if ($Config.Environment -and $Config.Environment.PersistentVariables -and $Config.Environment.PersistentVariables.Count -gt 0) {
+        Add-ValidationPass "PersistentVariables configured: $($Config.Environment.PersistentVariables.Count) variable(s)"
     }
 
     # --- Security: no secrets ---

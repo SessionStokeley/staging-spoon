@@ -27,11 +27,24 @@
     }
 
     # ================================================================
-    # INSTALL SCOPE
+    # INSTALL SCOPE AND PRIVILEGE
     # ================================================================
     # Machine = per-machine install (HKLM, Program Files)
     # User    = per-user install (HKCU, AppData)
     InstallScope = "Machine"
+
+    # Installation privilege context.
+    # System       = Runs as NT AUTHORITY\SYSTEM (Intune default for Install behavior: System)
+    # Administrator = Requires local admin but not SYSTEM (rare; used for installers
+    #                 that fail under SYSTEM, e.g. some that need a user profile)
+    # User         = Runs under the logged-on user (Intune Install behavior: User)
+    #
+    # This controls which identity the Intune Management Extension uses.
+    # Set "Install behavior" in Intune to match:
+    #   System       -> Install behavior: System
+    #   Administrator -> Install behavior: System  (SYSTEM is admin-equivalent)
+    #   User         -> Install behavior: User
+    InstallPrivilege = "System"
 
     # ================================================================
     # UNINSTALLATION
@@ -146,10 +159,41 @@
     }
 
     # ================================================================
+    # PATH MODIFICATION
+    # ================================================================
+    # Entries to add to the system PATH after installation.
+    # Entries are added to the Machine-level PATH (persistent across reboots).
+    # On uninstall, these entries are removed.
+    PathEntries = @(
+        # "C:\Program Files\Example\bin"
+    )
+
+    # ================================================================
+    # FILE ASSOCIATIONS
+    # ================================================================
+    # Map file extensions to the application executable.
+    # Each entry creates/updates the registry association for that extension.
+    # On uninstall, associations created by this framework are removed.
+    FileAssociations = @{
+        # Extension = full path to the executable that opens it
+        # ".java"   = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+        # ".kt"     = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+        # ".kts"    = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+        # ".gradle" = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+    }
+
+    # ================================================================
     # ENVIRONMENT
     # ================================================================
     Environment = @{
+        # Process-scope variables set before the installer runs
         Variables = @{}
+
+        # Persistent Machine-level environment variables created after installation.
+        # On uninstall, these are removed.
+        PersistentVariables = @{
+            # "JAVA_HOME" = "C:\Program Files\Java\jdk"
+        }
     }
 
     # ================================================================

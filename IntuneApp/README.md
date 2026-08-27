@@ -47,7 +47,10 @@ Configuration.psd1
       ├── Upgrade (RemovePreviousVersion, AllowDowngrade)
       ├── Logging (RootPath, Rotation, Transcript)
       ├── Execution (RequireSystem, AllowInteractive)
-      ├── Environment (Variables)
+      ├── Environment (Variables, PersistentVariables)
+      ├── InstallPrivilege (System, Administrator, User)
+      ├── PathEntries (System PATH modifications)
+      ├── FileAssociations (Extension → Executable)
       └── Testing (SkipDetection, SkipValidation, Debug)
 ```
 
@@ -217,7 +220,26 @@ To supersede an older version:
         RetainLogFiles    = 10
     }
 
-    Environment = @{ Variables = @{} }
+    InstallPrivilege = "System"
+
+    PathEntries = @(
+        "C:\Program Files\JetBrains\IntelliJ IDEA\bin"
+    )
+
+    FileAssociations = @{
+        ".java"   = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+        ".kt"     = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+        ".kts"    = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+        ".gradle" = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+    }
+
+    Environment = @{
+        Variables = @{}
+        PersistentVariables = @{
+            "IDEA_HOME" = "C:\Program Files\JetBrains\IntelliJ IDEA"
+        }
+    }
+
     Execution = @{
         RequireSystem    = $true
         AllowInteractive = $false
@@ -347,6 +369,64 @@ Requirements = @{
     # ...
 }
 ```
+
+## Installation Privilege
+
+The `InstallPrivilege` setting controls the identity context for installation:
+
+| Value | Identity | Intune Install Behavior |
+|---|---|---|
+| `System` | NT AUTHORITY\SYSTEM | System |
+| `Administrator` | Local admin (not SYSTEM) | System |
+| `User` | Logged-on user | User |
+
+```powershell
+InstallPrivilege = "System"
+```
+
+Most applications use `System`. Use `Administrator` for installers that fail under SYSTEM (e.g., those requiring a user profile). Use `User` for per-user installations.
+
+## PATH Modification
+
+Add entries to the system or user PATH after installation. Entries are automatically removed on uninstall.
+
+```powershell
+PathEntries = @(
+    "C:\Program Files\Example\bin"
+    "C:\Program Files\Example\tools"
+)
+```
+
+The scope (`Machine` or `User`) follows the `InstallScope` setting. Duplicate entries are skipped.
+
+## File Associations
+
+Map file extensions to the application executable. Associations are automatically removed on uninstall, restoring previous defaults.
+
+```powershell
+FileAssociations = @{
+    ".java"   = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+    ".kt"     = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+    ".kts"    = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+    ".gradle" = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+}
+```
+
+## Persistent Environment Variables
+
+Set machine- or user-level environment variables that persist across reboots. These are automatically removed on uninstall.
+
+```powershell
+Environment = @{
+    Variables = @{}
+    PersistentVariables = @{
+        "JAVA_HOME" = "C:\Program Files\Java\jdk"
+        "MAVEN_HOME" = "C:\Program Files\Apache\Maven"
+    }
+}
+```
+
+The scope follows `InstallScope`. `Variables` are process-scoped (set before the installer runs). `PersistentVariables` are created after installation and survive reboots.
 
 ## Logging
 

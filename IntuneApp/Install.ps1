@@ -46,10 +46,20 @@ try {
 
     Write-Log -Message "Package path: $PackagePath" -Level 'Info'
     Write-Log -Message "Install scope: $($Config.InstallScope)" -Level 'Info'
+    Write-Log -Message "Install privilege: $($Config.InstallPrivilege)" -Level 'Info'
 
-    # Validate execution context
+    # Validate execution context based on InstallPrivilege
     $allowNonSystem = [bool]$Config.Testing.AllowNonSystemExecution
-    $requireSystem = if ($Config.Execution) { $Config.Execution.RequireSystem } else { $true }
+    $installPrivilege = if ($Config.InstallPrivilege) { $Config.InstallPrivilege } else { 'System' }
+    $requireSystem = switch ($installPrivilege) {
+        'System'        { $true }
+        'Administrator' { $false }
+        'User'          { $false }
+        default         { $true }
+    }
+    if ($Config.Execution -and $null -ne $Config.Execution.RequireSystem) {
+        $requireSystem = $Config.Execution.RequireSystem
+    }
 
     if ($requireSystem -and -not (Test-SystemContext -AllowNonSystem $allowNonSystem)) {
         $script:ExitCode = 1
@@ -260,6 +270,24 @@ try {
         exit $script:ExitCode
     }
 
+    # Post-install: PATH modifications
+    if ($Config.PathEntries -and $Config.PathEntries.Count -gt 0) {
+        Write-Log -Message "Applying PATH modifications..." -Level 'Info'
+        Add-PathEntries -Entries $Config.PathEntries -Scope $Config.InstallScope
+    }
+
+    # Post-install: File associations
+    if ($Config.FileAssociations -and $Config.FileAssociations.Count -gt 0) {
+        Write-Log -Message "Configuring file associations..." -Level 'Info'
+        Set-FileAssociations -Associations $Config.FileAssociations -ApplicationName $Config.ApplicationName
+    }
+
+    # Post-install: Persistent environment variables
+    if ($Config.Environment -and $Config.Environment.PersistentVariables -and $Config.Environment.PersistentVariables.Count -gt 0) {
+        Write-Log -Message "Setting persistent environment variables..." -Level 'Info'
+        Set-PersistentEnvironmentVariables -Variables $Config.Environment.PersistentVariables -Scope $Config.InstallScope
+    }
+
     # Post-install validation
     if (-not $Config.Testing.SkipValidation) {
         Write-Log -Message "Running post-install validation..." -Level 'Info'
@@ -377,6 +405,186 @@ function Stop-ConfiguredServices {
         }
         catch {
             Write-Log -Message "Failed to stop service '$svcName': $_" -Level 'Warning'
+        }
+    }
+}
+
+function Add-PathEntries {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string[]]$Entries,
+        [string]$Scope = 'Machine'
+    )
+
+    $target = if ($Scope -eq 'User') { 'User' } else { 'Machine' }
+    $currentPath = [System.Environment]::GetEnvironmentVariable('Path', $target)
+    $pathItems = $currentPath -split ';' | Where-Object { $_ -ne '' }
+    $changed = $false
+
+    foreach ($entry in $Entries) {
+        if (-not $entry) { continue }
+        $normalized = $entry.TrimEnd('\')
+        $exists = $pathItems | Where-Object { $_.TrimEnd('\') -eq $normalized }
+        if ($exists) {
+            Write-Log -Message "PATH already contains: $entry" -Level 'Info'
+            continue
+        }
+        $pathItems += $entry
+        $changed = $true
+        Write-Log -Message "Added to PATH ($target): $entry" -Level 'Info'
+    }
+
+    if ($changed) {
+        $newPath = ($pathItems -join ';')
+        [System.Environment]::SetEnvironmentVariable('Path', $newPath, $target)
+        Write-Log -Message "PATH updated successfully." -Level 'Info'
+    }
+}
+
+function Remove-PathEntries {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string[]]$Entries,
+        [string]$Scope = 'Machine'
+    )
+
+    $target = if ($Scope -eq 'User') { 'User' } else { 'Machine' }
+    $currentPath = [System.Environment]::GetEnvironmentVariable('Path', $target)
+    $pathItems = $currentPath -split ';' | Where-Object { $_ -ne '' }
+    $changed = $false
+
+    foreach ($entry in $Entries) {
+        if (-not $entry) { continue }
+        $normalized = $entry.TrimEnd('\')
+        $before = $pathItems.Count
+        $pathItems = @($pathItems | Where-Object { $_.TrimEnd('\') -ne $normalized })
+        if ($pathItems.Count -lt $before) {
+            $changed = $true
+            Write-Log -Message "Removed from PATH ($target): $entry" -Level 'Info'
+        }
+    }
+
+    if ($changed) {
+        $newPath = ($pathItems -join ';')
+        [System.Environment]::SetEnvironmentVariable('Path', $newPath, $target)
+        Write-Log -Message "PATH updated successfully." -Level 'Info'
+    }
+}
+
+function Set-FileAssociations {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Associations,
+        [Parameter(Mandatory)][string]$ApplicationName
+    )
+
+    $progIdBase = ($ApplicationName -replace '[^a-zA-Z0-9]', '') + '.AssocFile'
+
+    foreach ($ext in $Associations.Keys) {
+        $exePath = $Associations[$ext]
+        $progId = "$progIdBase$ext"
+
+        try {
+            $extKey = "HKLM:\Software\Classes\$ext"
+            if (-not (Test-Path $extKey)) {
+                New-Item -Path $extKey -Force | Out-Null
+            }
+            $previousDefault = (Get-ItemProperty -Path $extKey -Name '(Default)' -ErrorAction SilentlyContinue).'(Default)'
+            if (-not $previousDefault) { $previousDefault = '' }
+            Set-ItemProperty -Path $extKey -Name 'IntuneApp_PreviousDefault' -Value $previousDefault
+            Set-ItemProperty -Path $extKey -Name '(Default)' -Value $progId
+
+            $progKey = "HKLM:\Software\Classes\$progId\shell\open\command"
+            if (-not (Test-Path $progKey)) {
+                New-Item -Path $progKey -Force | Out-Null
+            }
+            Set-ItemProperty -Path $progKey -Name '(Default)' -Value "`"$exePath`" `"%1`""
+
+            Write-Log -Message "File association: $ext -> $exePath (ProgId: $progId)" -Level 'Info'
+        }
+        catch {
+            Write-Log -Message "Failed to set file association for $ext : $_" -Level 'Warning'
+        }
+    }
+}
+
+function Remove-FileAssociations {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Associations,
+        [Parameter(Mandatory)][string]$ApplicationName
+    )
+
+    $progIdBase = ($ApplicationName -replace '[^a-zA-Z0-9]', '') + '.AssocFile'
+
+    foreach ($ext in $Associations.Keys) {
+        $progId = "$progIdBase$ext"
+
+        try {
+            $extKey = "HKLM:\Software\Classes\$ext"
+            $currentDefault = (Get-ItemProperty -Path $extKey -Name '(Default)' -ErrorAction SilentlyContinue).'(Default)'
+
+            if ($currentDefault -eq $progId) {
+                $previous = (Get-ItemProperty -Path $extKey -Name 'IntuneApp_PreviousDefault' -ErrorAction SilentlyContinue).'IntuneApp_PreviousDefault'
+                if ($previous) {
+                    Set-ItemProperty -Path $extKey -Name '(Default)' -Value $previous
+                }
+                else {
+                    Remove-ItemProperty -Path $extKey -Name '(Default)' -ErrorAction SilentlyContinue
+                }
+                Remove-ItemProperty -Path $extKey -Name 'IntuneApp_PreviousDefault' -ErrorAction SilentlyContinue
+            }
+
+            $progKey = "HKLM:\Software\Classes\$progId"
+            if (Test-Path $progKey) {
+                Remove-Item -Path $progKey -Recurse -Force
+            }
+
+            Write-Log -Message "Removed file association: $ext (ProgId: $progId)" -Level 'Info'
+        }
+        catch {
+            Write-Log -Message "Failed to remove file association for $ext : $_" -Level 'Warning'
+        }
+    }
+}
+
+function Set-PersistentEnvironmentVariables {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Variables,
+        [string]$Scope = 'Machine'
+    )
+
+    $target = if ($Scope -eq 'User') { 'User' } else { 'Machine' }
+
+    foreach ($key in $Variables.Keys) {
+        $value = $Variables[$key]
+        try {
+            [System.Environment]::SetEnvironmentVariable($key, $value, $target)
+            Write-Log -Message "Set persistent env var ($target): $key = $value" -Level 'Info'
+        }
+        catch {
+            Write-Log -Message "Failed to set env var '$key': $_" -Level 'Warning'
+        }
+    }
+}
+
+function Remove-PersistentEnvironmentVariables {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Variables,
+        [string]$Scope = 'Machine'
+    )
+
+    $target = if ($Scope -eq 'User') { 'User' } else { 'Machine' }
+
+    foreach ($key in $Variables.Keys) {
+        try {
+            [System.Environment]::SetEnvironmentVariable($key, $null, $target)
+            Write-Log -Message "Removed persistent env var ($target): $key" -Level 'Info'
+        }
+        catch {
+            Write-Log -Message "Failed to remove env var '$key': $_" -Level 'Warning'
         }
     }
 }

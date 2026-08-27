@@ -16,15 +16,32 @@ function Test-PreInstallValidation {
 
     $failures = @()
 
-    # Validate execution context
+    # Validate execution context based on InstallPrivilege
+    $installPrivilege = if ($Configuration.InstallPrivilege) { $Configuration.InstallPrivilege } else { 'System' }
+    $requireSystem = switch ($installPrivilege) {
+        'System'        { $true }
+        'Administrator' { $false }
+        'User'          { $false }
+        default         { $true }
+    }
     $execution = $Configuration.Execution
-    if ($execution.RequireSystem) {
+    if ($execution -and $null -ne $execution.RequireSystem) {
+        $requireSystem = $execution.RequireSystem
+    }
+
+    if ($requireSystem) {
         $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
         if ($identity.Name -ne 'NT AUTHORITY\SYSTEM') {
             if (-not $Configuration.Testing.AllowNonSystemExecution) {
                 $failures += "Not running as SYSTEM. Current identity: $($identity.Name)"
             }
         }
+    }
+
+    # Validate InstallPrivilege value
+    $validPrivileges = @('System', 'Administrator', 'User')
+    if ($Configuration.InstallPrivilege -and $Configuration.InstallPrivilege -notin $validPrivileges) {
+        $failures += "Invalid InstallPrivilege: $($Configuration.InstallPrivilege). Valid: $($validPrivileges -join ', ')"
     }
 
     # Reject interactive execution if disallowed

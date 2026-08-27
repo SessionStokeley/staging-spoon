@@ -45,9 +45,18 @@ try {
 
     Write-Log -Message "Package path: $PackagePath" -Level 'Info'
 
-    # Validate execution context
+    # Validate execution context based on InstallPrivilege
     $allowNonSystem = [bool]$Config.Testing.AllowNonSystemExecution
-    $requireSystem = if ($Config.Execution) { $Config.Execution.RequireSystem } else { $true }
+    $installPrivilege = if ($Config.InstallPrivilege) { $Config.InstallPrivilege } else { 'System' }
+    $requireSystem = switch ($installPrivilege) {
+        'System'        { $true }
+        'Administrator' { $false }
+        'User'          { $false }
+        default         { $true }
+    }
+    if ($Config.Execution -and $null -ne $Config.Execution.RequireSystem) {
+        $requireSystem = $Config.Execution.RequireSystem
+    }
 
     if ($requireSystem -and -not (Test-SystemContext -AllowNonSystem $allowNonSystem)) {
         $script:ExitCode = 1
@@ -210,6 +219,24 @@ try {
         Write-DeploymentSummary -Action 'Uninstall' -ExitCode $script:ExitCode `
             -ErrorDetail "Uninstaller returned exit code $uninstallExitCode"
         exit $script:ExitCode
+    }
+
+    # Post-uninstall: Remove PATH entries
+    if ($Config.PathEntries -and $Config.PathEntries.Count -gt 0) {
+        Write-Log -Message "Removing PATH entries..." -Level 'Info'
+        Remove-PathEntries -Entries $Config.PathEntries -Scope $Config.InstallScope
+    }
+
+    # Post-uninstall: Remove file associations
+    if ($Config.FileAssociations -and $Config.FileAssociations.Count -gt 0) {
+        Write-Log -Message "Removing file associations..." -Level 'Info'
+        Remove-FileAssociations -Associations $Config.FileAssociations -ApplicationName $Config.ApplicationName
+    }
+
+    # Post-uninstall: Remove persistent environment variables
+    if ($Config.Environment -and $Config.Environment.PersistentVariables -and $Config.Environment.PersistentVariables.Count -gt 0) {
+        Write-Log -Message "Removing persistent environment variables..." -Level 'Info'
+        Remove-PersistentEnvironmentVariables -Variables $Config.Environment.PersistentVariables -Scope $Config.InstallScope
     }
 
     # Post-uninstall detection

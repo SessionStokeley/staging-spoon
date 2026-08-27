@@ -160,6 +160,32 @@ if ($Test -in 'All', 'Package') {
             Write-TestResult -Name "Architecture is array format" -Passed $isArray `
                 -Detail $(if ($isArray) { "Values: $($arch -join ', ')" } else { "Should be @('x64') not '$arch'" })
         }
+
+        # InstallPrivilege validation
+        if ($Config.InstallPrivilege) {
+            $validPrivileges = @('System', 'Administrator', 'User')
+            $privValid = $Config.InstallPrivilege -in $validPrivileges
+            Write-TestResult -Name "InstallPrivilege is valid" -Passed $privValid `
+                -Detail "Value: $($Config.InstallPrivilege)"
+        }
+
+        # PathEntries validation
+        if ($Config.PathEntries -and $Config.PathEntries.Count -gt 0) {
+            Write-TestResult -Name "PathEntries configured" -Passed $true `
+                -Detail "$($Config.PathEntries.Count) entries: $($Config.PathEntries -join ', ')"
+        }
+
+        # FileAssociations validation
+        if ($Config.FileAssociations -and $Config.FileAssociations.Count -gt 0) {
+            Write-TestResult -Name "FileAssociations configured" -Passed $true `
+                -Detail "$($Config.FileAssociations.Count) extension(s)"
+        }
+
+        # Persistent environment variables
+        if ($Config.Environment -and $Config.Environment.PersistentVariables -and $Config.Environment.PersistentVariables.Count -gt 0) {
+            Write-TestResult -Name "PersistentVariables configured" -Passed $true `
+                -Detail "$($Config.Environment.PersistentVariables.Count) variable(s)"
+        }
     }
 }
 
