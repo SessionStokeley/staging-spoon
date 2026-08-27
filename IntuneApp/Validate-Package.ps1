@@ -60,6 +60,7 @@ $requiredFiles = @{
     'Validation.ps1'     = 'Validation framework'
     'Logging.ps1'        = 'Logging framework'
     'Requirements.ps1'   = 'Requirements validation'
+    'Helpers.ps1'        = 'Shared helper functions'
 }
 
 foreach ($file in $requiredFiles.GetEnumerator()) {
@@ -92,17 +93,22 @@ if (Test-Path $configPath) {
 }
 
 if ($Config) {
-    # --- Application info ---
-    if ($Config.ApplicationName) {
-        Add-ValidationPass "ApplicationName: $($Config.ApplicationName)"
-    } else {
-        Add-ValidationError "ApplicationName is empty or missing"
-    }
+    # --- Application metadata ---
+    if ($Config.Application) {
+        if ($Config.Application.Name) {
+            Add-ValidationPass "Application.Name: $($Config.Application.Name)"
+        } else {
+            Add-ValidationError "Application.Name is empty or missing"
+        }
 
-    if ($Config.ApplicationVersion) {
-        Add-ValidationPass "ApplicationVersion: $($Config.ApplicationVersion)"
-    } else {
-        Add-ValidationWarning "ApplicationVersion is empty"
+        if ($Config.Application.Version) {
+            Add-ValidationPass "Application.Version: $($Config.Application.Version)"
+        } else {
+            Add-ValidationWarning "Application.Version is empty"
+        }
+    }
+    else {
+        Add-ValidationError "Application section missing from configuration"
     }
 
     if ($Config.CompanyName) {
@@ -111,42 +117,22 @@ if ($Config) {
         Add-ValidationError "CompanyName is empty or missing (required for log paths)"
     }
 
-    # --- Install privilege ---
-    if ($Config.InstallPrivilege) {
-        $validPrivileges = @('System', 'Administrator', 'User')
-        if ($Config.InstallPrivilege -in $validPrivileges) {
-            Add-ValidationPass "InstallPrivilege: $($Config.InstallPrivilege)"
-        } else {
-            Add-ValidationError "Invalid InstallPrivilege: $($Config.InstallPrivilege). Valid: $($validPrivileges -join ', ')"
-        }
+    # --- Privileges ---
+    if ($Config.Privileges) {
+        Add-ValidationPass "Privileges: InstallAsSystem=$($Config.Privileges.InstallAsSystem), RequireElevation=$($Config.Privileges.RequireElevation)"
     } else {
-        Add-ValidationWarning "InstallPrivilege not set (defaults to System)"
-    }
-
-    # --- Install scope ---
-    if ($Config.InstallScope) {
-        $validScopes = @('Machine', 'User')
-        if ($Config.InstallScope -in $validScopes) {
-            Add-ValidationPass "InstallScope: $($Config.InstallScope)"
-        } else {
-            Add-ValidationError "Invalid InstallScope: $($Config.InstallScope). Valid: $($validScopes -join ', ')"
-        }
-    } else {
-        Add-ValidationWarning "InstallScope not set (defaults to Machine)"
+        Add-ValidationWarning "Privileges section not set (defaults to InstallAsSystem=true)"
     }
 
     # --- Installer section ---
     if ($Config.Installer) {
-        $installerDir = if ($Config.Installer.WorkingDirectory) { $Config.Installer.WorkingDirectory } else { 'Files' }
-
         if ($Config.Installer.File) {
-            $installerPath = Join-Path $PackagePath (Join-Path $installerDir $Config.Installer.File)
+            $installerPath = Join-Path $PackagePath (Join-Path 'Files' $Config.Installer.File)
             if (Test-Path $installerPath) {
                 Add-ValidationPass "Installer file exists: $($Config.Installer.File)"
                 $fileSize = (Get-Item $installerPath).Length / 1MB
                 Add-ValidationPass "Installer size: $([math]::Round($fileSize, 2)) MB"
 
-                # SHA256 check
                 if ($Config.Installer.SHA256) {
                     $actualHash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash
                     if ($actualHash -eq $Config.Installer.SHA256) {
@@ -180,7 +166,6 @@ if ($Config) {
             Add-ValidationWarning "No installer arguments configured (ensure silent install)"
         }
 
-        # MSI-specific: ProductCode required
         if ($installerType -eq 'MSI' -and -not $Config.Installer.ProductCode) {
             Add-ValidationError "MSI installer requires ProductCode"
         }
@@ -212,8 +197,9 @@ if ($Config) {
                 }
             }
             'Registry' {
-                if (-not $Config.Uninstaller.DisplayName -and -not $Config.ApplicationName) {
-                    Add-ValidationWarning "Registry uninstall without DisplayName will fall back to ApplicationName"
+                $appName = if ($Config.Application) { $Config.Application.Name } else { $null }
+                if (-not $Config.Uninstaller.DisplayName -and -not $appName) {
+                    Add-ValidationWarning "Registry uninstall without DisplayName will fall back to Application.Name"
                 }
             }
             'Custom' {
@@ -237,7 +223,6 @@ if ($Config) {
             Add-ValidationError "Invalid detection type: $($Config.Detection.Type)"
         }
 
-        # VersionComparison
         if ($Config.Detection.VersionComparison) {
             $validComparisons = @('Equal', 'GreaterThan', 'GreaterThanOrEqual', 'LessThan', 'LessThanOrEqual')
             if ($Config.Detection.VersionComparison -in $validComparisons) {
@@ -274,16 +259,6 @@ if ($Config) {
         Add-ValidationError "Detection section missing - Intune requires detection rules"
     }
 
-    # --- ProcessManagement section ---
-    if ($Config.ProcessManagement) {
-        Add-ValidationPass "ProcessManagement section present (ForceStop: $($Config.ProcessManagement.ForceStop))"
-    }
-
-    # --- Execution section ---
-    if ($Config.Execution) {
-        Add-ValidationPass "Execution section present (RequireSystem: $($Config.Execution.RequireSystem))"
-    }
-
     # --- Architecture validation ---
     if ($Config.Requirements.Architecture) {
         if ($Config.Requirements.Architecture -is [array]) {
@@ -291,6 +266,71 @@ if ($Config) {
         } else {
             Add-ValidationWarning "Architecture should be an array: @('$($Config.Requirements.Architecture)') instead of '$($Config.Requirements.Architecture)'"
         }
+    }
+
+    # --- File associations ---
+    if ($Config.FileAssociations) {
+        $validModes = @('Installer', 'Framework', 'None')
+        if ($Config.FileAssociations.Mode -in $validModes) {
+            Add-ValidationPass "FileAssociations.Mode: $($Config.FileAssociations.Mode)"
+        } else {
+            Add-ValidationError "Invalid FileAssociations.Mode: $($Config.FileAssociations.Mode). Valid: $($validModes -join ', ')"
+        }
+
+        if ($Config.FileAssociations.Mode -eq 'Framework') {
+            if ($Config.FileAssociations.Associations -and $Config.FileAssociations.Associations.Count -gt 0) {
+                Add-ValidationPass "Framework associations: $($Config.FileAssociations.Associations.Count) extension(s)"
+                foreach ($ext in $Config.FileAssociations.Associations.Keys) {
+                    if (-not $ext.StartsWith('.')) {
+                        Add-ValidationWarning "FileAssociation key '$ext' should start with a dot"
+                    }
+                }
+            } else {
+                Add-ValidationWarning "FileAssociations.Mode is Framework but no Associations defined"
+            }
+        }
+    }
+
+    # --- Environment ---
+    if ($Config.Environment) {
+        if ($Config.Environment.AddToMachinePath -and $Config.Environment.AddToMachinePath.Count -gt 0) {
+            Add-ValidationPass "AddToMachinePath: $($Config.Environment.AddToMachinePath.Count) entries"
+            foreach ($pathEntry in $Config.Environment.AddToMachinePath) {
+                if ($pathEntry -and -not [System.IO.Path]::IsPathRooted($pathEntry)) {
+                    Add-ValidationWarning "PATH entry is not an absolute path: $pathEntry"
+                }
+            }
+        }
+        if ($Config.Environment.Variables -and $Config.Environment.Variables.Count -gt 0) {
+            Add-ValidationPass "Environment variables: $($Config.Environment.Variables.Count) variable(s)"
+        }
+    }
+
+    # --- Registry ---
+    if ($Config.Registry) {
+        if ($Config.Registry.Add -and $Config.Registry.Add.Count -gt 0) {
+            Add-ValidationPass "Registry.Add: $($Config.Registry.Add.Count) entries"
+        }
+        if ($Config.Registry.Remove -and $Config.Registry.Remove.Count -gt 0) {
+            Add-ValidationPass "Registry.Remove: $($Config.Registry.Remove.Count) entries"
+        }
+    }
+
+    # --- Shortcuts ---
+    if ($Config.Shortcuts) {
+        if ($Config.Shortcuts.Create -and $Config.Shortcuts.Create.Count -gt 0) {
+            Add-ValidationPass "Shortcuts.Create: $($Config.Shortcuts.Create.Count) shortcuts"
+        }
+    }
+
+    # --- UserExperience ---
+    if ($Config.UserExperience) {
+        Add-ValidationPass "UserExperience: StartMenu=$($Config.UserExperience.CreateStartMenuShortcut), Desktop=$($Config.UserExperience.CreateDesktopShortcut)"
+    }
+
+    # --- PostInstall ---
+    if ($Config.PostInstall) {
+        Add-ValidationPass "PostInstall: Validate=$($Config.PostInstall.Validate), Actions=$($Config.PostInstall.Actions.Count)"
     }
 
     # --- Return codes ---
@@ -308,41 +348,12 @@ if ($Config) {
 
     # --- Upgrade section ---
     if ($Config.Upgrade) {
-        Add-ValidationPass "Upgrade section present (RemovePreviousVersion: $($Config.Upgrade.RemovePreviousVersion), AllowDowngrade: $($Config.Upgrade.AllowDowngrade))"
+        Add-ValidationPass "Upgrade: RemovePreviousVersion=$($Config.Upgrade.RemovePreviousVersion), AllowDowngrade=$($Config.Upgrade.AllowDowngrade)"
     }
 
     # --- Logging section ---
     if ($Config.Logging) {
-        Add-ValidationPass "Logging section present (Enabled: $($Config.Logging.Enabled))"
-    }
-
-    # --- PATH entries ---
-    if ($Config.PathEntries -and $Config.PathEntries.Count -gt 0) {
-        Add-ValidationPass "PathEntries configured: $($Config.PathEntries.Count) entries"
-        foreach ($pathEntry in $Config.PathEntries) {
-            if ($pathEntry -and -not [System.IO.Path]::IsPathRooted($pathEntry)) {
-                Add-ValidationWarning "PathEntry is not an absolute path: $pathEntry"
-            }
-        }
-    }
-
-    # --- File associations ---
-    if ($Config.FileAssociations -and $Config.FileAssociations.Count -gt 0) {
-        Add-ValidationPass "FileAssociations configured: $($Config.FileAssociations.Count) extension(s)"
-        foreach ($ext in $Config.FileAssociations.Keys) {
-            if (-not $ext.StartsWith('.')) {
-                Add-ValidationWarning "FileAssociation key '$ext' should start with a dot (e.g., '.java')"
-            }
-            $assocExe = $Config.FileAssociations[$ext]
-            if (-not $assocExe -or -not [System.IO.Path]::IsPathRooted($assocExe)) {
-                Add-ValidationWarning "FileAssociation for '$ext' should be an absolute path to the executable"
-            }
-        }
-    }
-
-    # --- Persistent environment variables ---
-    if ($Config.Environment -and $Config.Environment.PersistentVariables -and $Config.Environment.PersistentVariables.Count -gt 0) {
-        Add-ValidationPass "PersistentVariables configured: $($Config.Environment.PersistentVariables.Count) variable(s)"
+        Add-ValidationPass "Logging: Enabled=$($Config.Logging.Enabled)"
     }
 
     # --- Security: no secrets ---
@@ -383,7 +394,7 @@ else {
 Write-Host ""
 Write-Host "Checking script syntax..." -ForegroundColor White
 
-$scripts = @('Install.ps1', 'Uninstall.ps1', 'Detection.ps1', 'Validation.ps1', 'Logging.ps1', 'Requirements.ps1')
+$scripts = @('Install.ps1', 'Uninstall.ps1', 'Detection.ps1', 'Validation.ps1', 'Logging.ps1', 'Requirements.ps1', 'Helpers.ps1')
 foreach ($script in $scripts) {
     $scriptPath = Join-Path $PackagePath $script
     if (Test-Path $scriptPath) {

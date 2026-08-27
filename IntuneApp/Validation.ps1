@@ -4,7 +4,7 @@
     Generic validation framework for Intune Win32 deployments.
 .DESCRIPTION
     Performs pre-installation and post-installation validation checks
-    using the Execution and PostInstallValidation sections of Configuration.psd1.
+    using the Privileges and PostInstall sections of Configuration.psd1.
 #>
 
 function Test-PreInstallValidation {
@@ -16,18 +16,9 @@ function Test-PreInstallValidation {
 
     $failures = @()
 
-    # Validate execution context based on InstallPrivilege
-    $installPrivilege = if ($Configuration.InstallPrivilege) { $Configuration.InstallPrivilege } else { 'System' }
-    $requireSystem = switch ($installPrivilege) {
-        'System'        { $true }
-        'Administrator' { $false }
-        'User'          { $false }
-        default         { $true }
-    }
-    $execution = $Configuration.Execution
-    if ($execution -and $null -ne $execution.RequireSystem) {
-        $requireSystem = $execution.RequireSystem
-    }
+    # Validate execution context based on Privileges
+    $privileges = $Configuration.Privileges
+    $requireSystem = if ($privileges) { [bool]$privileges.InstallAsSystem } else { $true }
 
     if ($requireSystem) {
         $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -38,45 +29,20 @@ function Test-PreInstallValidation {
         }
     }
 
-    # Validate InstallPrivilege value
-    $validPrivileges = @('System', 'Administrator', 'User')
-    if ($Configuration.InstallPrivilege -and $Configuration.InstallPrivilege -notin $validPrivileges) {
-        $failures += "Invalid InstallPrivilege: $($Configuration.InstallPrivilege). Valid: $($validPrivileges -join ', ')"
-    }
-
-    # Reject interactive execution if disallowed
-    if ($execution -and -not $execution.AllowInteractive) {
-        $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-        if ($sessionId -ne 0 -and -not $Configuration.Testing.AllowNonSystemExecution) {
-            Write-Log -Message "Running in interactive session $sessionId (non-interactive expected)." -Level 'Warning'
-        }
-    }
-
     # Validate configuration has required sections
+    if (-not $Configuration.Application -or -not $Configuration.Application.Name) {
+        $failures += "Configuration missing Application.Name."
+    }
+
     if (-not $Configuration.Installer) {
         $failures += "Configuration missing Installer section."
     }
 
-    if (-not $Configuration.ApplicationName) {
-        $failures += "Configuration missing ApplicationName."
-    }
-
-    # Validate install scope
-    if ($Configuration.InstallScope) {
-        $validScopes = @('Machine', 'User')
-        if ($Configuration.InstallScope -notin $validScopes) {
-            $failures += "Invalid InstallScope: $($Configuration.InstallScope). Valid: $($validScopes -join ', ')"
-        }
-    }
-
     # Validate installer file exists
     if ($Configuration.Installer) {
-        $installerDir = $Configuration.Installer.WorkingDirectory
-        if (-not $installerDir) { $installerDir = 'Files' }
-        $installerPath = Join-Path $PackagePath (Join-Path $installerDir $Configuration.Installer.File)
+        $installerPath = Join-Path $PackagePath (Join-Path 'Files' $Configuration.Installer.File)
 
         if ($Configuration.Installer.Type -eq 'MSI') {
-            # MSI must have either a file or a product code
             if ($Configuration.Installer.File -and -not (Test-Path $installerPath)) {
                 $failures += "MSI installer file not found: $installerPath"
             }
@@ -101,16 +67,9 @@ function Test-PreInstallValidation {
             }
         }
 
-        # Validate MSI ProductCode is present when Type = MSI
         if ($Configuration.Installer.Type -eq 'MSI' -and -not $Configuration.Installer.ProductCode) {
             Write-Log -Message "MSI installer without ProductCode - may be needed for uninstall." -Level 'Warning'
         }
-    }
-
-    # Validate required directories
-    $filesDir = Join-Path $PackagePath 'Files'
-    if (-not (Test-Path $filesDir)) {
-        Write-Log -Message "Files directory not found at $filesDir (may not be required)." -Level 'Warning'
     }
 
     # Validate disk space
@@ -140,7 +99,7 @@ function Test-PreInstallValidation {
         }
     }
 
-    # Validate architecture compatibility (array)
+    # Validate architecture compatibility
     if ($Configuration.Requirements.Architecture) {
         $accepted = $Configuration.Requirements.Architecture
         if ($accepted -is [string]) { $accepted = @($accepted) }
@@ -155,12 +114,11 @@ function Test-PreInstallValidation {
     if ($Configuration.Upgrade -and $Configuration.Detection -and -not $Configuration.Testing.SkipDetection) {
         $existingDetection = Invoke-Detection -DetectionConfig $Configuration.Detection
         if ($existingDetection.Detected -and -not $Configuration.Upgrade.AllowDowngrade) {
-            if ($Configuration.Detection.MinimumVersion -and $Configuration.ApplicationVersion) {
+            if ($Configuration.Detection.MinimumVersion -and $Configuration.Application.Version) {
                 try {
-                    $targetVersion = [version]$Configuration.ApplicationVersion
+                    $targetVersion = [version]$Configuration.Application.Version
                     $existingVersion = $null
 
-                    # Try to extract version from detection detail
                     if ($existingDetection.Detail -match 'Version:\s*([\d.]+)') {
                         $existingVersion = [version]$Matches[1]
                     }
@@ -173,6 +131,14 @@ function Test-PreInstallValidation {
                     Write-Log -Message "Could not compare versions for downgrade check: $_" -Level 'Warning'
                 }
             }
+        }
+    }
+
+    # Validate FileAssociations Mode
+    if ($Configuration.FileAssociations -and $Configuration.FileAssociations.Mode) {
+        $validModes = @('Installer', 'Framework', 'None')
+        if ($Configuration.FileAssociations.Mode -notin $validModes) {
+            $failures += "Invalid FileAssociations.Mode: $($Configuration.FileAssociations.Mode). Valid: $($validModes -join ', ')"
         }
     }
 
@@ -195,8 +161,8 @@ function Test-PostInstallValidation {
         [Parameter(Mandatory)][int]$InstallerExitCode
     )
 
-    # Skip if validation is disabled
-    if ($Configuration.PostInstallValidation -and $Configuration.PostInstallValidation.Enabled -eq $false) {
+    # Skip if PostInstall.Validate is false
+    if ($Configuration.PostInstall -and $Configuration.PostInstall.Validate -eq $false) {
         Write-Log -Message "Post-install validation disabled in configuration." -Level 'Info'
         return [PSCustomObject]@{ Passed = $true; Failures = @() }
     }
@@ -213,32 +179,8 @@ function Test-PostInstallValidation {
         $failures += "Installer returned exit code $InstallerExitCode (not in configured success codes)"
     }
 
-    # Validate expected files
-    if ($Configuration.PostInstallValidation.ExpectedFiles) {
-        foreach ($expectedFile in $Configuration.PostInstallValidation.ExpectedFiles) {
-            if ($expectedFile -and -not (Test-Path $expectedFile)) {
-                $failures += "Expected file not found: $expectedFile"
-            }
-        }
-    }
-
-    # Validate expected registry entries
-    if ($Configuration.PostInstallValidation.ExpectedRegistryEntries) {
-        foreach ($regEntry in $Configuration.PostInstallValidation.ExpectedRegistryEntries) {
-            try {
-                $value = Get-ItemProperty -Path $regEntry.Path -Name $regEntry.Name -ErrorAction Stop
-                if ($regEntry.Value -and $value.$($regEntry.Name) -ne $regEntry.Value) {
-                    $failures += "Registry value mismatch at $($regEntry.Path)\$($regEntry.Name): Expected '$($regEntry.Value)', Got '$($value.$($regEntry.Name))'"
-                }
-            }
-            catch {
-                $failures += "Expected registry entry not found: $($regEntry.Path)\$($regEntry.Name)"
-            }
-        }
-    }
-
     # Validate version via detection
-    if ($Configuration.PostInstallValidation.ValidateVersion -and $Configuration.Detection) {
+    if ($Configuration.Detection) {
         $detectionResult = Invoke-Detection -DetectionConfig $Configuration.Detection
         if (-not $detectionResult.Detected) {
             $failures += "Post-install detection failed: $($detectionResult.Detail)"

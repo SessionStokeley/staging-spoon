@@ -1,21 +1,25 @@
 @{
     # ================================================================
-    # APPLICATION
+    # APPLICATION METADATA
     # ================================================================
-    ApplicationName    = "Example Application"
-    ApplicationVersion = "1.0.0"
-    Publisher          = "Example Vendor"
-    CompanyName        = "CompanyName"
+    Application = @{
+        Name         = "Example Application"
+        Version      = "1.0.0"
+        Publisher    = "Example Vendor"
+        Architecture = "x64"
+    }
+
+    # Deploying organization (used for log paths)
+    CompanyName = "CompanyName"
 
     # ================================================================
-    # INSTALLATION
+    # INSTALLER
     # ================================================================
+    # Supported types: EXE, MSI, MSIX, CMD, BAT, PS1
     Installer = @{
-        # Supported types: EXE, MSI, MSIX, CMD, BAT, PS1
         Type             = "EXE"
         File             = "Setup.exe"
         Arguments        = "/quiet /norestart"
-        WorkingDirectory = "Files"
         TimeoutSeconds   = 3600
 
         # MSI only
@@ -23,39 +27,19 @@
         InstallArguments = $null
 
         # Optional integrity verification (SHA256 hash of installer file)
-        SHA256 = $null
+        SHA256           = $null
     }
 
     # ================================================================
-    # INSTALL SCOPE AND PRIVILEGE
+    # UNINSTALLER
     # ================================================================
-    # Machine = per-machine install (HKLM, Program Files)
-    # User    = per-user install (HKCU, AppData)
-    InstallScope = "Machine"
-
-    # Installation privilege context.
-    # System       = Runs as NT AUTHORITY\SYSTEM (Intune default for Install behavior: System)
-    # Administrator = Requires local admin but not SYSTEM (rare; used for installers
-    #                 that fail under SYSTEM, e.g. some that need a user profile)
-    # User         = Runs under the logged-on user (Intune Install behavior: User)
+    # Supported types: Executable, MSI, Registry, Custom
     #
-    # This controls which identity the Intune Management Extension uses.
-    # Set "Install behavior" in Intune to match:
-    #   System       -> Install behavior: System
-    #   Administrator -> Install behavior: System  (SYSTEM is admin-equivalent)
-    #   User         -> Install behavior: User
-    InstallPrivilege = "System"
-
-    # ================================================================
-    # UNINSTALLATION
-    # ================================================================
+    # Executable - Run a specific uninstall executable with arguments
+    # MSI        - Use msiexec.exe /x {ProductCode} /qn /norestart
+    # Registry   - Discover uninstall command from Windows registry
+    # Custom     - Specify a custom command and arguments
     Uninstaller = @{
-        # Supported types: Executable, MSI, Registry, Custom
-        #
-        # Executable - Run a specific uninstall executable with arguments
-        # MSI        - Use msiexec.exe /x {ProductCode} /qn /norestart
-        # Registry   - Discover uninstall command from Windows registry
-        # Custom     - Specify a custom command and arguments
         Type           = "Registry"
         DisplayName    = "Example Application"
         File           = $null
@@ -68,15 +52,12 @@
     # ================================================================
     # DETECTION
     # ================================================================
+    # Supported types: File, Registry, MSI, Service, Custom
     Detection = @{
-        # Supported types: File, Registry, MSI, Service, Custom
         Type              = "File"
         Path              = "C:\Program Files\Example"
         FileName          = "Application.exe"
         MinimumVersion    = "1.0.0.0"
-
-        # Version comparison operator
-        # Supported: Equal, GreaterThan, GreaterThanOrEqual, LessThan, LessThanOrEqual
         VersionComparison = "GreaterThanOrEqual"
 
         # Registry detection
@@ -98,26 +79,125 @@
     # ================================================================
     Requirements = @{
         MinimumWindowsVersion = "10.0"
-        WindowsEdition        = $null
         Architecture          = @("x64")
         MinimumDiskSpaceGB    = 5
         MinimumRAMGB          = 4
-        CPUArchitecture       = $null
-        DeviceType            = $null
-
-        # Custom requirements: array of ScriptBlock strings returning $true if met
-        CustomRequirements = @()
     }
 
     # ================================================================
-    # PROCESS / SERVICE MANAGEMENT
+    # PRIVILEGES
     # ================================================================
-    ProcessManagement = @{
-        Enabled                    = $true
-        Processes                  = @()
-        Services                   = @()
-        ForceStop                  = $false
-        GracefulStopTimeoutSeconds = 30
+    # Controls the identity context for installation.
+    # InstallAsSystem  = $true  -> Script expects NT AUTHORITY\SYSTEM
+    #                              (Intune Install behavior: System)
+    # InstallAsSystem  = $false -> Script runs under current user
+    #                              (Intune Install behavior: User)
+    # RequireElevation = $true  -> Requires administrative privileges
+    Privileges = @{
+        InstallAsSystem  = $true
+        RequireElevation = $true
+    }
+
+    # ================================================================
+    # PROCESS AND SERVICE MANAGEMENT
+    # ================================================================
+    # Processes and services to stop before install/uninstall.
+    # Processes are gracefully closed then force-stopped after 30 seconds.
+    ProcessesToStop = @()
+    ServicesToStop  = @()
+
+    # ================================================================
+    # ENVIRONMENT
+    # ================================================================
+    Environment = @{
+        # Directories to add to the Machine-level PATH after installation.
+        # Automatically removed on uninstall.
+        AddToMachinePath = @(
+            # "C:\Program Files\Example\bin"
+        )
+
+        # Persistent Machine-level environment variables created after installation.
+        # Automatically removed on uninstall.
+        Variables = @{
+            # "JAVA_HOME" = "C:\Program Files\Java\jdk"
+        }
+    }
+
+    # ================================================================
+    # FILE ASSOCIATIONS
+    # ================================================================
+    # Mode controls who manages file associations:
+    #   Installer  - The application installer handles associations (framework does nothing)
+    #   Framework  - The Intune framework configures associations from the Associations table
+    #   None       - Don't modify file associations
+    FileAssociations = @{
+        Mode         = "None"
+        Associations = @{
+            # ".ext" = "C:\Program Files\Example\Application.exe"
+        }
+    }
+
+    # ================================================================
+    # REGISTRY MODIFICATIONS
+    # ================================================================
+    # Registry entries to add or remove after installation.
+    # Add entries are created during install and removed during uninstall.
+    # Remove entries are deleted during install.
+    Registry = @{
+        Add = @(
+            # @{ Path = "HKLM:\Software\MyApp"; Name = "Setting"; Value = "Value"; Type = "String" }
+        )
+        Remove = @(
+            # @{ Path = "HKLM:\Software\OldApp"; Name = "OldSetting" }
+        )
+    }
+
+    # ================================================================
+    # SHORTCUTS
+    # ================================================================
+    # Shortcuts to create or remove after installation.
+    # Location: StartMenu, Desktop
+    Shortcuts = @{
+        Create = @(
+            # @{ Name = "My Application"; TargetPath = "C:\Program Files\MyApp\app.exe"; Location = "StartMenu" }
+        )
+        Remove = @(
+            # @{ Name = "Old Application"; Location = "StartMenu" }
+        )
+    }
+
+    # ================================================================
+    # POST-INSTALL
+    # ================================================================
+    # Validation and custom actions after installation.
+    # Supported action types: RunCommand, RunPowerShell, RestartService, CopyFile
+    PostInstall = @{
+        Validate = $true
+        Actions  = @(
+            # @{ Type = "RunCommand"; Command = "app.exe"; Arguments = "/configure" }
+            # @{ Type = "RunPowerShell"; Script = "Set-Content -Path 'C:\config.ini' -Value 'data'" }
+            # @{ Type = "RestartService"; Service = "MyAppService" }
+        )
+    }
+
+    # ================================================================
+    # USER EXPERIENCE
+    # ================================================================
+    # Controls standard shortcut creation via Company Portal / Intune.
+    # Uses the detected application executable as the shortcut target.
+    UserExperience = @{
+        CreateStartMenuShortcut = $true
+        CreateDesktopShortcut   = $false
+        LaunchAfterInstall      = $false
+    }
+
+    # ================================================================
+    # UPGRADE / SUPERSEDENCE
+    # ================================================================
+    Upgrade = @{
+        RemovePreviousVersion = $false
+        PreviousVersions      = @()
+        AllowDowngrade        = $false
     }
 
     # ================================================================
@@ -129,25 +209,6 @@
     }
 
     # ================================================================
-    # POST-INSTALL VALIDATION
-    # ================================================================
-    PostInstallValidation = @{
-        Enabled = $true
-        ExpectedFiles = @()
-        ExpectedRegistryEntries = @()
-        ValidateVersion = $false
-    }
-
-    # ================================================================
-    # UPGRADE / SUPERSEDENCE
-    # ================================================================
-    Upgrade = @{
-        RemovePreviousVersion = $false
-        PreviousVersions      = @()
-        AllowDowngrade         = $false
-    }
-
-    # ================================================================
     # LOGGING
     # ================================================================
     Logging = @{
@@ -156,53 +217,6 @@
         IncludeTranscript = $true
         MaximumLogSizeMB  = 10
         RetainLogFiles    = 10
-    }
-
-    # ================================================================
-    # PATH MODIFICATION
-    # ================================================================
-    # Entries to add to the system PATH after installation.
-    # Entries are added to the Machine-level PATH (persistent across reboots).
-    # On uninstall, these entries are removed.
-    PathEntries = @(
-        # "C:\Program Files\Example\bin"
-    )
-
-    # ================================================================
-    # FILE ASSOCIATIONS
-    # ================================================================
-    # Map file extensions to the application executable.
-    # Each entry creates/updates the registry association for that extension.
-    # On uninstall, associations created by this framework are removed.
-    FileAssociations = @{
-        # Extension = full path to the executable that opens it
-        # ".java"   = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-        # ".kt"     = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-        # ".kts"    = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-        # ".gradle" = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-    }
-
-    # ================================================================
-    # ENVIRONMENT
-    # ================================================================
-    Environment = @{
-        # Process-scope variables set before the installer runs
-        Variables = @{}
-
-        # Persistent Machine-level environment variables created after installation.
-        # On uninstall, these are removed.
-        PersistentVariables = @{
-            # "JAVA_HOME" = "C:\Program Files\Java\jdk"
-        }
-    }
-
-    # ================================================================
-    # EXECUTION
-    # ================================================================
-    Execution = @{
-        RequireSystem    = $true
-        AllowInteractive = $false
-        AllowUserProfile = $false
     }
 
     # ================================================================

@@ -72,9 +72,9 @@ $Config = $null
 if (Test-Path $configPath) {
     try {
         $Config = Import-PowerShellDataFile -Path $configPath
-        Write-Host "  App Name     : $($Config.ApplicationName)" -ForegroundColor Green
-        Write-Host "  App Version  : $($Config.ApplicationVersion)" -ForegroundColor Green
-        Write-Host "  Install Scope: $($Config.InstallScope)" -ForegroundColor Green
+        Write-Host "  App Name     : $($Config.Application.Name)" -ForegroundColor Green
+        Write-Host "  App Version  : $($Config.Application.Version)" -ForegroundColor Green
+        Write-Host "  Privileges   : InstallAsSystem=$($Config.Privileges.InstallAsSystem)" -ForegroundColor Green
     }
     catch {
         Write-Host "  ERROR: Failed to load Configuration.psd1: $_" -ForegroundColor Red
@@ -95,6 +95,7 @@ if ($Test -in 'All', 'Package') {
         'Validation.ps1'
         'Logging.ps1'
         'Requirements.ps1'
+        'Helpers.ps1'
     )
 
     foreach ($file in $requiredFiles) {
@@ -105,9 +106,9 @@ if ($Test -in 'All', 'Package') {
     }
 
     if ($Config) {
-        Write-TestResult -Name "Configuration has ApplicationName" `
-            -Passed ([bool]$Config.ApplicationName) `
-            -Detail $Config.ApplicationName
+        Write-TestResult -Name "Configuration has Application.Name" `
+            -Passed ([bool]$Config.Application.Name) `
+            -Detail $Config.Application.Name
 
         Write-TestResult -Name "Configuration has CompanyName" `
             -Passed ([bool]$Config.CompanyName) `
@@ -121,13 +122,9 @@ if ($Test -in 'All', 'Package') {
             -Passed ([bool]$Config.Detection) `
             -Detail $(if ($Config.Detection) { "Type: $($Config.Detection.Type)" } else { "Missing" })
 
-        Write-TestResult -Name "Configuration has ProcessManagement section" `
-            -Passed ([bool]$Config.ProcessManagement) `
-            -Detail $(if ($Config.ProcessManagement) { "Enabled: $($Config.ProcessManagement.Enabled)" } else { "Missing" })
-
-        Write-TestResult -Name "Configuration has Execution section" `
-            -Passed ([bool]$Config.Execution) `
-            -Detail $(if ($Config.Execution) { "RequireSystem: $($Config.Execution.RequireSystem)" } else { "Missing" })
+        Write-TestResult -Name "Configuration has Privileges section" `
+            -Passed ([bool]$Config.Privileges) `
+            -Detail $(if ($Config.Privileges) { "InstallAsSystem: $($Config.Privileges.InstallAsSystem), RequireElevation: $($Config.Privileges.RequireElevation)" } else { "Missing (defaults to InstallAsSystem=true)" })
 
         # MSI validation
         if ($Config.Installer.Type -eq 'MSI') {
@@ -138,8 +135,7 @@ if ($Test -in 'All', 'Package') {
 
         # Installer file check
         if ($Config.Installer -and $Config.Installer.File) {
-            $installerDir = if ($Config.Installer.WorkingDirectory) { $Config.Installer.WorkingDirectory } else { 'Files' }
-            $installerPath = Join-Path $PackagePath (Join-Path $installerDir $Config.Installer.File)
+            $installerPath = Join-Path $PackagePath (Join-Path 'Files' $Config.Installer.File)
             $installerExists = Test-Path $installerPath
             Write-TestResult -Name "Installer file exists" -Passed $installerExists `
                 -Detail $(if ($installerExists) { $installerPath } else { "Not found: $installerPath" })
@@ -161,30 +157,71 @@ if ($Test -in 'All', 'Package') {
                 -Detail $(if ($isArray) { "Values: $($arch -join ', ')" } else { "Should be @('x64') not '$arch'" })
         }
 
-        # InstallPrivilege validation
-        if ($Config.InstallPrivilege) {
-            $validPrivileges = @('System', 'Administrator', 'User')
-            $privValid = $Config.InstallPrivilege -in $validPrivileges
-            Write-TestResult -Name "InstallPrivilege is valid" -Passed $privValid `
-                -Detail "Value: $($Config.InstallPrivilege)"
-        }
-
-        # PathEntries validation
-        if ($Config.PathEntries -and $Config.PathEntries.Count -gt 0) {
-            Write-TestResult -Name "PathEntries configured" -Passed $true `
-                -Detail "$($Config.PathEntries.Count) entries: $($Config.PathEntries -join ', ')"
-        }
-
         # FileAssociations validation
-        if ($Config.FileAssociations -and $Config.FileAssociations.Count -gt 0) {
-            Write-TestResult -Name "FileAssociations configured" -Passed $true `
-                -Detail "$($Config.FileAssociations.Count) extension(s)"
+        if ($Config.FileAssociations) {
+            $validModes = @('Installer', 'Framework', 'None')
+            $modeValid = $Config.FileAssociations.Mode -in $validModes
+            Write-TestResult -Name "FileAssociations.Mode is valid" -Passed $modeValid `
+                -Detail "Mode: $($Config.FileAssociations.Mode)"
+
+            if ($Config.FileAssociations.Mode -eq 'Framework' -and $Config.FileAssociations.Associations) {
+                Write-TestResult -Name "Framework associations configured" -Passed ($Config.FileAssociations.Associations.Count -gt 0) `
+                    -Detail "$($Config.FileAssociations.Associations.Count) extension(s)"
+            }
         }
 
-        # Persistent environment variables
-        if ($Config.Environment -and $Config.Environment.PersistentVariables -and $Config.Environment.PersistentVariables.Count -gt 0) {
-            Write-TestResult -Name "PersistentVariables configured" -Passed $true `
-                -Detail "$($Config.Environment.PersistentVariables.Count) variable(s)"
+        # Environment PATH entries
+        if ($Config.Environment -and $Config.Environment.AddToMachinePath -and $Config.Environment.AddToMachinePath.Count -gt 0) {
+            Write-TestResult -Name "AddToMachinePath configured" -Passed $true `
+                -Detail "$($Config.Environment.AddToMachinePath.Count) entries: $($Config.Environment.AddToMachinePath -join ', ')"
+        }
+
+        # Environment variables
+        if ($Config.Environment -and $Config.Environment.Variables -and $Config.Environment.Variables.Count -gt 0) {
+            Write-TestResult -Name "Environment variables configured" -Passed $true `
+                -Detail "$($Config.Environment.Variables.Count) variable(s)"
+        }
+
+        # ProcessesToStop
+        if ($Config.ProcessesToStop -and $Config.ProcessesToStop.Count -gt 0) {
+            Write-TestResult -Name "ProcessesToStop configured" -Passed $true `
+                -Detail "$($Config.ProcessesToStop.Count) process(es): $($Config.ProcessesToStop -join ', ')"
+        }
+
+        # ServicesToStop
+        if ($Config.ServicesToStop -and $Config.ServicesToStop.Count -gt 0) {
+            Write-TestResult -Name "ServicesToStop configured" -Passed $true `
+                -Detail "$($Config.ServicesToStop.Count) service(s): $($Config.ServicesToStop -join ', ')"
+        }
+
+        # Registry
+        if ($Config.Registry) {
+            if ($Config.Registry.Add -and $Config.Registry.Add.Count -gt 0) {
+                Write-TestResult -Name "Registry.Add configured" -Passed $true `
+                    -Detail "$($Config.Registry.Add.Count) entries"
+            }
+            if ($Config.Registry.Remove -and $Config.Registry.Remove.Count -gt 0) {
+                Write-TestResult -Name "Registry.Remove configured" -Passed $true `
+                    -Detail "$($Config.Registry.Remove.Count) entries"
+            }
+        }
+
+        # Shortcuts
+        if ($Config.Shortcuts -and $Config.Shortcuts.Create -and $Config.Shortcuts.Create.Count -gt 0) {
+            Write-TestResult -Name "Shortcuts.Create configured" -Passed $true `
+                -Detail "$($Config.Shortcuts.Create.Count) shortcuts"
+        }
+
+        # PostInstall
+        if ($Config.PostInstall) {
+            Write-TestResult -Name "PostInstall configured" -Passed $true `
+                -Detail "Validate: $($Config.PostInstall.Validate), Actions: $($Config.PostInstall.Actions.Count)"
+        }
+
+        # UserExperience
+        if ($Config.UserExperience) {
+            Write-TestResult -Name "UserExperience configured" -Passed $true `
+                -Detail "StartMenu: $($Config.UserExperience.CreateStartMenuShortcut), Desktop: $($Config.UserExperience.CreateDesktopShortcut)"
         }
     }
 }
@@ -199,7 +236,7 @@ if ($Test -in 'All', 'Logging') {
         . (Join-Path $PackagePath 'Logging.ps1')
 
         $testCompany = if ($Config.CompanyName) { $Config.CompanyName } else { 'TestCompany' }
-        $testApp = if ($Config.ApplicationName) { $Config.ApplicationName } else { 'TestApp' }
+        $testApp = if ($Config.Application.Name) { $Config.Application.Name } else { 'TestApp' }
         $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
 
         Initialize-Logging -ApplicationName $testApp -CompanyName $testCompany `
@@ -247,7 +284,7 @@ if ($Test -in 'All', 'Requirements') {
 
         if (-not $script:LogState.Initialized) {
             $testCompany = if ($Config.CompanyName) { $Config.CompanyName } else { 'TestCompany' }
-            $testApp = if ($Config.ApplicationName) { $Config.ApplicationName } else { 'TestApp' }
+            $testApp = if ($Config.Application.Name) { $Config.Application.Name } else { 'TestApp' }
             $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
             Initialize-Logging -ApplicationName $testApp -CompanyName $testCompany `
                 -ScriptName 'Test-Requirements' -ApplicationVersion '1.0.0' -LoggingConfig $loggingConfig
@@ -310,7 +347,7 @@ if ($Test -in 'All', 'Validation') {
 
         if (-not $script:LogState.Initialized) {
             $testCompany = if ($Config.CompanyName) { $Config.CompanyName } else { 'TestCompany' }
-            $testApp = if ($Config.ApplicationName) { $Config.ApplicationName } else { 'TestApp' }
+            $testApp = if ($Config.Application.Name) { $Config.Application.Name } else { 'TestApp' }
             $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
             Initialize-Logging -ApplicationName $testApp -CompanyName $testCompany `
                 -ScriptName 'Test-Validation' -ApplicationVersion '1.0.0' -LoggingConfig $loggingConfig

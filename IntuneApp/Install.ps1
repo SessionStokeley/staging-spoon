@@ -6,6 +6,12 @@
     Configuration-driven installation script for any Windows application.
     All application-specific settings are read from Configuration.psd1.
     Designed to run as NT AUTHORITY\SYSTEM via the Intune Management Extension.
+
+    Architecture:
+        Load Configuration -> Validate Package -> Validate Privileges ->
+        Validate Requirements -> Pre-Install Detection -> Stop Processes/Services ->
+        Install App -> Post-Install Actions -> Environment/Associations/Registry/Shortcuts ->
+        Detection -> Validation -> Log Result -> Return to Intune
 #>
 
 [CmdletBinding()]
@@ -23,6 +29,7 @@ try {
     . (Join-Path $PackagePath 'Detection.ps1')
     . (Join-Path $PackagePath 'Validation.ps1')
     . (Join-Path $PackagePath 'Requirements.ps1')
+    . (Join-Path $PackagePath 'Helpers.ps1')
 
     # Load configuration
     $configPath = Join-Path $PackagePath 'Configuration.psd1'
@@ -32,34 +39,33 @@ try {
     }
     $Config = Import-PowerShellDataFile -Path $configPath
 
-    # Initialize logging with configurable settings
+    # Resolve application metadata
+    $appName    = $Config.Application.Name
+    $appVersion = $Config.Application.Version
+
+    # Initialize logging
     $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
-    $debugLogging = [bool]$Config.Testing.EnableDebugLogging
+    $debugLogging  = [bool]$Config.Testing.EnableDebugLogging
 
     Initialize-Logging `
-        -ApplicationName    $Config.ApplicationName `
+        -ApplicationName    $appName `
         -CompanyName        $Config.CompanyName `
         -ScriptName         'Install' `
-        -ApplicationVersion $Config.ApplicationVersion `
+        -ApplicationVersion $appVersion `
         -LoggingConfig      $loggingConfig `
         -DebugLogging       $debugLogging
 
     Write-Log -Message "Package path: $PackagePath" -Level 'Info'
-    Write-Log -Message "Install scope: $($Config.InstallScope)" -Level 'Info'
-    Write-Log -Message "Install privilege: $($Config.InstallPrivilege)" -Level 'Info'
 
-    # Validate execution context based on InstallPrivilege
+    # Log privileges configuration
+    $privileges = $Config.Privileges
+    if ($privileges) {
+        Write-Log -Message "Privileges: InstallAsSystem=$($privileges.InstallAsSystem), RequireElevation=$($privileges.RequireElevation)" -Level 'Info'
+    }
+
+    # Validate execution context based on Privileges
     $allowNonSystem = [bool]$Config.Testing.AllowNonSystemExecution
-    $installPrivilege = if ($Config.InstallPrivilege) { $Config.InstallPrivilege } else { 'System' }
-    $requireSystem = switch ($installPrivilege) {
-        'System'        { $true }
-        'Administrator' { $false }
-        'User'          { $false }
-        default         { $true }
-    }
-    if ($Config.Execution -and $null -ne $Config.Execution.RequireSystem) {
-        $requireSystem = $Config.Execution.RequireSystem
-    }
+    $requireSystem  = if ($privileges) { [bool]$privileges.InstallAsSystem } else { $true }
 
     if ($requireSystem -and -not (Test-SystemContext -AllowNonSystem $allowNonSystem)) {
         $script:ExitCode = 1
@@ -102,7 +108,6 @@ try {
             if ($existingDetection.Detected) {
                 Write-Log -Message "Application already installed: $($existingDetection.Detail)" -Level 'Info'
 
-                # Check upgrade awareness
                 if ($Config.Upgrade -and -not $Config.Upgrade.RemovePreviousVersion) {
                     Write-Log -Message "Application detected and RemovePreviousVersion is false. Reporting success." -Level 'Info'
                     $script:ExitCode = 0
@@ -124,38 +129,25 @@ try {
         }
     }
 
-    # Set environment variables if configured
-    if ($Config.Environment -and $Config.Environment.Variables) {
-        foreach ($key in $Config.Environment.Variables.Keys) {
-            $value = $Config.Environment.Variables[$key]
-            Write-Log -Message "Setting environment variable: $key" -Level 'Debug'
-            [System.Environment]::SetEnvironmentVariable($key, $value, 'Process')
-        }
+    # =====================================================================
+    # PRE-INSTALL: Stop processes and services
+    # =====================================================================
+    if ($Config.ProcessesToStop -and $Config.ProcessesToStop.Count -gt 0) {
+        Write-Log -Message "Stopping configured processes..." -Level 'Info'
+        Stop-ConfiguredProcesses -ProcessNames $Config.ProcessesToStop
+    }
+    if ($Config.ServicesToStop -and $Config.ServicesToStop.Count -gt 0) {
+        Write-Log -Message "Stopping configured services..." -Level 'Info'
+        Stop-ConfiguredServices -ServiceNames $Config.ServicesToStop
     }
 
-    # Stop configured processes and services
-    $pm = $Config.ProcessManagement
-    if ($pm -and $pm.Enabled) {
-        if ($pm.Processes -and $pm.Processes.Count -gt 0) {
-            Write-Log -Message "Stopping configured processes..." -Level 'Info'
-            Stop-ConfiguredProcesses -ProcessNames $pm.Processes `
-                -Force ([bool]$pm.ForceStop) `
-                -TimeoutSeconds ($pm.GracefulStopTimeoutSeconds)
-        }
-        if ($pm.Services -and $pm.Services.Count -gt 0) {
-            Write-Log -Message "Stopping configured services..." -Level 'Info'
-            Stop-ConfiguredServices -ServiceNames $pm.Services
-        }
-    }
-
-    # Build installer command
+    # =====================================================================
+    # INSTALL: Build and execute installer command
+    # =====================================================================
     $installerConfig = $Config.Installer
-    $installerDir = $installerConfig.WorkingDirectory
-    if (-not $installerDir) { $installerDir = 'Files' }
-
-    $installerFile = Join-Path $PackagePath (Join-Path $installerDir $installerConfig.File)
-    $installerType = if ($installerConfig.Type) { $installerConfig.Type } else { 'EXE' }
-    $timeoutSeconds = if ($installerConfig.TimeoutSeconds) { $installerConfig.TimeoutSeconds } else { 3600 }
+    $installerFile   = Join-Path $PackagePath (Join-Path 'Files' $installerConfig.File)
+    $installerType   = if ($installerConfig.Type) { $installerConfig.Type } else { 'EXE' }
+    $timeoutSeconds  = if ($installerConfig.TimeoutSeconds) { $installerConfig.TimeoutSeconds } else { 3600 }
 
     Write-Log -Message "Installer type: $installerType" -Level 'Info'
     Write-Log -Message "Installer file: $installerFile" -Level 'Info'
@@ -228,13 +220,12 @@ try {
         }
 
         default {
-            # EXE and other types
             $startParams = @{
-                FilePath     = $installerFile
-                Wait         = $true
-                PassThru     = $true
-                NoNewWindow  = $true
-                ErrorAction  = 'Stop'
+                FilePath    = $installerFile
+                Wait        = $true
+                PassThru    = $true
+                NoNewWindow = $true
+                ErrorAction = 'Stop'
             }
             if ($installerConfig.Arguments) {
                 $startParams.ArgumentList = $installerConfig.Arguments
@@ -270,26 +261,89 @@ try {
         exit $script:ExitCode
     }
 
-    # Post-install: PATH modifications
-    if ($Config.PathEntries -and $Config.PathEntries.Count -gt 0) {
-        Write-Log -Message "Applying PATH modifications..." -Level 'Info'
-        Add-PathEntries -Entries $Config.PathEntries -Scope $Config.InstallScope
+    # =====================================================================
+    # POST-INSTALL PHASE
+    # =====================================================================
+
+    # Environment: Machine PATH
+    if ($Config.Environment -and $Config.Environment.AddToMachinePath -and $Config.Environment.AddToMachinePath.Count -gt 0) {
+        Write-Log -Message "Applying Machine PATH modifications..." -Level 'Info'
+        Add-PathEntries -Entries $Config.Environment.AddToMachinePath
     }
 
-    # Post-install: File associations
-    if ($Config.FileAssociations -and $Config.FileAssociations.Count -gt 0) {
-        Write-Log -Message "Configuring file associations..." -Level 'Info'
-        Set-FileAssociations -Associations $Config.FileAssociations -ApplicationName $Config.ApplicationName
-    }
-
-    # Post-install: Persistent environment variables
-    if ($Config.Environment -and $Config.Environment.PersistentVariables -and $Config.Environment.PersistentVariables.Count -gt 0) {
+    # Environment: Persistent variables
+    if ($Config.Environment -and $Config.Environment.Variables -and $Config.Environment.Variables.Count -gt 0) {
         Write-Log -Message "Setting persistent environment variables..." -Level 'Info'
-        Set-PersistentEnvironmentVariables -Variables $Config.Environment.PersistentVariables -Scope $Config.InstallScope
+        Set-PersistentEnvironmentVariables -Variables $Config.Environment.Variables
     }
 
-    # Post-install validation
-    if (-not $Config.Testing.SkipValidation) {
+    # File associations (Framework-managed only)
+    $faConfig = $Config.FileAssociations
+    if ($faConfig -and $faConfig.Mode -eq 'Framework' -and $faConfig.Associations -and $faConfig.Associations.Count -gt 0) {
+        Write-Log -Message "Configuring framework-managed file associations..." -Level 'Info'
+        Set-FileAssociations -Associations $faConfig.Associations -ApplicationName $appName
+    }
+    elseif ($faConfig -and $faConfig.Mode -eq 'Installer') {
+        Write-Log -Message "File associations: managed by application installer." -Level 'Info'
+    }
+
+    # Registry modifications
+    if ($Config.Registry) {
+        if ($Config.Registry.Add -and $Config.Registry.Add.Count -gt 0) {
+            Write-Log -Message "Applying registry additions..." -Level 'Info'
+            Set-RegistryEntries -Entries $Config.Registry.Add
+        }
+        if ($Config.Registry.Remove -and $Config.Registry.Remove.Count -gt 0) {
+            Write-Log -Message "Applying registry removals..." -Level 'Info'
+            Remove-RegistryEntries -Entries $Config.Registry.Remove
+        }
+    }
+
+    # Shortcuts
+    if ($Config.Shortcuts) {
+        if ($Config.Shortcuts.Create -and $Config.Shortcuts.Create.Count -gt 0) {
+            Write-Log -Message "Creating shortcuts..." -Level 'Info'
+            New-ApplicationShortcuts -Shortcuts $Config.Shortcuts.Create
+        }
+        if ($Config.Shortcuts.Remove -and $Config.Shortcuts.Remove.Count -gt 0) {
+            Write-Log -Message "Removing old shortcuts..." -Level 'Info'
+            Remove-ApplicationShortcuts -Shortcuts $Config.Shortcuts.Remove
+        }
+    }
+
+    # User Experience shortcuts
+    if ($Config.UserExperience) {
+        $ueTargetPath = $null
+        if ($Config.Detection -and $Config.Detection.Type -eq 'File' -and $Config.Detection.Path -and $Config.Detection.FileName) {
+            $ueTargetPath = Join-Path $Config.Detection.Path $Config.Detection.FileName
+        }
+        if ($ueTargetPath) {
+            New-UserExperienceShortcuts -UserExperience $Config.UserExperience -ApplicationName $appName -TargetPath $ueTargetPath
+        }
+    }
+
+    # Post-install custom actions
+    if ($Config.PostInstall -and $Config.PostInstall.Actions -and $Config.PostInstall.Actions.Count -gt 0) {
+        Write-Log -Message "Running post-install actions..." -Level 'Info'
+        Invoke-PostInstallActions -Actions $Config.PostInstall.Actions
+    }
+
+    # Launch after install
+    if ($Config.UserExperience -and $Config.UserExperience.LaunchAfterInstall) {
+        if ($Config.Detection -and $Config.Detection.Type -eq 'File' -and $Config.Detection.Path -and $Config.Detection.FileName) {
+            $launchPath = Join-Path $Config.Detection.Path $Config.Detection.FileName
+            if (Test-Path $launchPath) {
+                Write-Log -Message "Launching application: $launchPath" -Level 'Info'
+                Start-Process -FilePath $launchPath -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    # =====================================================================
+    # POST-INSTALL VALIDATION
+    # =====================================================================
+    $validationResult = 'SKIPPED'
+    if ($Config.PostInstall.Validate -and -not $Config.Testing.SkipValidation) {
         Write-Log -Message "Running post-install validation..." -Level 'Info'
         $postValidation = Test-PostInstallValidation -Configuration $Config -InstallerExitCode $installExitCode
         $validationResult = if ($postValidation.Passed) { 'PASS' } else { 'FAIL' }
@@ -297,9 +351,6 @@ try {
         if (-not $postValidation.Passed) {
             Write-Log -Message "Post-install validation failed but installer reported success." -Level 'Warning'
         }
-    }
-    else {
-        $validationResult = 'SKIPPED'
     }
 
     # Run detection
@@ -332,259 +383,4 @@ catch {
     }
 
     exit 1
-}
-
-# --- Helper Functions ---
-
-function Stop-ConfiguredProcesses {
-    [CmdletBinding()]
-    param(
-        [string[]]$ProcessNames,
-        [bool]$Force = $false,
-        [int]$TimeoutSeconds = 30
-    )
-
-    foreach ($procName in $ProcessNames) {
-        $processes = Get-Process -Name $procName -ErrorAction SilentlyContinue
-        if (-not $processes) {
-            Write-Log -Message "Process '$procName' not running." -Level 'Info'
-            continue
-        }
-
-        Write-Log -Message "Requesting graceful close for process '$procName' ($($processes.Count) instance(s))..." -Level 'Info'
-        foreach ($proc in $processes) {
-            try {
-                $proc.CloseMainWindow() | Out-Null
-            }
-            catch {
-                Write-Log -Message "Failed to send close to $procName (PID $($proc.Id)): $_" -Level 'Warning'
-            }
-        }
-
-        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-        while ((Get-Date) -lt $deadline) {
-            $remaining = Get-Process -Name $procName -ErrorAction SilentlyContinue
-            if (-not $remaining) { break }
-            Start-Sleep -Milliseconds 500
-        }
-
-        $remaining = Get-Process -Name $procName -ErrorAction SilentlyContinue
-        if ($remaining -and $Force) {
-            Write-Log -Message "Force-stopping process '$procName'..." -Level 'Warning'
-            $remaining | Stop-Process -Force -ErrorAction SilentlyContinue
-        }
-        elseif ($remaining) {
-            Write-Log -Message "Process '$procName' still running after graceful timeout. Force not enabled." -Level 'Warning'
-        }
-        else {
-            Write-Log -Message "Process '$procName' stopped successfully." -Level 'Info'
-        }
-    }
-}
-
-function Stop-ConfiguredServices {
-    [CmdletBinding()]
-    param([string[]]$ServiceNames)
-
-    foreach ($svcName in $ServiceNames) {
-        $service = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-        if (-not $service) {
-            Write-Log -Message "Service '$svcName' not found." -Level 'Info'
-            continue
-        }
-
-        if ($service.Status -eq 'Stopped') {
-            Write-Log -Message "Service '$svcName' already stopped." -Level 'Info'
-            continue
-        }
-
-        Write-Log -Message "Stopping service '$svcName'..." -Level 'Info'
-        try {
-            Stop-Service -Name $svcName -Force -ErrorAction Stop
-            Write-Log -Message "Service '$svcName' stopped." -Level 'Info'
-        }
-        catch {
-            Write-Log -Message "Failed to stop service '$svcName': $_" -Level 'Warning'
-        }
-    }
-}
-
-function Add-PathEntries {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string[]]$Entries,
-        [string]$Scope = 'Machine'
-    )
-
-    $target = if ($Scope -eq 'User') { 'User' } else { 'Machine' }
-    $currentPath = [System.Environment]::GetEnvironmentVariable('Path', $target)
-    $pathItems = $currentPath -split ';' | Where-Object { $_ -ne '' }
-    $changed = $false
-
-    foreach ($entry in $Entries) {
-        if (-not $entry) { continue }
-        $normalized = $entry.TrimEnd('\')
-        $exists = $pathItems | Where-Object { $_.TrimEnd('\') -eq $normalized }
-        if ($exists) {
-            Write-Log -Message "PATH already contains: $entry" -Level 'Info'
-            continue
-        }
-        $pathItems += $entry
-        $changed = $true
-        Write-Log -Message "Added to PATH ($target): $entry" -Level 'Info'
-    }
-
-    if ($changed) {
-        $newPath = ($pathItems -join ';')
-        [System.Environment]::SetEnvironmentVariable('Path', $newPath, $target)
-        Write-Log -Message "PATH updated successfully." -Level 'Info'
-    }
-}
-
-function Remove-PathEntries {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string[]]$Entries,
-        [string]$Scope = 'Machine'
-    )
-
-    $target = if ($Scope -eq 'User') { 'User' } else { 'Machine' }
-    $currentPath = [System.Environment]::GetEnvironmentVariable('Path', $target)
-    $pathItems = $currentPath -split ';' | Where-Object { $_ -ne '' }
-    $changed = $false
-
-    foreach ($entry in $Entries) {
-        if (-not $entry) { continue }
-        $normalized = $entry.TrimEnd('\')
-        $before = $pathItems.Count
-        $pathItems = @($pathItems | Where-Object { $_.TrimEnd('\') -ne $normalized })
-        if ($pathItems.Count -lt $before) {
-            $changed = $true
-            Write-Log -Message "Removed from PATH ($target): $entry" -Level 'Info'
-        }
-    }
-
-    if ($changed) {
-        $newPath = ($pathItems -join ';')
-        [System.Environment]::SetEnvironmentVariable('Path', $newPath, $target)
-        Write-Log -Message "PATH updated successfully." -Level 'Info'
-    }
-}
-
-function Set-FileAssociations {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][hashtable]$Associations,
-        [Parameter(Mandatory)][string]$ApplicationName
-    )
-
-    $progIdBase = ($ApplicationName -replace '[^a-zA-Z0-9]', '') + '.AssocFile'
-
-    foreach ($ext in $Associations.Keys) {
-        $exePath = $Associations[$ext]
-        $progId = "$progIdBase$ext"
-
-        try {
-            $extKey = "HKLM:\Software\Classes\$ext"
-            if (-not (Test-Path $extKey)) {
-                New-Item -Path $extKey -Force | Out-Null
-            }
-            $previousDefault = (Get-ItemProperty -Path $extKey -Name '(Default)' -ErrorAction SilentlyContinue).'(Default)'
-            if (-not $previousDefault) { $previousDefault = '' }
-            Set-ItemProperty -Path $extKey -Name 'IntuneApp_PreviousDefault' -Value $previousDefault
-            Set-ItemProperty -Path $extKey -Name '(Default)' -Value $progId
-
-            $progKey = "HKLM:\Software\Classes\$progId\shell\open\command"
-            if (-not (Test-Path $progKey)) {
-                New-Item -Path $progKey -Force | Out-Null
-            }
-            Set-ItemProperty -Path $progKey -Name '(Default)' -Value "`"$exePath`" `"%1`""
-
-            Write-Log -Message "File association: $ext -> $exePath (ProgId: $progId)" -Level 'Info'
-        }
-        catch {
-            Write-Log -Message "Failed to set file association for $ext : $_" -Level 'Warning'
-        }
-    }
-}
-
-function Remove-FileAssociations {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][hashtable]$Associations,
-        [Parameter(Mandatory)][string]$ApplicationName
-    )
-
-    $progIdBase = ($ApplicationName -replace '[^a-zA-Z0-9]', '') + '.AssocFile'
-
-    foreach ($ext in $Associations.Keys) {
-        $progId = "$progIdBase$ext"
-
-        try {
-            $extKey = "HKLM:\Software\Classes\$ext"
-            $currentDefault = (Get-ItemProperty -Path $extKey -Name '(Default)' -ErrorAction SilentlyContinue).'(Default)'
-
-            if ($currentDefault -eq $progId) {
-                $previous = (Get-ItemProperty -Path $extKey -Name 'IntuneApp_PreviousDefault' -ErrorAction SilentlyContinue).'IntuneApp_PreviousDefault'
-                if ($previous) {
-                    Set-ItemProperty -Path $extKey -Name '(Default)' -Value $previous
-                }
-                else {
-                    Remove-ItemProperty -Path $extKey -Name '(Default)' -ErrorAction SilentlyContinue
-                }
-                Remove-ItemProperty -Path $extKey -Name 'IntuneApp_PreviousDefault' -ErrorAction SilentlyContinue
-            }
-
-            $progKey = "HKLM:\Software\Classes\$progId"
-            if (Test-Path $progKey) {
-                Remove-Item -Path $progKey -Recurse -Force
-            }
-
-            Write-Log -Message "Removed file association: $ext (ProgId: $progId)" -Level 'Info'
-        }
-        catch {
-            Write-Log -Message "Failed to remove file association for $ext : $_" -Level 'Warning'
-        }
-    }
-}
-
-function Set-PersistentEnvironmentVariables {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][hashtable]$Variables,
-        [string]$Scope = 'Machine'
-    )
-
-    $target = if ($Scope -eq 'User') { 'User' } else { 'Machine' }
-
-    foreach ($key in $Variables.Keys) {
-        $value = $Variables[$key]
-        try {
-            [System.Environment]::SetEnvironmentVariable($key, $value, $target)
-            Write-Log -Message "Set persistent env var ($target): $key = $value" -Level 'Info'
-        }
-        catch {
-            Write-Log -Message "Failed to set env var '$key': $_" -Level 'Warning'
-        }
-    }
-}
-
-function Remove-PersistentEnvironmentVariables {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][hashtable]$Variables,
-        [string]$Scope = 'Machine'
-    )
-
-    $target = if ($Scope -eq 'User') { 'User' } else { 'Machine' }
-
-    foreach ($key in $Variables.Keys) {
-        try {
-            [System.Environment]::SetEnvironmentVariable($key, $null, $target)
-            Write-Log -Message "Removed persistent env var ($target): $key" -Level 'Info'
-        }
-        catch {
-            Write-Log -Message "Failed to remove env var '$key': $_" -Level 'Warning'
-        }
-    }
 }

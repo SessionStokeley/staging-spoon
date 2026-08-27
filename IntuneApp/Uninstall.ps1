@@ -22,6 +22,7 @@ try {
     . (Join-Path $PackagePath 'Detection.ps1')
     . (Join-Path $PackagePath 'Validation.ps1')
     . (Join-Path $PackagePath 'Requirements.ps1')
+    . (Join-Path $PackagePath 'Helpers.ps1')
 
     # Load configuration
     $configPath = Join-Path $PackagePath 'Configuration.psd1'
@@ -31,32 +32,28 @@ try {
     }
     $Config = Import-PowerShellDataFile -Path $configPath
 
+    # Resolve application metadata
+    $appName    = $Config.Application.Name
+    $appVersion = $Config.Application.Version
+
     # Initialize logging
     $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
-    $debugLogging = [bool]$Config.Testing.EnableDebugLogging
+    $debugLogging  = [bool]$Config.Testing.EnableDebugLogging
 
     Initialize-Logging `
-        -ApplicationName    $Config.ApplicationName `
+        -ApplicationName    $appName `
         -CompanyName        $Config.CompanyName `
         -ScriptName         'Uninstall' `
-        -ApplicationVersion $Config.ApplicationVersion `
+        -ApplicationVersion $appVersion `
         -LoggingConfig      $loggingConfig `
         -DebugLogging       $debugLogging
 
     Write-Log -Message "Package path: $PackagePath" -Level 'Info'
 
-    # Validate execution context based on InstallPrivilege
+    # Validate execution context based on Privileges
     $allowNonSystem = [bool]$Config.Testing.AllowNonSystemExecution
-    $installPrivilege = if ($Config.InstallPrivilege) { $Config.InstallPrivilege } else { 'System' }
-    $requireSystem = switch ($installPrivilege) {
-        'System'        { $true }
-        'Administrator' { $false }
-        'User'          { $false }
-        default         { $true }
-    }
-    if ($Config.Execution -and $null -ne $Config.Execution.RequireSystem) {
-        $requireSystem = $Config.Execution.RequireSystem
-    }
+    $privileges     = $Config.Privileges
+    $requireSystem  = if ($privileges) { [bool]$privileges.InstallAsSystem } else { $true }
 
     if ($requireSystem -and -not (Test-SystemContext -AllowNonSystem $allowNonSystem)) {
         $script:ExitCode = 1
@@ -80,33 +77,20 @@ try {
         }
     }
 
-    # Set environment variables if configured
-    if ($Config.Environment -and $Config.Environment.Variables) {
-        foreach ($key in $Config.Environment.Variables.Keys) {
-            Write-Log -Message "Setting environment variable: $key" -Level 'Debug'
-            [System.Environment]::SetEnvironmentVariable($key, $Config.Environment.Variables[$key], 'Process')
-        }
-    }
-
     # Stop configured processes and services
-    $pm = $Config.ProcessManagement
-    if ($pm -and $pm.Enabled) {
-        if ($pm.Processes -and $pm.Processes.Count -gt 0) {
-            Write-Log -Message "Stopping configured processes..." -Level 'Info'
-            Stop-ConfiguredProcesses -ProcessNames $pm.Processes `
-                -Force ([bool]$pm.ForceStop) `
-                -TimeoutSeconds ($pm.GracefulStopTimeoutSeconds)
-        }
-        if ($pm.Services -and $pm.Services.Count -gt 0) {
-            Write-Log -Message "Stopping configured services..." -Level 'Info'
-            Stop-ConfiguredServices -ServiceNames $pm.Services
-        }
+    if ($Config.ProcessesToStop -and $Config.ProcessesToStop.Count -gt 0) {
+        Write-Log -Message "Stopping configured processes..." -Level 'Info'
+        Stop-ConfiguredProcesses -ProcessNames $Config.ProcessesToStop
+    }
+    if ($Config.ServicesToStop -and $Config.ServicesToStop.Count -gt 0) {
+        Write-Log -Message "Stopping configured services..." -Level 'Info'
+        Stop-ConfiguredServices -ServiceNames $Config.ServicesToStop
     }
 
     # Execute uninstall
     $uninstallerConfig = $Config.Uninstaller
-    $uninstallType = if ($uninstallerConfig.Type) { $uninstallerConfig.Type } else { 'Executable' }
-    $timeoutSeconds = if ($uninstallerConfig.TimeoutSeconds) { $uninstallerConfig.TimeoutSeconds } else { 3600 }
+    $uninstallType     = if ($uninstallerConfig.Type) { $uninstallerConfig.Type } else { 'Executable' }
+    $timeoutSeconds    = if ($uninstallerConfig.TimeoutSeconds) { $uninstallerConfig.TimeoutSeconds } else { 3600 }
     $uninstallExitCode = 0
 
     Write-Log -Message "Uninstall type: $uninstallType" -Level 'Info'
@@ -142,7 +126,7 @@ try {
         }
 
         'Custom' {
-            $customCmd = $uninstallerConfig.Command
+            $customCmd  = $uninstallerConfig.Command
             $customArgs = $uninstallerConfig.Arguments
             if (-not $customCmd) {
                 throw "Custom uninstall requires Command in Uninstaller configuration."
@@ -163,7 +147,6 @@ try {
         }
 
         default {
-            # Executable type
             $uninstallFile = $uninstallerConfig.File
             $uninstallArgs = $uninstallerConfig.Arguments
 
@@ -171,7 +154,6 @@ try {
                 throw "Executable uninstall requires File in Uninstaller configuration."
             }
 
-            # Resolve path: check if absolute, then relative to package
             if (-not [System.IO.Path]::IsPathRooted($uninstallFile)) {
                 $candidatePaths = @(
                     (Join-Path $PackagePath (Join-Path 'Files' $uninstallFile))
@@ -221,22 +203,45 @@ try {
         exit $script:ExitCode
     }
 
-    # Post-uninstall: Remove PATH entries
-    if ($Config.PathEntries -and $Config.PathEntries.Count -gt 0) {
-        Write-Log -Message "Removing PATH entries..." -Level 'Info'
-        Remove-PathEntries -Entries $Config.PathEntries -Scope $Config.InstallScope
+    # =====================================================================
+    # POST-UNINSTALL CLEANUP
+    # =====================================================================
+
+    # Remove Machine PATH entries
+    if ($Config.Environment -and $Config.Environment.AddToMachinePath -and $Config.Environment.AddToMachinePath.Count -gt 0) {
+        Write-Log -Message "Removing Machine PATH entries..." -Level 'Info'
+        Remove-PathEntries -Entries $Config.Environment.AddToMachinePath
     }
 
-    # Post-uninstall: Remove file associations
-    if ($Config.FileAssociations -and $Config.FileAssociations.Count -gt 0) {
-        Write-Log -Message "Removing file associations..." -Level 'Info'
-        Remove-FileAssociations -Associations $Config.FileAssociations -ApplicationName $Config.ApplicationName
-    }
-
-    # Post-uninstall: Remove persistent environment variables
-    if ($Config.Environment -and $Config.Environment.PersistentVariables -and $Config.Environment.PersistentVariables.Count -gt 0) {
+    # Remove persistent environment variables
+    if ($Config.Environment -and $Config.Environment.Variables -and $Config.Environment.Variables.Count -gt 0) {
         Write-Log -Message "Removing persistent environment variables..." -Level 'Info'
-        Remove-PersistentEnvironmentVariables -Variables $Config.Environment.PersistentVariables -Scope $Config.InstallScope
+        Remove-PersistentEnvironmentVariables -Variables $Config.Environment.Variables
+    }
+
+    # Remove framework-managed file associations
+    $faConfig = $Config.FileAssociations
+    if ($faConfig -and $faConfig.Mode -eq 'Framework' -and $faConfig.Associations -and $faConfig.Associations.Count -gt 0) {
+        Write-Log -Message "Removing framework-managed file associations..." -Level 'Info'
+        Remove-FileAssociations -Associations $faConfig.Associations -ApplicationName $appName
+    }
+
+    # Reverse registry additions (entries added during install are removed during uninstall)
+    if ($Config.Registry -and $Config.Registry.Add -and $Config.Registry.Add.Count -gt 0) {
+        Write-Log -Message "Removing registry entries added during install..." -Level 'Info'
+        Remove-RegistryEntries -Entries $Config.Registry.Add
+    }
+
+    # Remove shortcuts created during install
+    if ($Config.Shortcuts -and $Config.Shortcuts.Create -and $Config.Shortcuts.Create.Count -gt 0) {
+        Write-Log -Message "Removing shortcuts..." -Level 'Info'
+        Remove-ApplicationShortcuts -Shortcuts $Config.Shortcuts.Create
+    }
+
+    # Remove UserExperience shortcuts
+    if ($Config.UserExperience -and ($Config.UserExperience.CreateStartMenuShortcut -or $Config.UserExperience.CreateDesktopShortcut)) {
+        Write-Log -Message "Removing user experience shortcuts..." -Level 'Info'
+        Remove-UserExperienceShortcuts -ApplicationName $appName
     }
 
     # Post-uninstall detection
@@ -277,14 +282,14 @@ catch {
     exit 1
 }
 
-# --- Helper Functions ---
+# --- Uninstall-specific Helper ---
 
 function Invoke-RegistryUninstall {
     [CmdletBinding()]
     param([hashtable]$Config)
 
     $displayName = $Config.Uninstaller.DisplayName
-    if (-not $displayName) { $displayName = $Config.ApplicationName }
+    if (-not $displayName) { $displayName = $Config.Application.Name }
 
     $searchPaths = @(
         'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'
@@ -304,7 +309,6 @@ function Invoke-RegistryUninstall {
         return 0
     }
 
-    # Prefer QuietUninstallString if available
     $uninstallString = $entry.QuietUninstallString
     if (-not $uninstallString) {
         $uninstallString = $entry.UninstallString
@@ -320,7 +324,6 @@ function Invoke-RegistryUninstall {
 
     $uninstallString = $uninstallString.Trim('"')
 
-    # Handle MsiExec entries
     if ($uninstallString -match 'msiexec' -or $uninstallString -match '/[Ii]') {
         $guidMatch = [regex]::Match($uninstallString, '\{[0-9A-Fa-f\-]+\}')
         if ($guidMatch.Success) {
@@ -332,14 +335,13 @@ function Invoke-RegistryUninstall {
         }
     }
 
-    # Handle EXE entries - append silent flags
     $silentFlags = $Config.Uninstaller.Arguments
     if (-not $silentFlags) { $silentFlags = '/quiet /norestart' }
 
     if ($uninstallString -match '^"?(.+\.exe)"?\s*(.*)$') {
-        $exePath = $Matches[1]
+        $exePath      = $Matches[1]
         $existingArgs = $Matches[2]
-        $allArgs = "$existingArgs $silentFlags".Trim()
+        $allArgs      = "$existingArgs $silentFlags".Trim()
 
         Write-Log -Message "Executing: $exePath $allArgs" -Level 'Info'
         $process = Start-Process -FilePath $exePath -ArgumentList $allArgs `
@@ -349,70 +351,4 @@ function Invoke-RegistryUninstall {
 
     Write-Log -Message "Unable to parse uninstall string: $uninstallString" -Level 'Error'
     return 1
-}
-
-function Stop-ConfiguredProcesses {
-    [CmdletBinding()]
-    param(
-        [string[]]$ProcessNames,
-        [bool]$Force = $false,
-        [int]$TimeoutSeconds = 30
-    )
-
-    foreach ($procName in $ProcessNames) {
-        $processes = Get-Process -Name $procName -ErrorAction SilentlyContinue
-        if (-not $processes) {
-            Write-Log -Message "Process '$procName' not running." -Level 'Info'
-            continue
-        }
-
-        Write-Log -Message "Requesting graceful close for process '$procName'..." -Level 'Info'
-        foreach ($proc in $processes) {
-            try { $proc.CloseMainWindow() | Out-Null } catch {}
-        }
-
-        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-        while ((Get-Date) -lt $deadline) {
-            $remaining = Get-Process -Name $procName -ErrorAction SilentlyContinue
-            if (-not $remaining) { break }
-            Start-Sleep -Milliseconds 500
-        }
-
-        $remaining = Get-Process -Name $procName -ErrorAction SilentlyContinue
-        if ($remaining -and $Force) {
-            Write-Log -Message "Force-stopping process '$procName'..." -Level 'Warning'
-            $remaining | Stop-Process -Force -ErrorAction SilentlyContinue
-        }
-        elseif ($remaining) {
-            Write-Log -Message "Process '$procName' still running after timeout." -Level 'Warning'
-        }
-        else {
-            Write-Log -Message "Process '$procName' stopped." -Level 'Info'
-        }
-    }
-}
-
-function Stop-ConfiguredServices {
-    [CmdletBinding()]
-    param([string[]]$ServiceNames)
-
-    foreach ($svcName in $ServiceNames) {
-        $service = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-        if (-not $service) {
-            Write-Log -Message "Service '$svcName' not found." -Level 'Info'
-            continue
-        }
-        if ($service.Status -eq 'Stopped') {
-            Write-Log -Message "Service '$svcName' already stopped." -Level 'Info'
-            continue
-        }
-        Write-Log -Message "Stopping service '$svcName'..." -Level 'Info'
-        try {
-            Stop-Service -Name $svcName -Force -ErrorAction Stop
-            Write-Log -Message "Service '$svcName' stopped." -Level 'Info'
-        }
-        catch {
-            Write-Log -Message "Failed to stop service '$svcName': $_" -Level 'Warning'
-        }
-    }
 }

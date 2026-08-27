@@ -1,6 +1,6 @@
 # Intune Win32 Application Deployment Framework
 
-A reusable, configuration-driven PowerShell framework for deploying any Windows application through Microsoft Intune as a Win32 app.
+A reusable, configuration-driven PowerShell framework for deploying any Windows application through Microsoft Intune as a Win32 app. Only `Configuration.psd1` and the `Files\` directory change between applications -- the framework scripts are universal.
 
 ## Quick Start
 
@@ -15,12 +15,13 @@ A reusable, configuration-driven PowerShell framework for deploying any Windows 
 
 ```
 IntuneApp\
-├── Install.ps1           # Generic installer (do not modify)
-├── Uninstall.ps1         # Generic uninstaller (do not modify)
-├── Detection.ps1         # Generic detection script (do not modify)
-├── Requirements.ps1      # Generic requirements validation (do not modify)
-├── Validation.ps1        # Generic validation framework (do not modify)
+├── Install.ps1           # Universal installer engine (do not modify)
+├── Uninstall.ps1         # Universal uninstaller engine (do not modify)
+├── Detection.ps1         # Detection script (do not modify)
+├── Requirements.ps1      # Requirements validation (do not modify)
+├── Validation.ps1        # Pre/post-install validation (do not modify)
 ├── Logging.ps1           # Centralized logging (do not modify)
+├── Helpers.ps1           # Shared helper functions (do not modify)
 ├── Configuration.psd1    # APPLICATION-SPECIFIC - Edit this
 ├── Validate-Package.ps1  # Package validation tool
 ├── Test-Local.ps1        # Local testing framework
@@ -29,29 +30,77 @@ IntuneApp\
 └── Logs\                 # Local log output (not packaged)
 ```
 
-Only `Configuration.psd1` and `Files\` change between applications.
+## Architecture
 
-## Configuration Architecture
+The framework is a universal deployment engine. `Configuration.psd1` is the single source of truth for everything that varies between applications.
 
 ```
 Install.ps1 / Uninstall.ps1
       │
-      ▼
-Configuration.psd1
+      ├── Logging.ps1        (log management, rotation, transcripts)
+      ├── Detection.ps1      (application detection)
+      ├── Validation.ps1     (pre/post-install validation)
+      ├── Requirements.ps1   (system requirements)
+      ├── Helpers.ps1        (shared helper functions)
       │
-      ├── Installer (Type, File, Arguments, SHA256)
-      ├── Uninstaller (Type, DisplayName, ProductCode)
-      ├── Detection (Type, Path, VersionComparison)
-      ├── Requirements (Architecture[], OS, Disk, RAM)
-      ├── ProcessManagement (Processes, Services, ForceStop)
-      ├── Upgrade (RemovePreviousVersion, AllowDowngrade)
-      ├── Logging (RootPath, Rotation, Transcript)
-      ├── Execution (RequireSystem, AllowInteractive)
-      ├── Environment (Variables, PersistentVariables)
-      ├── InstallPrivilege (System, Administrator, User)
-      ├── PathEntries (System PATH modifications)
-      ├── FileAssociations (Extension → Executable)
-      └── Testing (SkipDetection, SkipValidation, Debug)
+      └── Configuration.psd1 (the only file you edit)
+            │
+            ├── Application        (Name, Version, Publisher, Architecture)
+            ├── CompanyName        (deploying organization)
+            ├── Privileges         (InstallAsSystem, RequireElevation)
+            ├── Installer          (Type, File, Arguments, SHA256)
+            ├── Uninstaller        (Type, DisplayName, ProductCode)
+            ├── Detection          (Type, Path, VersionComparison)
+            ├── Requirements       (Architecture[], OS, Disk, RAM)
+            ├── ProcessesToStop    (flat array of process names)
+            ├── ServicesToStop     (flat array of service names)
+            ├── Environment        (AddToMachinePath, Variables)
+            ├── FileAssociations   (Mode, Associations)
+            ├── Registry           (Add, Remove)
+            ├── Shortcuts          (Create, Remove)
+            ├── PostInstall        (Validate, Actions)
+            ├── UserExperience     (StartMenu, Desktop, LaunchAfterInstall)
+            ├── Upgrade            (RemovePreviousVersion, AllowDowngrade)
+            ├── ReturnCodes        (Success, SuccessWithReboot)
+            ├── Logging            (RootPath, Rotation, Transcript)
+            └── Testing            (SkipDetection, SkipValidation, Debug)
+```
+
+### Install Phase Flow
+
+```
+Load Configuration
+      │
+      ▼
+Pre-Install Validation
+      │
+      ▼
+Check Requirements
+      │
+      ▼
+Pre-Install Detection (already installed?)
+      │
+      ▼
+Stop Processes / Services
+      │
+      ▼
+Execute Installer (EXE / MSI / MSIX / CMD / BAT / PS1)
+      │
+      ▼
+Post-Install Phase
+  ├── Machine PATH entries
+  ├── Persistent environment variables
+  ├── File associations (Framework mode)
+  ├── Registry modifications
+  ├── Shortcuts (Create / Remove)
+  ├── UserExperience shortcuts
+  └── PostInstall.Actions (RunCommand, RunPowerShell, RestartService, CopyFile)
+      │
+      ▼
+Post-Install Validation + Detection
+      │
+      ▼
+Log Result → Return to Intune
 ```
 
 ## Packaging for Intune
@@ -84,7 +133,7 @@ IntuneWinAppUtil.exe -c "C:\Packages\MyApp" -s Install.ps1 -o "C:\Output"
 |---|---|
 | Install command | `powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Install.ps1` |
 | Uninstall command | `powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Uninstall.ps1` |
-| Install behavior | **System** |
+| Install behavior | **System** (or **User** if `Privileges.InstallAsSystem = $false`) |
 | Device restart behavior | Based on return codes |
 
 ### Detection Rules
@@ -106,7 +155,470 @@ IntuneWinAppUtil.exe -c "C:\Packages\MyApp" -s Install.ps1 -o "C:\Output"
 | 1641 | Hard reboot |
 | 1618 | Retry |
 
-### Assignments
+## Configuration Reference
+
+### Application
+
+```powershell
+Application = @{
+    Name         = "Example Application"
+    Version      = "1.0.0"
+    Publisher    = "Example Vendor"
+    Architecture = "x64"
+}
+CompanyName = "Contoso"
+```
+
+### Privileges
+
+Controls the identity context for installation.
+
+```powershell
+Privileges = @{
+    InstallAsSystem  = $true    # Expects NT AUTHORITY\SYSTEM
+    RequireElevation = $true    # Requires administrative privileges
+}
+```
+
+| InstallAsSystem | RequireElevation | Intune Install Behavior |
+|---|---|---|
+| `$true` | `$true` | System (most applications) |
+| `$false` | `$false` | User (per-user installations) |
+| `$false` | `$true` | System, but not SYSTEM identity |
+
+### Installer
+
+Supported types: `EXE`, `MSI`, `MSIX`, `CMD`, `BAT`, `PS1`
+
+```powershell
+Installer = @{
+    Type             = "EXE"
+    File             = "Setup.exe"           # Must be in Files\ directory
+    Arguments        = "/quiet /norestart"
+    TimeoutSeconds   = 3600
+    ProductCode      = $null                 # MSI only
+    InstallArguments = $null                 # MSI-specific msiexec arguments
+    SHA256           = $null                 # Optional integrity verification
+}
+```
+
+### Uninstaller
+
+Supported types: `Executable`, `MSI`, `Registry`, `Custom`
+
+```powershell
+Uninstaller = @{
+    Type           = "Registry"    # Discover uninstall command from Windows registry
+    DisplayName    = "My App"      # Registry search key (falls back to Application.Name)
+    File           = $null         # Executable type: path to uninstaller
+    Arguments      = "/quiet /norestart"
+    Command        = $null         # Custom type: command to run
+    ProductCode    = $null         # MSI type: product code
+    TimeoutSeconds = 3600
+}
+```
+
+### Detection
+
+Supported types: `File`, `Registry`, `MSI`, `Service`, `Custom`
+
+```powershell
+Detection = @{
+    Type              = "File"
+    Path              = "C:\Program Files\Example"
+    FileName          = "Application.exe"
+    MinimumVersion    = "1.0.0.0"
+    VersionComparison = "GreaterThanOrEqual"
+}
+```
+
+Version comparison operators: `Equal`, `GreaterThan`, `GreaterThanOrEqual`, `LessThan`, `LessThanOrEqual`
+
+### Requirements
+
+```powershell
+Requirements = @{
+    MinimumWindowsVersion = "10.0"
+    Architecture          = @("x64")         # Array format: @("x64", "ARM64")
+    MinimumDiskSpaceGB    = 5
+    MinimumRAMGB          = 4
+}
+```
+
+### Process and Service Management
+
+Flat arrays of names. Processes are gracefully closed then force-stopped after 30 seconds.
+
+```powershell
+ProcessesToStop = @("myapp", "myapp-helper")
+ServicesToStop  = @("MyAppService")
+```
+
+### Environment
+
+Machine-level PATH entries and environment variables. Both are automatically removed on uninstall.
+
+```powershell
+Environment = @{
+    AddToMachinePath = @(
+        "C:\Program Files\Example\bin"
+    )
+    Variables = @{
+        "JAVA_HOME"  = "C:\Program Files\Java\jdk"
+        "MAVEN_HOME" = "C:\Program Files\Apache\Maven"
+    }
+}
+```
+
+### File Associations
+
+Mode controls who manages file associations:
+
+| Mode | Behavior |
+|---|---|
+| `Installer` | The application installer handles associations (framework does nothing) |
+| `Framework` | The framework configures associations from the Associations table |
+| `None` | Don't modify file associations |
+
+```powershell
+FileAssociations = @{
+    Mode         = "Framework"
+    Associations = @{
+        ".txt" = "C:\Program Files\MyEditor\editor.exe"
+        ".log" = "C:\Program Files\MyEditor\editor.exe"
+    }
+}
+```
+
+Use `Installer` when the application's own installer sets up associations correctly (e.g., IntelliJ, VS Code). Use `Framework` when the installer doesn't handle associations or you need specific overrides. Framework-managed associations are automatically removed on uninstall.
+
+### Registry Modifications
+
+Registry entries to add or remove after installation. `Add` entries are created during install and reversed during uninstall. `Remove` entries are deleted during install.
+
+```powershell
+Registry = @{
+    Add = @(
+        @{ Path = "HKLM:\Software\MyApp"; Name = "Setting"; Value = "Enabled"; Type = "String" }
+        @{ Path = "HKLM:\Software\MyApp"; Name = "MaxRetries"; Value = 3; Type = "DWord" }
+    )
+    Remove = @(
+        @{ Path = "HKLM:\Software\OldApp"; Name = "OldSetting" }
+    )
+}
+```
+
+### Shortcuts
+
+Create or remove shortcuts in StartMenu or Desktop locations.
+
+```powershell
+Shortcuts = @{
+    Create = @(
+        @{ Name = "My Application"; TargetPath = "C:\Program Files\MyApp\app.exe"; Location = "StartMenu" }
+        @{ Name = "My Application"; TargetPath = "C:\Program Files\MyApp\app.exe"; Location = "Desktop" }
+    )
+    Remove = @(
+        @{ Name = "Old Application"; Location = "StartMenu" }
+    )
+}
+```
+
+### PostInstall
+
+Validation and custom actions after installation.
+
+```powershell
+PostInstall = @{
+    Validate = $true
+    Actions  = @(
+        @{ Type = "RunCommand"; Command = "app.exe"; Arguments = "/configure" }
+        @{ Type = "RunPowerShell"; Script = "Set-Content -Path 'C:\config.ini' -Value 'data'" }
+        @{ Type = "RestartService"; Service = "MyAppService" }
+        @{ Type = "CopyFile"; Source = "config.template"; Destination = "C:\ProgramData\MyApp\config.ini" }
+    )
+}
+```
+
+Supported action types:
+
+| Type | Parameters | Description |
+|---|---|---|
+| `RunCommand` | Command, Arguments | Execute a command with arguments |
+| `RunPowerShell` | Script | Execute a PowerShell script block |
+| `RestartService` | Service | Restart a Windows service |
+| `CopyFile` | Source, Destination | Copy a file to a destination |
+
+### UserExperience
+
+Controls standard shortcut creation using the detected application executable as the target.
+
+```powershell
+UserExperience = @{
+    CreateStartMenuShortcut = $true
+    CreateDesktopShortcut   = $false
+    LaunchAfterInstall      = $false
+}
+```
+
+### Upgrade / Supersedence
+
+```powershell
+Upgrade = @{
+    RemovePreviousVersion = $true
+    PreviousVersions      = @("1.0", "1.1")
+    AllowDowngrade        = $false
+}
+```
+
+- `RemovePreviousVersion` - When `$true` and an existing version is detected, the installer proceeds (upgrade over existing). When `$false`, the framework reports success without reinstalling.
+- `AllowDowngrade` - When `$false`, pre-install validation rejects deploying an older version over a newer one.
+
+### Return Codes
+
+```powershell
+ReturnCodes = @{
+    Success           = @(0)
+    SuccessWithReboot = @(3010, 1641)
+}
+```
+
+## Configuration Examples
+
+### EXE Installer (e.g., IntelliJ IDEA)
+
+```powershell
+@{
+    Application = @{
+        Name         = "IntelliJ IDEA"
+        Version      = "2026.2.1"
+        Publisher    = "JetBrains"
+        Architecture = "x64"
+    }
+    CompanyName = "Contoso"
+
+    Installer = @{
+        Type             = "EXE"
+        File             = "ideaIU-2026.2.1.exe"
+        Arguments        = "/S"
+        TimeoutSeconds   = 3600
+        ProductCode      = $null
+        InstallArguments = $null
+        SHA256           = $null
+    }
+
+    Uninstaller = @{
+        Type           = "Registry"
+        DisplayName    = "IntelliJ IDEA"
+        File           = $null
+        Arguments      = "/S"
+        Command        = $null
+        ProductCode    = $null
+        TimeoutSeconds = 3600
+    }
+
+    Detection = @{
+        Type              = "File"
+        Path              = "C:\Program Files\JetBrains\IntelliJ IDEA\bin"
+        FileName          = "idea64.exe"
+        MinimumVersion    = "2026.2.1.0"
+        VersionComparison = "GreaterThanOrEqual"
+    }
+
+    Requirements = @{
+        MinimumWindowsVersion = "10.0"
+        Architecture          = @("x64")
+        MinimumDiskSpaceGB    = 5
+        MinimumRAMGB          = 8
+    }
+
+    Privileges = @{
+        InstallAsSystem  = $true
+        RequireElevation = $true
+    }
+
+    ProcessesToStop = @("idea64")
+    ServicesToStop  = @()
+
+    Environment = @{
+        AddToMachinePath = @(
+            "C:\Program Files\JetBrains\IntelliJ IDEA\bin"
+        )
+        Variables = @{
+            "IDEA_HOME" = "C:\Program Files\JetBrains\IntelliJ IDEA"
+        }
+    }
+
+    # IntelliJ handles its own file associations during install
+    FileAssociations = @{
+        Mode         = "Installer"
+        Associations = @{}
+    }
+
+    Registry  = @{ Add = @(); Remove = @() }
+    Shortcuts = @{ Create = @(); Remove = @() }
+
+    PostInstall = @{
+        Validate = $true
+        Actions  = @()
+    }
+
+    UserExperience = @{
+        CreateStartMenuShortcut = $true
+        CreateDesktopShortcut   = $false
+        LaunchAfterInstall      = $false
+    }
+
+    Upgrade = @{
+        RemovePreviousVersion = $true
+        PreviousVersions      = @("2026.1", "2026.2")
+        AllowDowngrade        = $false
+    }
+
+    ReturnCodes = @{
+        Success           = @(0)
+        SuccessWithReboot = @(3010, 1641)
+    }
+
+    Logging = @{
+        Enabled           = $true
+        RootPath          = $null
+        IncludeTranscript = $true
+        MaximumLogSizeMB  = 10
+        RetainLogFiles    = 10
+    }
+
+    Testing = @{
+        AllowNonSystemExecution = $false
+        EnableDebugLogging      = $false
+        SkipRequirementChecks   = $false
+        SkipDetection           = $false
+        SkipValidation          = $false
+    }
+}
+```
+
+### MSI Installer (e.g., 7-Zip)
+
+```powershell
+@{
+    Application = @{
+        Name         = "7-Zip"
+        Version      = "23.01"
+        Publisher    = "Igor Pavlov"
+        Architecture = "x64"
+    }
+    CompanyName = "Contoso"
+
+    Installer = @{
+        Type             = "MSI"
+        File             = "7z2301-x64.msi"
+        Arguments        = $null
+        TimeoutSeconds   = 3600
+        ProductCode      = "{23170F69-40C1-2702-2301-000001000000}"
+        InstallArguments = "/qn /norestart ALLUSERS=1"
+        SHA256           = $null
+    }
+
+    Uninstaller = @{
+        Type           = "MSI"
+        DisplayName    = $null
+        File           = $null
+        Arguments      = $null
+        Command        = $null
+        ProductCode    = "{23170F69-40C1-2702-2301-000001000000}"
+        TimeoutSeconds = 3600
+    }
+
+    Detection = @{
+        Type              = "MSI"
+        ProductCode       = "{23170F69-40C1-2702-2301-000001000000}"
+    }
+
+    Requirements = @{
+        MinimumWindowsVersion = "10.0"
+        Architecture          = @("x64")
+        MinimumDiskSpaceGB    = 1
+        MinimumRAMGB          = 2
+    }
+
+    Privileges = @{
+        InstallAsSystem  = $true
+        RequireElevation = $true
+    }
+
+    ProcessesToStop = @("7zFM", "7zG")
+    ServicesToStop  = @()
+
+    Environment      = @{ AddToMachinePath = @(); Variables = @{} }
+    FileAssociations = @{ Mode = "Installer"; Associations = @{} }
+    Registry         = @{ Add = @(); Remove = @() }
+    Shortcuts        = @{ Create = @(); Remove = @() }
+
+    PostInstall = @{
+        Validate = $true
+        Actions  = @()
+    }
+
+    UserExperience = @{
+        CreateStartMenuShortcut = $false
+        CreateDesktopShortcut   = $false
+        LaunchAfterInstall      = $false
+    }
+
+    Upgrade = @{
+        RemovePreviousVersion = $false
+        PreviousVersions      = @()
+        AllowDowngrade        = $false
+    }
+
+    ReturnCodes = @{
+        Success           = @(0)
+        SuccessWithReboot = @(3010, 1641)
+    }
+
+    Logging = @{
+        Enabled           = $true
+        RootPath          = $null
+        IncludeTranscript = $false
+        MaximumLogSizeMB  = 10
+        RetainLogFiles    = 10
+    }
+
+    Testing = @{
+        AllowNonSystemExecution = $false
+        EnableDebugLogging      = $false
+        SkipRequirementChecks   = $false
+        SkipDetection           = $false
+        SkipValidation          = $false
+    }
+}
+```
+
+### Framework-Managed File Associations
+
+When the installer doesn't set up file associations, use Framework mode:
+
+```powershell
+FileAssociations = @{
+    Mode         = "Framework"
+    Associations = @{
+        ".txt" = "C:\Program Files\MyEditor\editor.exe"
+        ".log" = "C:\Program Files\MyEditor\editor.exe"
+        ".cfg" = "C:\Program Files\MyEditor\editor.exe"
+    }
+}
+```
+
+### Multi-Architecture App
+
+```powershell
+Requirements = @{
+    Architecture = @("x64", "ARM64")
+}
+```
+
+## Intune Assignments
 
 **Required Deployment:**
 - Add group > Select device or user group
@@ -125,352 +637,6 @@ To supersede an older version:
 1. In the new app, go to **Supersedence**
 2. **Add** > Select the older app
 3. Choose **Update** (installs new over old) or **Replace** (uninstalls old first)
-
-## Configuration Examples
-
-### EXE Installer (e.g., IntelliJ IDEA)
-
-```powershell
-@{
-    ApplicationName    = "IntelliJ IDEA"
-    ApplicationVersion = "2026.2.1"
-    Publisher          = "JetBrains"
-    CompanyName        = "Contoso"
-
-    Installer = @{
-        Type             = "EXE"
-        File             = "ideaIU-2026.2.1.exe"
-        Arguments        = "/S"
-        WorkingDirectory = "Files"
-        TimeoutSeconds   = 3600
-        ProductCode      = $null
-        InstallArguments = $null
-        SHA256           = $null
-    }
-
-    InstallScope = "Machine"
-
-    Uninstaller = @{
-        Type           = "Registry"
-        DisplayName    = "IntelliJ IDEA"
-        File           = $null
-        Arguments      = "/S"
-        Command        = $null
-        ProductCode    = $null
-        TimeoutSeconds = 3600
-    }
-
-    Detection = @{
-        Type              = "File"
-        Path              = "C:\Program Files\JetBrains\IntelliJ IDEA\bin"
-        FileName          = "idea64.exe"
-        MinimumVersion    = "2026.2.1.0"
-        VersionComparison = "GreaterThanOrEqual"
-        RegistryPath      = $null
-        ValueName         = $null
-        ProductCode       = $null
-        ServiceName       = $null
-        CustomScript      = $null
-    }
-
-    Requirements = @{
-        MinimumWindowsVersion = "10.0"
-        WindowsEdition        = $null
-        Architecture          = @("x64")
-        MinimumDiskSpaceGB    = 5
-        MinimumRAMGB          = 8
-        CPUArchitecture       = $null
-        DeviceType            = $null
-        CustomRequirements    = @()
-    }
-
-    ProcessManagement = @{
-        Enabled                    = $true
-        Processes                  = @("idea64")
-        Services                   = @()
-        ForceStop                  = $false
-        GracefulStopTimeoutSeconds = 30
-    }
-
-    ReturnCodes = @{
-        Success           = @(0)
-        SuccessWithReboot = @(3010, 1641)
-    }
-
-    PostInstallValidation = @{
-        Enabled = $true
-        ExpectedFiles = @(
-            "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-        )
-        ExpectedRegistryEntries = @()
-        ValidateVersion = $true
-    }
-
-    Upgrade = @{
-        RemovePreviousVersion = $true
-        PreviousVersions      = @("2026.1", "2026.2")
-        AllowDowngrade         = $false
-    }
-
-    Logging = @{
-        Enabled           = $true
-        RootPath          = $null
-        IncludeTranscript = $true
-        MaximumLogSizeMB  = 10
-        RetainLogFiles    = 10
-    }
-
-    InstallPrivilege = "System"
-
-    PathEntries = @(
-        "C:\Program Files\JetBrains\IntelliJ IDEA\bin"
-    )
-
-    FileAssociations = @{
-        ".java"   = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-        ".kt"     = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-        ".kts"    = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-        ".gradle" = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-    }
-
-    Environment = @{
-        Variables = @{}
-        PersistentVariables = @{
-            "IDEA_HOME" = "C:\Program Files\JetBrains\IntelliJ IDEA"
-        }
-    }
-
-    Execution = @{
-        RequireSystem    = $true
-        AllowInteractive = $false
-        AllowUserProfile = $false
-    }
-    Testing = @{
-        AllowNonSystemExecution = $false
-        EnableDebugLogging      = $false
-        SkipRequirementChecks   = $false
-        SkipDetection           = $false
-        SkipValidation          = $false
-    }
-}
-```
-
-### MSI Installer (e.g., 7-Zip)
-
-```powershell
-@{
-    ApplicationName    = "7-Zip"
-    ApplicationVersion = "23.01"
-    Publisher          = "Igor Pavlov"
-    CompanyName        = "Contoso"
-
-    Installer = @{
-        Type             = "MSI"
-        File             = "7z2301-x64.msi"
-        Arguments        = $null
-        WorkingDirectory = "Files"
-        TimeoutSeconds   = 3600
-        ProductCode      = "{23170F69-40C1-2702-2301-000001000000}"
-        InstallArguments = "/qn /norestart ALLUSERS=1"
-        SHA256           = $null
-    }
-
-    InstallScope = "Machine"
-
-    Uninstaller = @{
-        Type           = "MSI"
-        DisplayName    = $null
-        File           = $null
-        Arguments      = $null
-        Command        = $null
-        ProductCode    = "{23170F69-40C1-2702-2301-000001000000}"
-        TimeoutSeconds = 3600
-    }
-
-    Detection = @{
-        Type              = "MSI"
-        Path              = $null
-        FileName          = $null
-        MinimumVersion    = $null
-        VersionComparison = $null
-        RegistryPath      = $null
-        ValueName         = $null
-        ProductCode       = "{23170F69-40C1-2702-2301-000001000000}"
-        ServiceName       = $null
-        CustomScript      = $null
-    }
-
-    Requirements = @{
-        MinimumWindowsVersion = "10.0"
-        WindowsEdition        = $null
-        Architecture          = @("x64")
-        MinimumDiskSpaceGB    = 1
-        MinimumRAMGB          = 2
-        CPUArchitecture       = $null
-        DeviceType            = $null
-        CustomRequirements    = @()
-    }
-
-    ProcessManagement = @{
-        Enabled                    = $true
-        Processes                  = @("7zFM", "7zG")
-        Services                   = @()
-        ForceStop                  = $false
-        GracefulStopTimeoutSeconds = 15
-    }
-
-    ReturnCodes = @{
-        Success           = @(0)
-        SuccessWithReboot = @(3010, 1641)
-    }
-
-    PostInstallValidation = @{
-        Enabled = $true
-        ExpectedFiles = @("C:\Program Files\7-Zip\7z.exe")
-        ExpectedRegistryEntries = @()
-        ValidateVersion = $false
-    }
-
-    Upgrade = @{
-        RemovePreviousVersion = $false
-        PreviousVersions      = @()
-        AllowDowngrade         = $false
-    }
-
-    Logging = @{
-        Enabled           = $true
-        RootPath          = $null
-        IncludeTranscript = $false
-        MaximumLogSizeMB  = 10
-        RetainLogFiles    = 10
-    }
-
-    Environment = @{ Variables = @{} }
-    Execution = @{
-        RequireSystem    = $true
-        AllowInteractive = $false
-        AllowUserProfile = $false
-    }
-    Testing = @{
-        AllowNonSystemExecution = $false
-        EnableDebugLogging      = $false
-        SkipRequirementChecks   = $false
-        SkipDetection           = $false
-        SkipValidation          = $false
-    }
-}
-```
-
-### Multi-Architecture App (e.g., VPN Client)
-
-```powershell
-Requirements = @{
-    Architecture = @("x64", "ARM64")
-    # ...
-}
-```
-
-## Installation Privilege
-
-The `InstallPrivilege` setting controls the identity context for installation:
-
-| Value | Identity | Intune Install Behavior |
-|---|---|---|
-| `System` | NT AUTHORITY\SYSTEM | System |
-| `Administrator` | Local admin (not SYSTEM) | System |
-| `User` | Logged-on user | User |
-
-```powershell
-InstallPrivilege = "System"
-```
-
-Most applications use `System`. Use `Administrator` for installers that fail under SYSTEM (e.g., those requiring a user profile). Use `User` for per-user installations.
-
-## PATH Modification
-
-Add entries to the system or user PATH after installation. Entries are automatically removed on uninstall.
-
-```powershell
-PathEntries = @(
-    "C:\Program Files\Example\bin"
-    "C:\Program Files\Example\tools"
-)
-```
-
-The scope (`Machine` or `User`) follows the `InstallScope` setting. Duplicate entries are skipped.
-
-## File Associations
-
-Map file extensions to the application executable. Associations are automatically removed on uninstall, restoring previous defaults.
-
-```powershell
-FileAssociations = @{
-    ".java"   = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-    ".kt"     = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-    ".kts"    = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-    ".gradle" = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
-}
-```
-
-## Persistent Environment Variables
-
-Set machine- or user-level environment variables that persist across reboots. These are automatically removed on uninstall.
-
-```powershell
-Environment = @{
-    Variables = @{}
-    PersistentVariables = @{
-        "JAVA_HOME" = "C:\Program Files\Java\jdk"
-        "MAVEN_HOME" = "C:\Program Files\Apache\Maven"
-    }
-}
-```
-
-The scope follows `InstallScope`. `Variables` are process-scoped (set before the installer runs). `PersistentVariables` are created after installation and survive reboots.
-
-## Logging
-
-All logs are written to:
-
-```
-C:\ProgramData\<CompanyName>\IntuneApps\<ApplicationName>\
-```
-
-Or a custom path via `Logging.RootPath`.
-
-Log files:
-- `Install.log` - Installation activity
-- `Uninstall.log` - Uninstallation activity
-- `DeploymentSummary.log` - Summary of each deployment action
-- `*.transcript.log` - Full PowerShell transcript (when enabled)
-
-Log rotation: when a log exceeds `MaximumLogSizeMB`, it is archived with a timestamp and old archives beyond `RetainLogFiles` are pruned.
-
-## Detection Version Comparison
-
-The `VersionComparison` field supports:
-
-| Value | Behavior |
-|---|---|
-| `Equal` | Exact version match |
-| `GreaterThan` | Installed version must be strictly newer |
-| `GreaterThanOrEqual` | Installed version must be same or newer (default) |
-| `LessThan` | Installed version must be older |
-| `LessThanOrEqual` | Installed version must be same or older |
-
-## Upgrade / Supersedence Awareness
-
-```powershell
-Upgrade = @{
-    RemovePreviousVersion = $true
-    PreviousVersions      = @("2026.1", "2026.2")
-    AllowDowngrade         = $false
-}
-```
-
-- `RemovePreviousVersion` - When `$true` and an existing version is detected, the installer proceeds (upgrade over existing). When `$false`, the framework reports success without reinstalling.
-- `AllowDowngrade` - When `$false`, pre-install validation rejects deploying an older version over a newer one.
-- `PreviousVersions` - Tracked for logging/reporting purposes.
 
 ## Local Testing
 
@@ -498,6 +664,24 @@ PsExec.exe -s -i powershell.exe -ExecutionPolicy Bypass -File "C:\Packages\MyApp
 .\Test-Local.ps1 -Test Uninstall -EnableTestMode
 ```
 
+## Logging
+
+All logs are written to:
+
+```
+C:\ProgramData\<CompanyName>\IntuneApps\<Application.Name>\
+```
+
+Or a custom path via `Logging.RootPath`.
+
+Log files:
+- `Install.log` - Installation activity
+- `Uninstall.log` - Uninstallation activity
+- `DeploymentSummary.log` - Summary of each deployment action
+- `*.transcript.log` - Full PowerShell transcript (when enabled)
+
+Log rotation: when a log exceeds `MaximumLogSizeMB`, it is archived with a timestamp and old archives beyond `RetainLogFiles` are pruned.
+
 ## Troubleshooting
 
 ### Common Issues
@@ -508,10 +692,10 @@ PsExec.exe -s -i powershell.exe -ExecutionPolicy Bypass -File "C:\Packages\MyApp
 | Install runs but app missing | Silent switch incorrect | Check installer docs for correct silent arguments |
 | Exit code 1603 | MSI installation error | Check MSI log and Windows Event Log |
 | Exit code 1618 | Another install in progress | Wait; Intune will retry automatically |
-| Runs as user, not SYSTEM | Install behavior set to User | Set Install behavior to **System** in Intune |
+| Runs as user, not SYSTEM | Privileges.InstallAsSystem is false | Set Install behavior to **System** in Intune |
 | UAC prompt appears | Script tries to elevate | Framework never elevates; ensure Install behavior is System |
 | SHA256 mismatch | Installer file corrupted/changed | Regenerate hash or re-download installer |
-| Downgrade rejected | AllowDowngrade is false | Set Upgrade.AllowDowngrade = $true or deploy newer version |
+| Downgrade rejected | AllowDowngrade is false | Set `Upgrade.AllowDowngrade = $true` or deploy newer version |
 
 ### Log Locations
 
@@ -528,11 +712,11 @@ Add to MSI install arguments:
 
 ## Security
 
-- Never stores credentials, tokens, or secrets
+- Never stores credentials, tokens, or secrets in Configuration.psd1
 - Never bypasses UAC or modifies security policy
 - Never creates administrative accounts
 - Executes only files contained in the Intune package
 - Optional SHA256 integrity verification of installer files
 - Validates SYSTEM context before privileged operations
 - All paths resolved relative to the script, never from CWD or user profile
-- Rejects unsupported InstallScope combinations
+- Remember: an Intune Win32 package is distributed to the endpoint -- anything in the package should be considered accessible to an administrator or sufficiently privileged user
