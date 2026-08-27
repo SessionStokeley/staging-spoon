@@ -32,71 +32,110 @@ try {
     }
     $Config = Import-PowerShellDataFile -Path $configPath
 
-    # Initialize logging
+    # Initialize logging with configurable settings
+    $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
+    $debugLogging = [bool]$Config.Testing.EnableDebugLogging
+
     Initialize-Logging `
         -ApplicationName    $Config.ApplicationName `
         -CompanyName        $Config.CompanyName `
         -ScriptName         'Install' `
-        -ApplicationVersion $Config.ApplicationVersion
+        -ApplicationVersion $Config.ApplicationVersion `
+        -LoggingConfig      $loggingConfig `
+        -DebugLogging       $debugLogging
 
     Write-Log -Message "Package path: $PackagePath" -Level 'Info'
+    Write-Log -Message "Install scope: $($Config.InstallScope)" -Level 'Info'
 
-    # Validate SYSTEM context
+    # Validate execution context
     $allowNonSystem = [bool]$Config.Testing.AllowNonSystemExecution
-    if (-not (Test-SystemContext -AllowNonSystem $allowNonSystem)) {
+    $requireSystem = if ($Config.Execution) { $Config.Execution.RequireSystem } else { $true }
+
+    if ($requireSystem -and -not (Test-SystemContext -AllowNonSystem $allowNonSystem)) {
         $script:ExitCode = 1
         Write-DeploymentSummary -Action 'Install' -ExitCode $script:ExitCode -ErrorDetail 'Not running as SYSTEM'
         exit $script:ExitCode
     }
 
-    # Pre-install validation
-    Write-Log -Message "Running pre-install validation..." -Level 'Info'
-    $preValidation = Test-PreInstallValidation -Configuration $Config -PackagePath $PackagePath
-    if (-not $preValidation.Passed) {
-        $failureDetail = $preValidation.Failures -join '; '
-        Write-Log -Message "Pre-install validation failed: $failureDetail" -Level 'Error'
-        $script:ExitCode = 1
-        Write-DeploymentSummary -Action 'Install' -ExitCode $script:ExitCode `
-            -ValidationResult 'FAILED' -ErrorDetail $failureDetail
-        exit $script:ExitCode
-    }
-
-    # Validate requirements
-    Write-Log -Message "Validating requirements..." -Level 'Info'
-    $reqResult = Test-Requirements -Configuration $Config
-    if (-not $reqResult) {
-        Write-Log -Message "Requirements not met." -Level 'Error'
-        $script:ExitCode = 1
-        Write-DeploymentSummary -Action 'Install' -ExitCode $script:ExitCode `
-            -ValidationResult 'FAILED' -ErrorDetail 'System requirements not met'
-        exit $script:ExitCode
-    }
-
-    # Check if already installed
-    Write-Log -Message "Checking if application is already installed..." -Level 'Info'
-    if ($Config.Detection) {
-        $existingDetection = Invoke-Detection -DetectionConfig $Config.Detection
-        if ($existingDetection.Detected) {
-            Write-Log -Message "Application already installed: $($existingDetection.Detail)" -Level 'Info'
-            $script:ExitCode = 0
+    # Pre-install validation (unless skipped for testing)
+    if (-not $Config.Testing.SkipValidation) {
+        Write-Log -Message "Running pre-install validation..." -Level 'Info'
+        $preValidation = Test-PreInstallValidation -Configuration $Config -PackagePath $PackagePath
+        if (-not $preValidation.Passed) {
+            $failureDetail = $preValidation.Failures -join '; '
+            Write-Log -Message "Pre-install validation failed: $failureDetail" -Level 'Error'
+            $script:ExitCode = 1
             Write-DeploymentSummary -Action 'Install' -ExitCode $script:ExitCode `
-                -DetectionResult 'Already Installed' -ValidationResult 'PASS'
+                -ValidationResult 'FAILED' -ErrorDetail $failureDetail
             exit $script:ExitCode
         }
     }
 
-    # Stop configured processes
-    if ($Config.ProcessesToStop -and $Config.ProcessesToStop.Count -gt 0) {
-        Write-Log -Message "Stopping configured processes..." -Level 'Info'
-        Stop-ConfiguredProcesses -ProcessNames $Config.ProcessesToStop `
-            -Force ([bool]$Config.ForceStopProcesses) `
-            -TimeoutSeconds ($Config.GracefulStopTimeoutSeconds)
+    # Validate requirements (unless skipped for testing)
+    if (-not $Config.Testing.SkipRequirementChecks) {
+        Write-Log -Message "Validating requirements..." -Level 'Info'
+        $reqResult = Test-Requirements -Configuration $Config
+        if (-not $reqResult) {
+            Write-Log -Message "Requirements not met." -Level 'Error'
+            $script:ExitCode = 1
+            Write-DeploymentSummary -Action 'Install' -ExitCode $script:ExitCode `
+                -ValidationResult 'FAILED' -ErrorDetail 'System requirements not met'
+            exit $script:ExitCode
+        }
     }
 
-    # Stop configured services
-    if ($Config.ServicesToStop -and $Config.ServicesToStop.Count -gt 0) {
-        Write-Log -Message "Stopping configured services..." -Level 'Info'
-        Stop-ConfiguredServices -ServiceNames $Config.ServicesToStop
+    # Check if already installed (unless skipped for testing)
+    if (-not $Config.Testing.SkipDetection) {
+        Write-Log -Message "Checking if application is already installed..." -Level 'Info'
+        if ($Config.Detection) {
+            $existingDetection = Invoke-Detection -DetectionConfig $Config.Detection
+            if ($existingDetection.Detected) {
+                Write-Log -Message "Application already installed: $($existingDetection.Detail)" -Level 'Info'
+
+                # Check upgrade awareness
+                if ($Config.Upgrade -and -not $Config.Upgrade.RemovePreviousVersion) {
+                    Write-Log -Message "Application detected and RemovePreviousVersion is false. Reporting success." -Level 'Info'
+                    $script:ExitCode = 0
+                    Write-DeploymentSummary -Action 'Install' -ExitCode $script:ExitCode `
+                        -DetectionResult 'Already Installed' -ValidationResult 'PASS'
+                    exit $script:ExitCode
+                }
+
+                Write-Log -Message "Upgrade mode: proceeding with installation over existing version." -Level 'Info'
+            }
+        }
+    }
+
+    # Log upgrade context
+    if ($Config.Upgrade) {
+        Write-Log -Message "Upgrade config: RemovePreviousVersion=$($Config.Upgrade.RemovePreviousVersion), AllowDowngrade=$($Config.Upgrade.AllowDowngrade)" -Level 'Info'
+        if ($Config.Upgrade.PreviousVersions -and $Config.Upgrade.PreviousVersions.Count -gt 0) {
+            Write-Log -Message "Previous versions tracked: $($Config.Upgrade.PreviousVersions -join ', ')" -Level 'Info'
+        }
+    }
+
+    # Set environment variables if configured
+    if ($Config.Environment -and $Config.Environment.Variables) {
+        foreach ($key in $Config.Environment.Variables.Keys) {
+            $value = $Config.Environment.Variables[$key]
+            Write-Log -Message "Setting environment variable: $key" -Level 'Debug'
+            [System.Environment]::SetEnvironmentVariable($key, $value, 'Process')
+        }
+    }
+
+    # Stop configured processes and services
+    $pm = $Config.ProcessManagement
+    if ($pm -and $pm.Enabled) {
+        if ($pm.Processes -and $pm.Processes.Count -gt 0) {
+            Write-Log -Message "Stopping configured processes..." -Level 'Info'
+            Stop-ConfiguredProcesses -ProcessNames $pm.Processes `
+                -Force ([bool]$pm.ForceStop) `
+                -TimeoutSeconds ($pm.GracefulStopTimeoutSeconds)
+        }
+        if ($pm.Services -and $pm.Services.Count -gt 0) {
+            Write-Log -Message "Stopping configured services..." -Level 'Info'
+            Stop-ConfiguredServices -ServiceNames $pm.Services
+        }
     }
 
     # Build installer command
@@ -111,6 +150,21 @@ try {
     Write-Log -Message "Installer type: $installerType" -Level 'Info'
     Write-Log -Message "Installer file: $installerFile" -Level 'Info'
     Write-Log -Message "Installer arguments: $($installerConfig.Arguments)" -Level 'Info'
+
+    # Verify installer hash if configured
+    if ($installerConfig.SHA256) {
+        Write-Log -Message "Verifying installer integrity..." -Level 'Info'
+        $actualHash = (Get-FileHash -Path $installerFile -Algorithm SHA256).Hash
+        if ($actualHash -ne $installerConfig.SHA256) {
+            $errorMsg = "Installer integrity validation failed. Expected SHA256: $($installerConfig.SHA256) | Actual: $actualHash"
+            Write-Log -Message $errorMsg -Level 'Error'
+            $script:ExitCode = 1
+            Write-DeploymentSummary -Action 'Install' -ExitCode $script:ExitCode `
+                -ValidationResult 'FAILED' -ErrorDetail $errorMsg
+            exit $script:ExitCode
+        }
+        Write-Log -Message "Installer integrity verified (SHA256 match)." -Level 'Info'
+    }
 
     # Execute installer
     $installExitCode = 0
@@ -207,17 +261,22 @@ try {
     }
 
     # Post-install validation
-    Write-Log -Message "Running post-install validation..." -Level 'Info'
-    $postValidation = Test-PostInstallValidation -Configuration $Config -InstallerExitCode $installExitCode
-    $validationResult = if ($postValidation.Passed) { 'PASS' } else { 'FAIL' }
+    if (-not $Config.Testing.SkipValidation) {
+        Write-Log -Message "Running post-install validation..." -Level 'Info'
+        $postValidation = Test-PostInstallValidation -Configuration $Config -InstallerExitCode $installExitCode
+        $validationResult = if ($postValidation.Passed) { 'PASS' } else { 'FAIL' }
 
-    if (-not $postValidation.Passed) {
-        Write-Log -Message "Post-install validation failed but installer reported success." -Level 'Warning'
+        if (-not $postValidation.Passed) {
+            Write-Log -Message "Post-install validation failed but installer reported success." -Level 'Warning'
+        }
+    }
+    else {
+        $validationResult = 'SKIPPED'
     }
 
     # Run detection
     $detectionResult = 'N/A'
-    if ($Config.Detection) {
+    if ($Config.Detection -and -not $Config.Testing.SkipDetection) {
         Write-Log -Message "Running post-install detection..." -Level 'Info'
         $detection = Invoke-Detection -DetectionConfig $Config.Detection
         $detectionResult = if ($detection.Detected) { "Detected: $($detection.Detail)" } else { "NOT detected: $($detection.Detail)" }
@@ -240,7 +299,6 @@ catch {
             -ErrorDetail $errorMessage
     }
     catch {
-        # Last resort if logging itself fails
         $fallbackLog = Join-Path $env:ProgramData "IntuneApp_Install_Error.log"
         "[$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))] $errorMessage" | Out-File -FilePath $fallbackLog -Append
     }

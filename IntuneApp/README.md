@@ -31,6 +31,26 @@ IntuneApp\
 
 Only `Configuration.psd1` and `Files\` change between applications.
 
+## Configuration Architecture
+
+```
+Install.ps1 / Uninstall.ps1
+      │
+      ▼
+Configuration.psd1
+      │
+      ├── Installer (Type, File, Arguments, SHA256)
+      ├── Uninstaller (Type, DisplayName, ProductCode)
+      ├── Detection (Type, Path, VersionComparison)
+      ├── Requirements (Architecture[], OS, Disk, RAM)
+      ├── ProcessManagement (Processes, Services, ForceStop)
+      ├── Upgrade (RemovePreviousVersion, AllowDowngrade)
+      ├── Logging (RootPath, Rotation, Transcript)
+      ├── Execution (RequireSystem, AllowInteractive)
+      ├── Environment (Variables)
+      └── Testing (SkipDetection, SkipValidation, Debug)
+```
+
 ## Packaging for Intune
 
 ### Prerequisites
@@ -55,14 +75,6 @@ IntuneWinAppUtil.exe -c "C:\Packages\MyApp" -s Install.ps1 -o "C:\Output"
 2. Select **Windows app (Win32)**
 3. Upload the `.intunewin` file
 
-### App Information
-
-| Field | Value |
-|---|---|
-| Name | Your application name |
-| Description | Your application description |
-| Publisher | Your publisher name |
-
 ### Program
 
 | Field | Value |
@@ -71,13 +83,6 @@ IntuneWinAppUtil.exe -c "C:\Packages\MyApp" -s Install.ps1 -o "C:\Output"
 | Uninstall command | `powershell.exe -ExecutionPolicy Bypass -NoProfile -File .\Uninstall.ps1` |
 | Install behavior | **System** |
 | Device restart behavior | Based on return codes |
-
-### Requirements
-
-| Field | Value |
-|---|---|
-| Operating system architecture | 64-bit (or as needed) |
-| Minimum operating system | Windows 10 1607 (or as needed) |
 
 ### Detection Rules
 
@@ -120,44 +125,69 @@ To supersede an older version:
 
 ## Configuration Examples
 
-### EXE Installer (e.g., Google Chrome)
+### EXE Installer (e.g., IntelliJ IDEA)
 
 ```powershell
 @{
-    ApplicationName    = "Google Chrome"
-    ApplicationVersion = "120.0.0"
-    Publisher          = "Google LLC"
+    ApplicationName    = "IntelliJ IDEA"
+    ApplicationVersion = "2026.2.1"
+    Publisher          = "JetBrains"
     CompanyName        = "Contoso"
 
     Installer = @{
-        Type      = "EXE"
-        File      = "GoogleChromeStandaloneEnterprise64.msi"
-        Arguments = "/quiet /norestart"
+        Type             = "EXE"
+        File             = "ideaIU-2026.2.1.exe"
+        Arguments        = "/S"
         WorkingDirectory = "Files"
+        TimeoutSeconds   = 3600
+        ProductCode      = $null
+        InstallArguments = $null
+        SHA256           = $null
     }
 
+    InstallScope = "Machine"
+
     Uninstaller = @{
-        Type = "Registry"
-        DisplayName = "Google Chrome"
+        Type           = "Registry"
+        DisplayName    = "IntelliJ IDEA"
+        File           = $null
+        Arguments      = "/S"
+        Command        = $null
+        ProductCode    = $null
+        TimeoutSeconds = 3600
     }
 
     Detection = @{
-        Type           = "File"
-        Path           = "C:\Program Files\Google\Chrome\Application"
-        FileName       = "chrome.exe"
-        MinimumVersion = "120.0.0.0"
+        Type              = "File"
+        Path              = "C:\Program Files\JetBrains\IntelliJ IDEA\bin"
+        FileName          = "idea64.exe"
+        MinimumVersion    = "2026.2.1.0"
+        VersionComparison = "GreaterThanOrEqual"
+        RegistryPath      = $null
+        ValueName         = $null
+        ProductCode       = $null
+        ServiceName       = $null
+        CustomScript      = $null
     }
 
     Requirements = @{
         MinimumWindowsVersion = "10.0"
-        Architecture          = "x64"
-        MinimumDiskSpaceGB    = 1
+        WindowsEdition        = $null
+        Architecture          = @("x64")
+        MinimumDiskSpaceGB    = 5
+        MinimumRAMGB          = 8
+        CPUArchitecture       = $null
+        DeviceType            = $null
+        CustomRequirements    = @()
     }
 
-    ProcessesToStop    = @("chrome")
-    ServicesToStop     = @()
-    ForceStopProcesses = $false
-    GracefulStopTimeoutSeconds = 30
+    ProcessManagement = @{
+        Enabled                    = $true
+        Processes                  = @("idea64")
+        Services                   = @()
+        ForceStop                  = $false
+        GracefulStopTimeoutSeconds = 30
+    }
 
     ReturnCodes = @{
         Success           = @(0)
@@ -165,12 +195,41 @@ To supersede an older version:
     }
 
     PostInstallValidation = @{
-        ExpectedFiles = @("C:\Program Files\Google\Chrome\Application\chrome.exe")
+        Enabled = $true
+        ExpectedFiles = @(
+            "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+        )
         ExpectedRegistryEntries = @()
         ValidateVersion = $true
     }
 
-    Testing = @{ AllowNonSystemExecution = $false }
+    Upgrade = @{
+        RemovePreviousVersion = $true
+        PreviousVersions      = @("2026.1", "2026.2")
+        AllowDowngrade         = $false
+    }
+
+    Logging = @{
+        Enabled           = $true
+        RootPath          = $null
+        IncludeTranscript = $true
+        MaximumLogSizeMB  = 10
+        RetainLogFiles    = 10
+    }
+
+    Environment = @{ Variables = @{} }
+    Execution = @{
+        RequireSystem    = $true
+        AllowInteractive = $false
+        AllowUserProfile = $false
+    }
+    Testing = @{
+        AllowNonSystemExecution = $false
+        EnableDebugLogging      = $false
+        SkipRequirementChecks   = $false
+        SkipDetection           = $false
+        SkipValidation          = $false
+    }
 }
 ```
 
@@ -186,30 +245,57 @@ To supersede an older version:
     Installer = @{
         Type             = "MSI"
         File             = "7z2301-x64.msi"
-        InstallArguments = "/qn /norestart ALLUSERS=1"
+        Arguments        = $null
         WorkingDirectory = "Files"
+        TimeoutSeconds   = 3600
+        ProductCode      = "{23170F69-40C1-2702-2301-000001000000}"
+        InstallArguments = "/qn /norestart ALLUSERS=1"
+        SHA256           = $null
     }
 
+    InstallScope = "Machine"
+
     Uninstaller = @{
-        Type        = "MSI"
-        ProductCode = "{23170F69-40C1-2702-2301-000001000000}"
+        Type           = "MSI"
+        DisplayName    = $null
+        File           = $null
+        Arguments      = $null
+        Command        = $null
+        ProductCode    = "{23170F69-40C1-2702-2301-000001000000}"
+        TimeoutSeconds = 3600
     }
 
     Detection = @{
-        Type        = "MSI"
-        ProductCode = "{23170F69-40C1-2702-2301-000001000000}"
+        Type              = "MSI"
+        Path              = $null
+        FileName          = $null
+        MinimumVersion    = $null
+        VersionComparison = $null
+        RegistryPath      = $null
+        ValueName         = $null
+        ProductCode       = "{23170F69-40C1-2702-2301-000001000000}"
+        ServiceName       = $null
+        CustomScript      = $null
     }
 
     Requirements = @{
         MinimumWindowsVersion = "10.0"
-        Architecture          = "x64"
+        WindowsEdition        = $null
+        Architecture          = @("x64")
         MinimumDiskSpaceGB    = 1
+        MinimumRAMGB          = 2
+        CPUArchitecture       = $null
+        DeviceType            = $null
+        CustomRequirements    = @()
     }
 
-    ProcessesToStop    = @("7zFM", "7zG")
-    ServicesToStop     = @()
-    ForceStopProcesses = $false
-    GracefulStopTimeoutSeconds = 15
+    ProcessManagement = @{
+        Enabled                    = $true
+        Processes                  = @("7zFM", "7zG")
+        Services                   = @()
+        ForceStop                  = $false
+        GracefulStopTimeoutSeconds = 15
+    }
 
     ReturnCodes = @{
         Success           = @(0)
@@ -217,12 +303,48 @@ To supersede an older version:
     }
 
     PostInstallValidation = @{
+        Enabled = $true
         ExpectedFiles = @("C:\Program Files\7-Zip\7z.exe")
         ExpectedRegistryEntries = @()
         ValidateVersion = $false
     }
 
-    Testing = @{ AllowNonSystemExecution = $false }
+    Upgrade = @{
+        RemovePreviousVersion = $false
+        PreviousVersions      = @()
+        AllowDowngrade         = $false
+    }
+
+    Logging = @{
+        Enabled           = $true
+        RootPath          = $null
+        IncludeTranscript = $false
+        MaximumLogSizeMB  = 10
+        RetainLogFiles    = 10
+    }
+
+    Environment = @{ Variables = @{} }
+    Execution = @{
+        RequireSystem    = $true
+        AllowInteractive = $false
+        AllowUserProfile = $false
+    }
+    Testing = @{
+        AllowNonSystemExecution = $false
+        EnableDebugLogging      = $false
+        SkipRequirementChecks   = $false
+        SkipDetection           = $false
+        SkipValidation          = $false
+    }
+}
+```
+
+### Multi-Architecture App (e.g., VPN Client)
+
+```powershell
+Requirements = @{
+    Architecture = @("x64", "ARM64")
+    # ...
 }
 ```
 
@@ -234,10 +356,41 @@ All logs are written to:
 C:\ProgramData\<CompanyName>\IntuneApps\<ApplicationName>\
 ```
 
+Or a custom path via `Logging.RootPath`.
+
 Log files:
 - `Install.log` - Installation activity
 - `Uninstall.log` - Uninstallation activity
 - `DeploymentSummary.log` - Summary of each deployment action
+- `*.transcript.log` - Full PowerShell transcript (when enabled)
+
+Log rotation: when a log exceeds `MaximumLogSizeMB`, it is archived with a timestamp and old archives beyond `RetainLogFiles` are pruned.
+
+## Detection Version Comparison
+
+The `VersionComparison` field supports:
+
+| Value | Behavior |
+|---|---|
+| `Equal` | Exact version match |
+| `GreaterThan` | Installed version must be strictly newer |
+| `GreaterThanOrEqual` | Installed version must be same or newer (default) |
+| `LessThan` | Installed version must be older |
+| `LessThanOrEqual` | Installed version must be same or older |
+
+## Upgrade / Supersedence Awareness
+
+```powershell
+Upgrade = @{
+    RemovePreviousVersion = $true
+    PreviousVersions      = @("2026.1", "2026.2")
+    AllowDowngrade         = $false
+}
+```
+
+- `RemovePreviousVersion` - When `$true` and an existing version is detected, the installer proceeds (upgrade over existing). When `$false`, the framework reports success without reinstalling.
+- `AllowDowngrade` - When `$false`, pre-install validation rejects deploying an older version over a newer one.
+- `PreviousVersions` - Tracked for logging/reporting purposes.
 
 ## Local Testing
 
@@ -260,6 +413,7 @@ PsExec.exe -s -i powershell.exe -ExecutionPolicy Bypass -File "C:\Packages\MyApp
 .\Test-Local.ps1 -Test Requirements
 .\Test-Local.ps1 -Test Validation
 .\Test-Local.ps1 -Test Package
+.\Test-Local.ps1 -Test Logging
 .\Test-Local.ps1 -Test Install -EnableTestMode
 .\Test-Local.ps1 -Test Uninstall -EnableTestMode
 ```
@@ -270,12 +424,14 @@ PsExec.exe -s -i powershell.exe -ExecutionPolicy Bypass -File "C:\Packages\MyApp
 
 | Issue | Cause | Solution |
 |---|---|---|
-| Detection fails | Wrong path/version in config | Verify Detection settings in Configuration.psd1 |
-| Install runs but app missing | Silent switch incorrect | Check installer documentation for correct silent arguments |
-| Exit code 1603 | MSI installation error | Check Windows Event Log and MSI log |
-| Exit code 1618 | Another install in progress | Wait and retry; Intune will retry automatically |
+| Detection fails | Wrong path/version in config | Verify Detection settings; check VersionComparison |
+| Install runs but app missing | Silent switch incorrect | Check installer docs for correct silent arguments |
+| Exit code 1603 | MSI installation error | Check MSI log and Windows Event Log |
+| Exit code 1618 | Another install in progress | Wait; Intune will retry automatically |
 | Runs as user, not SYSTEM | Install behavior set to User | Set Install behavior to **System** in Intune |
 | UAC prompt appears | Script tries to elevate | Framework never elevates; ensure Install behavior is System |
+| SHA256 mismatch | Installer file corrupted/changed | Regenerate hash or re-download installer |
+| Downgrade rejected | AllowDowngrade is false | Set Upgrade.AllowDowngrade = $true or deploy newer version |
 
 ### Log Locations
 
@@ -296,5 +452,7 @@ Add to MSI install arguments:
 - Never bypasses UAC or modifies security policy
 - Never creates administrative accounts
 - Executes only files contained in the Intune package
+- Optional SHA256 integrity verification of installer files
 - Validates SYSTEM context before privileged operations
 - All paths resolved relative to the script, never from CWD or user profile
+- Rejects unsupported InstallScope combinations

@@ -5,6 +5,7 @@
 .DESCRIPTION
     Validates system requirements defined in Configuration.psd1 before installation.
     Returns $true if all requirements are met, $false otherwise.
+    Architecture is validated as an array of accepted values.
 #>
 
 function Test-Requirements {
@@ -36,9 +37,9 @@ function Test-Requirements {
         if (-not $result.Met) { $allMet = $false }
     }
 
-    # Architecture
+    # Architecture (array support)
     if ($requirements.Architecture) {
-        $result = Test-Architecture -RequiredArchitecture $requirements.Architecture
+        $result = Test-Architecture -AcceptedArchitectures $requirements.Architecture
         $results += $result
         if (-not $result.Met) { $allMet = $false }
     }
@@ -99,7 +100,7 @@ function Test-WindowsVersion {
     return [PSCustomObject]@{
         Name   = 'Windows Version'
         Met    = $met
-        Detail = "Required: $MinimumVersion | Current: $currentVersion | $(if($met){'PASS'}else{'FAIL'})"
+        Detail = "Required: >= $MinimumVersion | Current: $currentVersion | $(if($met){'PASS'}else{'FAIL'})"
     }
 }
 
@@ -118,14 +119,25 @@ function Test-WindowsEdition {
 
 function Test-Architecture {
     [CmdletBinding()]
-    param([string]$RequiredArchitecture)
+    param($AcceptedArchitectures)
+
+    # Normalize to array
+    if ($AcceptedArchitectures -is [string]) {
+        $AcceptedArchitectures = @($AcceptedArchitectures)
+    }
 
     $currentArch = if ([System.Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
-    $met = ($RequiredArchitecture -eq $currentArch) -or ($RequiredArchitecture -eq 'x86' -and $currentArch -eq 'x64')
+
+    $met = $currentArch -in $AcceptedArchitectures
+    # x64 systems can run x86 applications
+    if (-not $met -and $currentArch -eq 'x64' -and 'x86' -in $AcceptedArchitectures) {
+        $met = $true
+    }
+
     return [PSCustomObject]@{
         Name   = 'Architecture'
         Met    = $met
-        Detail = "Required: $RequiredArchitecture | Current: $currentArch | $(if($met){'PASS'}else{'FAIL'})"
+        Detail = "Accepted: $($AcceptedArchitectures -join ', ') | Current: $currentArch | $(if($met){'PASS'}else{'FAIL'})"
     }
 }
 
@@ -141,7 +153,7 @@ function Test-DiskSpace {
     return [PSCustomObject]@{
         Name   = 'Disk Space'
         Met    = $met
-        Detail = "Required: ${MinimumGB}GB | Available: ${freeGB}GB | $(if($met){'PASS'}else{'FAIL'})"
+        Detail = "Required: >= ${MinimumGB}GB | Available: ${freeGB}GB | $(if($met){'PASS'}else{'FAIL'})"
     }
 }
 
@@ -154,7 +166,7 @@ function Test-RAM {
     return [PSCustomObject]@{
         Name   = 'RAM'
         Met    = $met
-        Detail = "Required: ${MinimumGB}GB | Installed: ${totalRAM}GB | $(if($met){'PASS'}else{'FAIL'})"
+        Detail = "Required: >= ${MinimumGB}GB | Installed: ${totalRAM}GB | $(if($met){'PASS'}else{'FAIL'})"
     }
 }
 
@@ -178,7 +190,6 @@ function Test-DeviceType {
     param([string]$RequiredType)
 
     $cs = Get-CimInstance -ClassName Win32_ComputerSystem
-    $typeMap = @{ 1 = 'Other'; 2 = 'Unknown'; 3 = 'Desktop'; 4 = 'LowProfileDesktop'; 5 = 'PizzaBox'; 6 = 'MiniTower'; 7 = 'Tower'; 8 = 'Portable'; 9 = 'Laptop'; 10 = 'Notebook'; 14 = 'SubNotebook' }
 
     $isWorkstation = $cs.DomainRole -le 1 -or $cs.DomainRole -eq 3
     $isServer = $cs.DomainRole -ge 4

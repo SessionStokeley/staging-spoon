@@ -4,7 +4,7 @@
     Generic validation framework for Intune Win32 deployments.
 .DESCRIPTION
     Performs pre-installation and post-installation validation checks
-    as configured in Configuration.psd1.
+    using the Execution and PostInstallValidation sections of Configuration.psd1.
 #>
 
 function Test-PreInstallValidation {
@@ -16,11 +16,22 @@ function Test-PreInstallValidation {
 
     $failures = @()
 
-    # Validate SYSTEM context (unless testing mode)
-    if (-not $Configuration.Testing.AllowNonSystemExecution) {
+    # Validate execution context
+    $execution = $Configuration.Execution
+    if ($execution.RequireSystem) {
         $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
         if ($identity.Name -ne 'NT AUTHORITY\SYSTEM') {
-            $failures += "Not running as SYSTEM. Current identity: $($identity.Name)"
+            if (-not $Configuration.Testing.AllowNonSystemExecution) {
+                $failures += "Not running as SYSTEM. Current identity: $($identity.Name)"
+            }
+        }
+    }
+
+    # Reject interactive execution if disallowed
+    if ($execution -and -not $execution.AllowInteractive) {
+        $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        if ($sessionId -ne 0 -and -not $Configuration.Testing.AllowNonSystemExecution) {
+            Write-Log -Message "Running in interactive session $sessionId (non-interactive expected)." -Level 'Warning'
         }
     }
 
@@ -33,29 +44,56 @@ function Test-PreInstallValidation {
         $failures += "Configuration missing ApplicationName."
     }
 
+    # Validate install scope
+    if ($Configuration.InstallScope) {
+        $validScopes = @('Machine', 'User')
+        if ($Configuration.InstallScope -notin $validScopes) {
+            $failures += "Invalid InstallScope: $($Configuration.InstallScope). Valid: $($validScopes -join ', ')"
+        }
+    }
+
     # Validate installer file exists
     if ($Configuration.Installer) {
         $installerDir = $Configuration.Installer.WorkingDirectory
         if (-not $installerDir) { $installerDir = 'Files' }
         $installerPath = Join-Path $PackagePath (Join-Path $installerDir $Configuration.Installer.File)
 
-        if ($Configuration.Installer.Type -eq 'MSI' -and $Configuration.Installer.ProductCode) {
-            # MSI installs use msiexec; the .msi file should still exist if specified
+        if ($Configuration.Installer.Type -eq 'MSI') {
+            # MSI must have either a file or a product code
             if ($Configuration.Installer.File -and -not (Test-Path $installerPath)) {
                 $failures += "MSI installer file not found: $installerPath"
             }
+            if (-not $Configuration.Installer.ProductCode -and -not $Configuration.Installer.File) {
+                $failures += "MSI installer requires either File or ProductCode."
+            }
         }
-        elseif ($Configuration.Installer.Type -ne 'MSI') {
+        else {
             if (-not (Test-Path $installerPath)) {
                 $failures += "Installer file not found: $installerPath"
             }
+        }
+
+        # Validate installer hash if configured
+        if ($Configuration.Installer.SHA256 -and (Test-Path $installerPath)) {
+            $actualHash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash
+            if ($actualHash -ne $Configuration.Installer.SHA256) {
+                $failures += "Installer integrity check failed. Expected SHA256: $($Configuration.Installer.SHA256) | Actual: $actualHash"
+            }
+            else {
+                Write-Log -Message "Installer integrity verified (SHA256 match)." -Level 'Info'
+            }
+        }
+
+        # Validate MSI ProductCode is present when Type = MSI
+        if ($Configuration.Installer.Type -eq 'MSI' -and -not $Configuration.Installer.ProductCode) {
+            Write-Log -Message "MSI installer without ProductCode - may be needed for uninstall." -Level 'Warning'
         }
     }
 
     # Validate required directories
     $filesDir = Join-Path $PackagePath 'Files'
     if (-not (Test-Path $filesDir)) {
-        Write-Log -Message "Files directory not found at $filesDir (may not be required for all installer types)" -Level 'Warning'
+        Write-Log -Message "Files directory not found at $filesDir (may not be required)." -Level 'Warning'
     }
 
     # Validate disk space
@@ -85,12 +123,39 @@ function Test-PreInstallValidation {
         }
     }
 
-    # Validate architecture compatibility
+    # Validate architecture compatibility (array)
     if ($Configuration.Requirements.Architecture) {
+        $accepted = $Configuration.Requirements.Architecture
+        if ($accepted -is [string]) { $accepted = @($accepted) }
         $currentArch = if ([System.Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
-        $reqArch = $Configuration.Requirements.Architecture
-        if ($reqArch -eq 'x64' -and $currentArch -ne 'x64') {
-            $failures += "Architecture mismatch. Required: $reqArch, Current: $currentArch"
+        $archOk = ($currentArch -in $accepted) -or ($currentArch -eq 'x64' -and 'x86' -in $accepted)
+        if (-not $archOk) {
+            $failures += "Architecture mismatch. Accepted: $($accepted -join ', '), Current: $currentArch"
+        }
+    }
+
+    # Validate upgrade/downgrade
+    if ($Configuration.Upgrade -and $Configuration.Detection -and -not $Configuration.Testing.SkipDetection) {
+        $existingDetection = Invoke-Detection -DetectionConfig $Configuration.Detection
+        if ($existingDetection.Detected -and -not $Configuration.Upgrade.AllowDowngrade) {
+            if ($Configuration.Detection.MinimumVersion -and $Configuration.ApplicationVersion) {
+                try {
+                    $targetVersion = [version]$Configuration.ApplicationVersion
+                    $existingVersion = $null
+
+                    # Try to extract version from detection detail
+                    if ($existingDetection.Detail -match 'Version:\s*([\d.]+)') {
+                        $existingVersion = [version]$Matches[1]
+                    }
+
+                    if ($existingVersion -and $targetVersion -lt $existingVersion) {
+                        $failures += "Downgrade not allowed. Existing: $existingVersion, Target: $targetVersion"
+                    }
+                }
+                catch {
+                    Write-Log -Message "Could not compare versions for downgrade check: $_" -Level 'Warning'
+                }
+            }
         }
     }
 
@@ -113,6 +178,12 @@ function Test-PostInstallValidation {
         [Parameter(Mandatory)][int]$InstallerExitCode
     )
 
+    # Skip if validation is disabled
+    if ($Configuration.PostInstallValidation -and $Configuration.PostInstallValidation.Enabled -eq $false) {
+        Write-Log -Message "Post-install validation disabled in configuration." -Level 'Info'
+        return [PSCustomObject]@{ Passed = $true; Failures = @() }
+    }
+
     $failures = @()
     $returnCodes = $Configuration.ReturnCodes
 
@@ -128,7 +199,7 @@ function Test-PostInstallValidation {
     # Validate expected files
     if ($Configuration.PostInstallValidation.ExpectedFiles) {
         foreach ($expectedFile in $Configuration.PostInstallValidation.ExpectedFiles) {
-            if (-not (Test-Path $expectedFile)) {
+            if ($expectedFile -and -not (Test-Path $expectedFile)) {
                 $failures += "Expected file not found: $expectedFile"
             }
         }

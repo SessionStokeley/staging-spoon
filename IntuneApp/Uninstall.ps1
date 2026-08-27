@@ -32,48 +32,66 @@ try {
     $Config = Import-PowerShellDataFile -Path $configPath
 
     # Initialize logging
+    $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
+    $debugLogging = [bool]$Config.Testing.EnableDebugLogging
+
     Initialize-Logging `
         -ApplicationName    $Config.ApplicationName `
         -CompanyName        $Config.CompanyName `
         -ScriptName         'Uninstall' `
-        -ApplicationVersion $Config.ApplicationVersion
+        -ApplicationVersion $Config.ApplicationVersion `
+        -LoggingConfig      $loggingConfig `
+        -DebugLogging       $debugLogging
 
     Write-Log -Message "Package path: $PackagePath" -Level 'Info'
 
-    # Validate SYSTEM context
+    # Validate execution context
     $allowNonSystem = [bool]$Config.Testing.AllowNonSystemExecution
-    if (-not (Test-SystemContext -AllowNonSystem $allowNonSystem)) {
+    $requireSystem = if ($Config.Execution) { $Config.Execution.RequireSystem } else { $true }
+
+    if ($requireSystem -and -not (Test-SystemContext -AllowNonSystem $allowNonSystem)) {
         $script:ExitCode = 1
         Write-DeploymentSummary -Action 'Uninstall' -ExitCode $script:ExitCode -ErrorDetail 'Not running as SYSTEM'
         exit $script:ExitCode
     }
 
     # Check if application is present
-    Write-Log -Message "Checking if application is installed..." -Level 'Info'
-    if ($Config.Detection) {
-        $detection = Invoke-Detection -DetectionConfig $Config.Detection
-        if (-not $detection.Detected) {
-            Write-Log -Message "Application not detected. Nothing to uninstall: $($detection.Detail)" -Level 'Info'
-            $script:ExitCode = 0
-            Write-DeploymentSummary -Action 'Uninstall' -ExitCode $script:ExitCode `
-                -DetectionResult 'Not Installed' -ValidationResult 'PASS'
-            exit $script:ExitCode
+    if (-not $Config.Testing.SkipDetection) {
+        Write-Log -Message "Checking if application is installed..." -Level 'Info'
+        if ($Config.Detection) {
+            $detection = Invoke-Detection -DetectionConfig $Config.Detection
+            if (-not $detection.Detected) {
+                Write-Log -Message "Application not detected. Nothing to uninstall: $($detection.Detail)" -Level 'Info'
+                $script:ExitCode = 0
+                Write-DeploymentSummary -Action 'Uninstall' -ExitCode $script:ExitCode `
+                    -DetectionResult 'Not Installed' -ValidationResult 'PASS'
+                exit $script:ExitCode
+            }
+            Write-Log -Message "Application detected: $($detection.Detail)" -Level 'Info'
         }
-        Write-Log -Message "Application detected: $($detection.Detail)" -Level 'Info'
     }
 
-    # Stop configured processes
-    if ($Config.ProcessesToStop -and $Config.ProcessesToStop.Count -gt 0) {
-        Write-Log -Message "Stopping configured processes..." -Level 'Info'
-        Stop-ConfiguredProcesses -ProcessNames $Config.ProcessesToStop `
-            -Force ([bool]$Config.ForceStopProcesses) `
-            -TimeoutSeconds ($Config.GracefulStopTimeoutSeconds)
+    # Set environment variables if configured
+    if ($Config.Environment -and $Config.Environment.Variables) {
+        foreach ($key in $Config.Environment.Variables.Keys) {
+            Write-Log -Message "Setting environment variable: $key" -Level 'Debug'
+            [System.Environment]::SetEnvironmentVariable($key, $Config.Environment.Variables[$key], 'Process')
+        }
     }
 
-    # Stop configured services
-    if ($Config.ServicesToStop -and $Config.ServicesToStop.Count -gt 0) {
-        Write-Log -Message "Stopping configured services..." -Level 'Info'
-        Stop-ConfiguredServices -ServiceNames $Config.ServicesToStop
+    # Stop configured processes and services
+    $pm = $Config.ProcessManagement
+    if ($pm -and $pm.Enabled) {
+        if ($pm.Processes -and $pm.Processes.Count -gt 0) {
+            Write-Log -Message "Stopping configured processes..." -Level 'Info'
+            Stop-ConfiguredProcesses -ProcessNames $pm.Processes `
+                -Force ([bool]$pm.ForceStop) `
+                -TimeoutSeconds ($pm.GracefulStopTimeoutSeconds)
+        }
+        if ($pm.Services -and $pm.Services.Count -gt 0) {
+            Write-Log -Message "Stopping configured services..." -Level 'Info'
+            Stop-ConfiguredServices -ServiceNames $pm.Services
+        }
     }
 
     # Execute uninstall
@@ -88,7 +106,6 @@ try {
         'MSI' {
             $productCode = $uninstallerConfig.ProductCode
             if (-not $productCode) {
-                # Try to get from detection config
                 if ($Config.Detection.Type -eq 'MSI' -and $Config.Detection.ProductCode) {
                     $productCode = $Config.Detection.ProductCode
                 }
@@ -98,8 +115,8 @@ try {
             }
 
             $msiArgs = @('/x', $productCode)
-            if ($uninstallerConfig.UninstallArguments) {
-                $msiArgs += $uninstallerConfig.UninstallArguments -split ' '
+            if ($uninstallerConfig.Arguments) {
+                $msiArgs += $uninstallerConfig.Arguments -split ' '
             }
             else {
                 $msiArgs += @('/qn', '/norestart')
@@ -197,7 +214,7 @@ try {
 
     # Post-uninstall detection
     $detectionResult = 'N/A'
-    if ($Config.Detection) {
+    if ($Config.Detection -and -not $Config.Testing.SkipDetection) {
         Write-Log -Message "Running post-uninstall detection..." -Level 'Info'
         Start-Sleep -Seconds 2
         $postDetection = Invoke-Detection -DetectionConfig $Config.Detection
@@ -260,15 +277,20 @@ function Invoke-RegistryUninstall {
         return 0
     }
 
-    $uninstallString = $entry.UninstallString
+    # Prefer QuietUninstallString if available
+    $uninstallString = $entry.QuietUninstallString
+    if (-not $uninstallString) {
+        $uninstallString = $entry.UninstallString
+    }
+
     if (-not $uninstallString) {
         Write-Log -Message "No UninstallString found in registry for '$displayName'." -Level 'Error'
         return 1
     }
 
-    Write-Log -Message "Found registry uninstall: $uninstallString" -Level 'Info'
+    Write-Log -Message "Found registry uninstall entry: $($entry.DisplayName) $($entry.DisplayVersion)" -Level 'Info'
+    Write-Log -Message "Uninstall string: $uninstallString" -Level 'Info'
 
-    # Parse the uninstall string
     $uninstallString = $uninstallString.Trim('"')
 
     # Handle MsiExec entries
@@ -287,7 +309,6 @@ function Invoke-RegistryUninstall {
     $silentFlags = $Config.Uninstaller.Arguments
     if (-not $silentFlags) { $silentFlags = '/quiet /norestart' }
 
-    # Separate executable and existing arguments
     if ($uninstallString -match '^"?(.+\.exe)"?\s*(.*)$') {
         $exePath = $Matches[1]
         $existingArgs = $Matches[2]

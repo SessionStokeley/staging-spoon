@@ -20,8 +20,10 @@ function Find-Configuration {
 
     $candidates = @(
         (Join-Path $PSScriptRoot 'Configuration.psd1')
-        (Join-Path (Split-Path $MyInvocation.ScriptName -Parent) 'Configuration.psd1')
     )
+    if ($MyInvocation.ScriptName) {
+        $candidates += (Join-Path (Split-Path $MyInvocation.ScriptName -Parent) 'Configuration.psd1')
+    }
     foreach ($c in $candidates) {
         if (Test-Path $c) { return $c }
     }
@@ -43,6 +45,24 @@ function Invoke-Detection {
         default {
             return [PSCustomObject]@{ Detected = $false; Detail = "Unknown detection type: $($DetectionConfig.Type)" }
         }
+    }
+}
+
+function Compare-VersionString {
+    [CmdletBinding()]
+    param(
+        [version]$Actual,
+        [version]$Required,
+        [string]$Comparison = 'GreaterThanOrEqual'
+    )
+
+    switch ($Comparison) {
+        'Equal'              { return $Actual -eq $Required }
+        'GreaterThan'        { return $Actual -gt $Required }
+        'GreaterThanOrEqual' { return $Actual -ge $Required }
+        'LessThan'           { return $Actual -lt $Required }
+        'LessThanOrEqual'    { return $Actual -le $Required }
+        default              { return $Actual -ge $Required }
     }
 }
 
@@ -68,15 +88,18 @@ function Test-FileDetection {
             }
             if ($fileVersion) {
                 $fileVersion = $fileVersion -replace '[^0-9.]', ''
-                if ([version]$fileVersion -lt [version]$Config.MinimumVersion) {
+                $comparison = if ($Config.VersionComparison) { $Config.VersionComparison } else { 'GreaterThanOrEqual' }
+                $versionMatch = Compare-VersionString -Actual ([version]$fileVersion) -Required ([version]$Config.MinimumVersion) -Comparison $comparison
+
+                if (-not $versionMatch) {
                     return [PSCustomObject]@{
                         Detected = $false
-                        Detail   = "File found but version $fileVersion < $($Config.MinimumVersion)"
+                        Detail   = "File found but version $fileVersion does not satisfy $comparison $($Config.MinimumVersion)"
                     }
                 }
                 return [PSCustomObject]@{
                     Detected = $true
-                    Detail   = "File found: $filePath (Version: $fileVersion)"
+                    Detail   = "File found: $filePath (Version: $fileVersion, $comparison $($Config.MinimumVersion))"
                 }
             }
         }
@@ -108,10 +131,14 @@ function Test-RegistryDetection {
 
                 if ($Config.MinimumVersion -and $currentValue) {
                     $cleanVersion = $currentValue -replace '[^0-9.]', ''
-                    if ($cleanVersion -and ([version]$cleanVersion -ge [version]$Config.MinimumVersion)) {
-                        return [PSCustomObject]@{ Detected = $true; Detail = "Registry key found: $($Config.RegistryPath) Value: $currentValue" }
+                    if ($cleanVersion) {
+                        $comparison = if ($Config.VersionComparison) { $Config.VersionComparison } else { 'GreaterThanOrEqual' }
+                        $versionMatch = Compare-VersionString -Actual ([version]$cleanVersion) -Required ([version]$Config.MinimumVersion) -Comparison $comparison
+                        if ($versionMatch) {
+                            return [PSCustomObject]@{ Detected = $true; Detail = "Registry key found: $($Config.RegistryPath) Value: $currentValue ($comparison $($Config.MinimumVersion))" }
+                        }
+                        return [PSCustomObject]@{ Detected = $false; Detail = "Registry version $currentValue does not satisfy $comparison $($Config.MinimumVersion)" }
                     }
-                    return [PSCustomObject]@{ Detected = $false; Detail = "Registry version $currentValue < $($Config.MinimumVersion)" }
                 }
                 return [PSCustomObject]@{ Detected = $true; Detail = "Registry key found: $($Config.RegistryPath) Value: $currentValue" }
             }

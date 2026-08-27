@@ -4,18 +4,22 @@
     Centralized logging module for the Intune Win32 deployment framework.
 .DESCRIPTION
     Provides structured logging to files under C:\ProgramData\<CompanyName>\IntuneApps\<AppName>\.
-    All log entries include timestamp, computer name, context, and severity.
+    Supports configurable root path, log rotation, transcript recording, and size limits.
 #>
 
 $script:LogState = @{
-    Initialized   = $false
-    LogDirectory  = ''
-    CurrentLogFile = ''
-    ApplicationName = ''
+    Initialized        = $false
+    LogDirectory       = ''
+    CurrentLogFile     = ''
+    ApplicationName    = ''
     ApplicationVersion = ''
-    CompanyName   = ''
-    ScriptName    = ''
-    StartTime     = $null
+    CompanyName        = ''
+    ScriptName         = ''
+    StartTime          = $null
+    TranscriptActive   = $false
+    MaxLogSizeMB       = 10
+    RetainLogFiles     = 10
+    DebugLogging       = $false
 }
 
 function Initialize-Logging {
@@ -24,7 +28,9 @@ function Initialize-Logging {
         [Parameter(Mandatory)][string]$ApplicationName,
         [Parameter(Mandatory)][string]$CompanyName,
         [Parameter(Mandatory)][string]$ScriptName,
-        [string]$ApplicationVersion = ''
+        [string]$ApplicationVersion = '',
+        [hashtable]$LoggingConfig = @{},
+        [bool]$DebugLogging = $false
     )
 
     $script:LogState.ApplicationName    = $ApplicationName
@@ -32,10 +38,21 @@ function Initialize-Logging {
     $script:LogState.CompanyName        = $CompanyName
     $script:LogState.ScriptName         = $ScriptName
     $script:LogState.StartTime          = Get-Date
+    $script:LogState.DebugLogging       = $DebugLogging
 
-    $basePath = Join-Path $env:ProgramData $CompanyName
-    $appsPath = Join-Path $basePath 'IntuneApps'
-    $appPath  = Join-Path $appsPath $ApplicationName
+    if ($LoggingConfig.MaximumLogSizeMB) {
+        $script:LogState.MaxLogSizeMB = $LoggingConfig.MaximumLogSizeMB
+    }
+    if ($LoggingConfig.RetainLogFiles) {
+        $script:LogState.RetainLogFiles = $LoggingConfig.RetainLogFiles
+    }
+
+    # Build log directory path
+    $rootPath = $LoggingConfig.RootPath
+    if (-not $rootPath) {
+        $rootPath = Join-Path $env:ProgramData (Join-Path $CompanyName 'IntuneApps')
+    }
+    $appPath = Join-Path $rootPath $ApplicationName
     $script:LogState.LogDirectory = $appPath
 
     if (-not (Test-Path $appPath)) {
@@ -45,6 +62,21 @@ function Initialize-Logging {
     $logFileName = "$ScriptName.log"
     $script:LogState.CurrentLogFile = Join-Path $appPath $logFileName
     $script:LogState.Initialized = $true
+
+    # Rotate log if it exceeds size limit
+    Invoke-LogRotation
+
+    # Start transcript if configured
+    if ($LoggingConfig.IncludeTranscript) {
+        $transcriptFile = Join-Path $appPath "$ScriptName.transcript.log"
+        try {
+            Start-Transcript -Path $transcriptFile -Append -Force | Out-Null
+            $script:LogState.TranscriptActive = $true
+        }
+        catch {
+            # Transcript may already be running
+        }
+    }
 
     Write-Log -Message "=== $ScriptName Started ===" -Level 'Info'
     Write-Log -Message "Application: $ApplicationName $ApplicationVersion" -Level 'Info'
@@ -63,6 +95,10 @@ function Write-Log {
 
     if (-not $script:LogState.Initialized) {
         Write-Warning "Logging not initialized. Call Initialize-Logging first."
+        return
+    }
+
+    if ($Level -eq 'Debug' -and -not $script:LogState.DebugLogging) {
         return
     }
 
@@ -135,6 +171,46 @@ $(if ($ErrorDetail) { "Error           : $ErrorDetail" })
     }
 
     Write-Log -Message "=== $($script:LogState.ScriptName) Completed (Duration: $($duration.ToString('hh\:mm\:ss'))) ===" -Level 'Info'
+
+    # Stop transcript if active
+    if ($script:LogState.TranscriptActive) {
+        try { Stop-Transcript | Out-Null } catch {}
+        $script:LogState.TranscriptActive = $false
+    }
+}
+
+function Invoke-LogRotation {
+    [CmdletBinding()]
+    param()
+
+    $logFile = $script:LogState.CurrentLogFile
+    if (-not (Test-Path $logFile)) { return }
+
+    $fileSizeMB = (Get-Item $logFile).Length / 1MB
+    if ($fileSizeMB -lt $script:LogState.MaxLogSizeMB) { return }
+
+    $logDir  = Split-Path $logFile -Parent
+    $logName = [System.IO.Path]::GetFileNameWithoutExtension($logFile)
+    $logExt  = [System.IO.Path]::GetExtension($logFile)
+
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $archiveName = "${logName}_${timestamp}${logExt}"
+    $archivePath = Join-Path $logDir $archiveName
+
+    try {
+        Move-Item -Path $logFile -Destination $archivePath -Force
+    }
+    catch {
+        Write-Warning "Failed to rotate log file: $_"
+        return
+    }
+
+    # Prune old archives beyond retention limit
+    $archives = Get-ChildItem -Path $logDir -Filter "${logName}_*${logExt}" |
+        Sort-Object LastWriteTime -Descending
+    if ($archives.Count -gt $script:LogState.RetainLogFiles) {
+        $archives | Select-Object -Skip $script:LogState.RetainLogFiles | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-LogDirectory {

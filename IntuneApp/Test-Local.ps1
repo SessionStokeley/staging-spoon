@@ -12,7 +12,7 @@
     All, Install, Uninstall, Detection, Requirements, Validation, Logging, Package
 
 .PARAMETER EnableTestMode
-    Temporarily sets Testing.AllowNonSystemExecution = $true so scripts
+    Temporarily enables Testing.AllowNonSystemExecution so scripts
     run under the current user context instead of requiring SYSTEM.
 
 .EXAMPLE
@@ -74,6 +74,7 @@ if (Test-Path $configPath) {
         $Config = Import-PowerShellDataFile -Path $configPath
         Write-Host "  App Name     : $($Config.ApplicationName)" -ForegroundColor Green
         Write-Host "  App Version  : $($Config.ApplicationVersion)" -ForegroundColor Green
+        Write-Host "  Install Scope: $($Config.InstallScope)" -ForegroundColor Green
     }
     catch {
         Write-Host "  ERROR: Failed to load Configuration.psd1: $_" -ForegroundColor Red
@@ -108,6 +109,10 @@ if ($Test -in 'All', 'Package') {
             -Passed ([bool]$Config.ApplicationName) `
             -Detail $Config.ApplicationName
 
+        Write-TestResult -Name "Configuration has CompanyName" `
+            -Passed ([bool]$Config.CompanyName) `
+            -Detail $Config.CompanyName
+
         Write-TestResult -Name "Configuration has Installer section" `
             -Passed ([bool]$Config.Installer) `
             -Detail $(if ($Config.Installer) { "Type: $($Config.Installer.Type)" } else { "Missing" })
@@ -116,13 +121,44 @@ if ($Test -in 'All', 'Package') {
             -Passed ([bool]$Config.Detection) `
             -Detail $(if ($Config.Detection) { "Type: $($Config.Detection.Type)" } else { "Missing" })
 
-        # Validate installer file exists
+        Write-TestResult -Name "Configuration has ProcessManagement section" `
+            -Passed ([bool]$Config.ProcessManagement) `
+            -Detail $(if ($Config.ProcessManagement) { "Enabled: $($Config.ProcessManagement.Enabled)" } else { "Missing" })
+
+        Write-TestResult -Name "Configuration has Execution section" `
+            -Passed ([bool]$Config.Execution) `
+            -Detail $(if ($Config.Execution) { "RequireSystem: $($Config.Execution.RequireSystem)" } else { "Missing" })
+
+        # MSI validation
+        if ($Config.Installer.Type -eq 'MSI') {
+            Write-TestResult -Name "MSI has ProductCode" `
+                -Passed ([bool]$Config.Installer.ProductCode) `
+                -Detail $(if ($Config.Installer.ProductCode) { $Config.Installer.ProductCode } else { "Missing - required for MSI" })
+        }
+
+        # Installer file check
         if ($Config.Installer -and $Config.Installer.File) {
             $installerDir = if ($Config.Installer.WorkingDirectory) { $Config.Installer.WorkingDirectory } else { 'Files' }
             $installerPath = Join-Path $PackagePath (Join-Path $installerDir $Config.Installer.File)
             $installerExists = Test-Path $installerPath
             Write-TestResult -Name "Installer file exists" -Passed $installerExists `
                 -Detail $(if ($installerExists) { $installerPath } else { "Not found: $installerPath" })
+
+            # Hash validation
+            if ($installerExists -and $Config.Installer.SHA256) {
+                $actualHash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash
+                $hashMatch = $actualHash -eq $Config.Installer.SHA256
+                Write-TestResult -Name "Installer SHA256 integrity" -Passed $hashMatch `
+                    -Detail $(if ($hashMatch) { "Hash verified" } else { "Expected: $($Config.Installer.SHA256) | Actual: $actualHash" })
+            }
+        }
+
+        # Architecture validation
+        if ($Config.Requirements.Architecture) {
+            $arch = $Config.Requirements.Architecture
+            $isArray = $arch -is [array]
+            Write-TestResult -Name "Architecture is array format" -Passed $isArray `
+                -Detail $(if ($isArray) { "Values: $($arch -join ', ')" } else { "Should be @('x64') not '$arch'" })
         }
     }
 }
@@ -138,9 +174,10 @@ if ($Test -in 'All', 'Logging') {
 
         $testCompany = if ($Config.CompanyName) { $Config.CompanyName } else { 'TestCompany' }
         $testApp = if ($Config.ApplicationName) { $Config.ApplicationName } else { 'TestApp' }
+        $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
 
         Initialize-Logging -ApplicationName $testApp -CompanyName $testCompany `
-            -ScriptName 'Test-Local' -ApplicationVersion '1.0.0'
+            -ScriptName 'Test-Local' -ApplicationVersion '1.0.0' -LoggingConfig $loggingConfig
 
         $logDir = Get-LogDirectory
         $logFile = Get-LogFilePath
@@ -185,8 +222,9 @@ if ($Test -in 'All', 'Requirements') {
         if (-not $script:LogState.Initialized) {
             $testCompany = if ($Config.CompanyName) { $Config.CompanyName } else { 'TestCompany' }
             $testApp = if ($Config.ApplicationName) { $Config.ApplicationName } else { 'TestApp' }
+            $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
             Initialize-Logging -ApplicationName $testApp -CompanyName $testCompany `
-                -ScriptName 'Test-Requirements' -ApplicationVersion '1.0.0'
+                -ScriptName 'Test-Requirements' -ApplicationVersion '1.0.0' -LoggingConfig $loggingConfig
         }
 
         if ($Config -and $Config.Requirements) {
@@ -217,6 +255,11 @@ if ($Test -in 'All', 'Detection') {
             $detResult = Invoke-Detection -DetectionConfig $Config.Detection
             Write-TestResult -Name "Detection ($($Config.Detection.Type))" `
                 -Passed $detResult.Detected -Detail $detResult.Detail
+
+            if ($Config.Detection.VersionComparison) {
+                Write-TestResult -Name "Version comparison mode" -Passed $true `
+                    -Detail $Config.Detection.VersionComparison
+            }
         }
         else {
             Write-TestResult -Name "Detection" -Passed $false `
@@ -242,8 +285,9 @@ if ($Test -in 'All', 'Validation') {
         if (-not $script:LogState.Initialized) {
             $testCompany = if ($Config.CompanyName) { $Config.CompanyName } else { 'TestCompany' }
             $testApp = if ($Config.ApplicationName) { $Config.ApplicationName } else { 'TestApp' }
+            $loggingConfig = if ($Config.Logging) { $Config.Logging } else { @{} }
             Initialize-Logging -ApplicationName $testApp -CompanyName $testCompany `
-                -ScriptName 'Test-Validation' -ApplicationVersion '1.0.0'
+                -ScriptName 'Test-Validation' -ApplicationVersion '1.0.0' -LoggingConfig $loggingConfig
         }
 
         # SYSTEM context test

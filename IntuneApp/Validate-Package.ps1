@@ -5,7 +5,6 @@
 .DESCRIPTION
     Validates that a deployment package is complete and correctly configured
     before creating the .intunewin file and uploading to Intune.
-    Run this before packaging to catch configuration errors early.
 
 .PARAMETER PackagePath
     Path to the deployment package directory. Defaults to $PSScriptRoot.
@@ -93,7 +92,7 @@ if (Test-Path $configPath) {
 }
 
 if ($Config) {
-    # Application info
+    # --- Application info ---
     if ($Config.ApplicationName) {
         Add-ValidationPass "ApplicationName: $($Config.ApplicationName)"
     } else {
@@ -112,7 +111,19 @@ if ($Config) {
         Add-ValidationError "CompanyName is empty or missing (required for log paths)"
     }
 
-    # Installer section
+    # --- Install scope ---
+    if ($Config.InstallScope) {
+        $validScopes = @('Machine', 'User')
+        if ($Config.InstallScope -in $validScopes) {
+            Add-ValidationPass "InstallScope: $($Config.InstallScope)"
+        } else {
+            Add-ValidationError "Invalid InstallScope: $($Config.InstallScope). Valid: $($validScopes -join ', ')"
+        }
+    } else {
+        Add-ValidationWarning "InstallScope not set (defaults to Machine)"
+    }
+
+    # --- Installer section ---
     if ($Config.Installer) {
         $installerDir = if ($Config.Installer.WorkingDirectory) { $Config.Installer.WorkingDirectory } else { 'Files' }
 
@@ -120,9 +131,18 @@ if ($Config) {
             $installerPath = Join-Path $PackagePath (Join-Path $installerDir $Config.Installer.File)
             if (Test-Path $installerPath) {
                 Add-ValidationPass "Installer file exists: $($Config.Installer.File)"
-
                 $fileSize = (Get-Item $installerPath).Length / 1MB
                 Add-ValidationPass "Installer size: $([math]::Round($fileSize, 2)) MB"
+
+                # SHA256 check
+                if ($Config.Installer.SHA256) {
+                    $actualHash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash
+                    if ($actualHash -eq $Config.Installer.SHA256) {
+                        Add-ValidationPass "Installer SHA256 verified"
+                    } else {
+                        Add-ValidationError "Installer SHA256 mismatch. Expected: $($Config.Installer.SHA256) | Actual: $actualHash"
+                    }
+                }
             }
             else {
                 Add-ValidationError "Installer file not found: $installerPath"
@@ -148,15 +168,16 @@ if ($Config) {
             Add-ValidationWarning "No installer arguments configured (ensure silent install)"
         }
 
+        # MSI-specific: ProductCode required
         if ($installerType -eq 'MSI' -and -not $Config.Installer.ProductCode) {
-            Add-ValidationWarning "MSI installer without ProductCode - may be needed for uninstall"
+            Add-ValidationError "MSI installer requires ProductCode"
         }
     }
     else {
         Add-ValidationError "Installer section missing from configuration"
     }
 
-    # Uninstaller section
+    # --- Uninstaller section ---
     if ($Config.Uninstaller) {
         $validUninstallTypes = @('Executable', 'MSI', 'Registry', 'Custom')
         $uninstallType = if ($Config.Uninstaller.Type) { $Config.Uninstaller.Type } else { 'Executable' }
@@ -178,6 +199,11 @@ if ($Config) {
                     Add-ValidationError "Executable uninstall requires File in Uninstaller config"
                 }
             }
+            'Registry' {
+                if (-not $Config.Uninstaller.DisplayName -and -not $Config.ApplicationName) {
+                    Add-ValidationWarning "Registry uninstall without DisplayName will fall back to ApplicationName"
+                }
+            }
             'Custom' {
                 if (-not $Config.Uninstaller.Command) {
                     Add-ValidationError "Custom uninstall requires Command in Uninstaller config"
@@ -189,7 +215,7 @@ if ($Config) {
         Add-ValidationWarning "Uninstaller section missing - uninstall may not work"
     }
 
-    # Detection section
+    # --- Detection section ---
     if ($Config.Detection) {
         $validDetectionTypes = @('File', 'Registry', 'MSI', 'Service', 'Custom')
         if ($Config.Detection.Type -in $validDetectionTypes) {
@@ -197,6 +223,16 @@ if ($Config) {
         }
         else {
             Add-ValidationError "Invalid detection type: $($Config.Detection.Type)"
+        }
+
+        # VersionComparison
+        if ($Config.Detection.VersionComparison) {
+            $validComparisons = @('Equal', 'GreaterThan', 'GreaterThanOrEqual', 'LessThan', 'LessThanOrEqual')
+            if ($Config.Detection.VersionComparison -in $validComparisons) {
+                Add-ValidationPass "VersionComparison: $($Config.Detection.VersionComparison)"
+            } else {
+                Add-ValidationError "Invalid VersionComparison: $($Config.Detection.VersionComparison)"
+            }
         }
 
         switch ($Config.Detection.Type) {
@@ -226,7 +262,26 @@ if ($Config) {
         Add-ValidationError "Detection section missing - Intune requires detection rules"
     }
 
-    # Return codes
+    # --- ProcessManagement section ---
+    if ($Config.ProcessManagement) {
+        Add-ValidationPass "ProcessManagement section present (ForceStop: $($Config.ProcessManagement.ForceStop))"
+    }
+
+    # --- Execution section ---
+    if ($Config.Execution) {
+        Add-ValidationPass "Execution section present (RequireSystem: $($Config.Execution.RequireSystem))"
+    }
+
+    # --- Architecture validation ---
+    if ($Config.Requirements.Architecture) {
+        if ($Config.Requirements.Architecture -is [array]) {
+            Add-ValidationPass "Architecture: array format ($($Config.Requirements.Architecture -join ', '))"
+        } else {
+            Add-ValidationWarning "Architecture should be an array: @('$($Config.Requirements.Architecture)') instead of '$($Config.Requirements.Architecture)'"
+        }
+    }
+
+    # --- Return codes ---
     if ($Config.ReturnCodes) {
         if ($Config.ReturnCodes.Success -contains 0) {
             Add-ValidationPass "Return codes include 0 as success"
@@ -236,14 +291,24 @@ if ($Config) {
         }
     }
     else {
-        Add-ValidationWarning "ReturnCodes section missing - using defaults"
+        Add-ValidationWarning "ReturnCodes section missing"
     }
 
-    # Security check: no secrets in configuration
+    # --- Upgrade section ---
+    if ($Config.Upgrade) {
+        Add-ValidationPass "Upgrade section present (RemovePreviousVersion: $($Config.Upgrade.RemovePreviousVersion), AllowDowngrade: $($Config.Upgrade.AllowDowngrade))"
+    }
+
+    # --- Logging section ---
+    if ($Config.Logging) {
+        Add-ValidationPass "Logging section present (Enabled: $($Config.Logging.Enabled))"
+    }
+
+    # --- Security: no secrets ---
     $configContent = Get-Content $configPath -Raw
     $secretPatterns = @('password', 'secret', 'token', 'apikey', 'api_key', 'credential')
     foreach ($pattern in $secretPatterns) {
-        if ($configContent -match $pattern) {
+        if ($configContent -match "(?i)$pattern\s*=\s*['""](?!null)[^'""]+") {
             Add-ValidationWarning "Configuration may contain sensitive data (matched: $pattern). Review before packaging."
         }
     }
@@ -268,7 +333,7 @@ if (Test-Path $filesDir) {
     }
 }
 else {
-    Add-ValidationWarning "Files directory not found (may not be required for all installer types)"
+    Add-ValidationWarning "Files directory not found"
 }
 
 # =========================================================================
