@@ -1,5 +1,8 @@
 #Requires -Version 5.1
 
+# Registry path for Machine environment variables (used for REG_EXPAND_SZ-safe PATH writes)
+$script:EnvRegPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+
 function Initialize-Logging {
     [CmdletBinding()]
     param()
@@ -27,13 +30,75 @@ function Write-Log {
     }
 }
 
+function Send-EnvironmentChangeNotification {
+    [CmdletBinding()]
+    param()
+
+    # Broadcast WM_SETTINGCHANGE so running processes pick up the new environment.
+    # This is what [Environment]::SetEnvironmentVariable does internally, but we
+    # need it explicitly when writing to the registry directly to preserve REG_EXPAND_SZ.
+    if (-not ('Win32.NativeMethods' -as [type])) {
+        Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @'
+            [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+            public static extern IntPtr SendMessageTimeout(
+                IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+                uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+    }
+
+    $HWND_BROADCAST = [IntPtr]0xffff
+    $WM_SETTINGCHANGE = 0x001A
+    $SMTO_ABORTIFHUNG = 0x0002
+    $result = [UIntPtr]::Zero
+
+    [Win32.NativeMethods]::SendMessageTimeout(
+        $HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero,
+        'Environment', $SMTO_ABORTIFHUNG, 5000, [ref]$result
+    ) | Out-Null
+
+    Write-Log 'Broadcast WM_SETTINGCHANGE for environment update'
+}
+
+function Get-MachinePathRaw {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    # Read PATH without expanding %VAR% references, preserving REG_EXPAND_SZ content
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+        'SYSTEM\CurrentControlSet\Control\Session Manager\Environment', $false
+    )
+    try {
+        return $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    } finally {
+        if ($key) { $key.Close() }
+    }
+}
+
+function Set-MachinePathRaw {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Value
+    )
+
+    # Write PATH as REG_EXPAND_SZ to preserve %VAR% references in existing entries
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+        'SYSTEM\CurrentControlSet\Control\Session Manager\Environment', $true
+    )
+    try {
+        $key.SetValue('Path', $Value, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    } finally {
+        if ($key) { $key.Close() }
+    }
+}
+
 function Get-InstalledJdkPath {
     [CmdletBinding()]
     [OutputType([string])]
     param()
 
     # Strategy 1: Registry query — JavaSoft registers the current version here
-    $regPath = $script:AppConfig.RegistryPath
+    $regPath = $script:AppConfig.JdkRegistryPath
     if (Test-Path $regPath) {
         $currentVersion = (Get-ItemProperty -Path $regPath -Name 'CurrentVersion' -ErrorAction SilentlyContinue).CurrentVersion
         if ($currentVersion) {
@@ -48,16 +113,40 @@ function Get-InstalledJdkPath {
         }
     }
 
-    # Strategy 2: Filesystem fallback — find the newest jdk-* directory
-    $parentDir = $script:AppConfig.InstallParentDir
-    if (Test-Path $parentDir) {
+    # Strategy 2: Filesystem fallback — find the newest jdk-* directory across known locations
+    foreach ($parentDir in $script:AppConfig.InstallParentDirs) {
+        if (-not $parentDir -or -not (Test-Path $parentDir)) { continue }
+
         $jdkDir = Get-ChildItem -Path $parentDir -Directory -Filter 'jdk-*' |
-            Sort-Object { [version]($_.Name -replace '^jdk-', '' -replace '[^0-9.]', '') } -ErrorAction SilentlyContinue |
+            Sort-Object {
+                # Parse version from directory name: jdk-21, jdk-21.0.2, jdk-21.0.1_12
+                $versionStr = $_.Name -replace '^jdk-', '' -replace '[_+].*', ''
+                try { [version]$versionStr } catch { [version]'0.0' }
+            } |
             Select-Object -Last 1
 
         if ($jdkDir) {
             Write-Log "JDK found via filesystem: $($jdkDir.FullName)"
             return $jdkDir.FullName
+        }
+    }
+
+    return $null
+}
+
+function Get-InstalledProductGuid {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    foreach ($regPath in $script:AppConfig.UninstallRegistryPaths) {
+        $product = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like $script:AppConfig.ProductNamePattern } |
+            Select-Object -First 1
+
+        if ($product -and $product.PSChildName -match '^\{[0-9A-Fa-f-]+\}$') {
+            Write-Log "Found product GUID: $($product.PSChildName) ($($product.DisplayName))"
+            return $product.PSChildName
         }
     }
 
@@ -98,10 +187,12 @@ function Update-MachinePath {
         [string]$ObsoletePattern = $script:AppConfig.VendorPathPattern
     )
 
-    $currentPath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $currentPath = Get-MachinePathRaw
     Write-Log "Current Machine PATH: $currentPath"
 
     $normalizedNew = Resolve-NormalizedPath $NewEntry
+    # Also produce the expanded form for comparison against entries that may already be expanded
+    $expandedNew = Resolve-NormalizedPath ([Environment]::ExpandEnvironmentVariables($NewEntry))
     Write-Log "Required PATH entry: $normalizedNew"
 
     $entries = $currentPath -split ';' | Where-Object { $_.Trim() -ne '' }
@@ -112,13 +203,15 @@ function Update-MachinePath {
 
     foreach ($entry in $entries) {
         $normalized = Resolve-NormalizedPath $entry
+        # Expand for comparison — an entry might be stored as %ProgramFiles%\...
+        $expanded = Resolve-NormalizedPath ([Environment]::ExpandEnvironmentVariables($entry))
 
-        # Check if this is the entry we want to add
-        if ($normalized -ieq $normalizedNew) {
+        # Check if this is the entry we want to add (compare both raw and expanded forms)
+        if (($normalized -ieq $normalizedNew) -or ($expanded -ieq $expandedNew)) {
             if (-not $alreadyPresent) {
-                $keptEntries.Add($normalized)
+                $keptEntries.Add($entry)  # preserve original form (may contain %VAR%)
                 $alreadyPresent = $true
-                Write-Log "PATH entry already exists: $normalized"
+                Write-Log "PATH entry already exists: $entry"
             } else {
                 $removedEntries.Add($entry)
                 Write-Log "Removing duplicate PATH entry: $entry"
@@ -126,8 +219,8 @@ function Update-MachinePath {
             continue
         }
 
-        # Check if this is an obsolete managed entry to remove
-        if ($ObsoletePattern -and ($normalized -match $ObsoletePattern)) {
+        # Check if this is an obsolete managed entry to remove (compare expanded form)
+        if ($ObsoletePattern -and ($expanded -match $ObsoletePattern)) {
             $removedEntries.Add($entry)
             Write-Log "Removing obsolete managed PATH entry: $entry"
             continue
@@ -146,7 +239,8 @@ function Update-MachinePath {
     }
 
     $newPath = $keptEntries -join ';'
-    [Environment]::SetEnvironmentVariable('Path', $newPath, 'Machine')
+    Set-MachinePathRaw -Value $newPath
+    Send-EnvironmentChangeNotification
     Write-Log "Machine PATH updated successfully"
 }
 
@@ -156,15 +250,15 @@ function Remove-ManagedPathEntries {
         [string]$Pattern = $script:AppConfig.VendorPathPattern
     )
 
-    $currentPath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $currentPath = Get-MachinePathRaw
     $entries = $currentPath -split ';' | Where-Object { $_.Trim() -ne '' }
 
     $keptEntries = [System.Collections.Generic.List[string]]::new()
     $removed = $false
 
     foreach ($entry in $entries) {
-        $normalized = Resolve-NormalizedPath $entry
-        if ($normalized -match $Pattern) {
+        $expanded = Resolve-NormalizedPath ([Environment]::ExpandEnvironmentVariables($entry))
+        if ($expanded -match $Pattern) {
             Write-Log "Removing managed PATH entry: $entry"
             $removed = $true
         } else {
@@ -174,7 +268,8 @@ function Remove-ManagedPathEntries {
 
     if ($removed) {
         $newPath = $keptEntries -join ';'
-        [Environment]::SetEnvironmentVariable('Path', $newPath, 'Machine')
+        Set-MachinePathRaw -Value $newPath
+        Send-EnvironmentChangeNotification
         Write-Log "Managed PATH entries removed"
     } else {
         Write-Log "No managed PATH entries found to remove"
@@ -220,9 +315,11 @@ function Test-EnvironmentConfiguration {
         Write-Log "JAVA_HOME validated: $actualJavaHome"
     }
 
-    # Validate PATH contains the bin directory
-    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-    $pathEntries = $machinePath -split ';' | ForEach-Object { Resolve-NormalizedPath $_ }
+    # Validate PATH contains the bin directory (check expanded values)
+    $machinePath = Get-MachinePathRaw
+    $pathEntries = $machinePath -split ';' | ForEach-Object {
+        Resolve-NormalizedPath ([Environment]::ExpandEnvironmentVariables($_))
+    }
     if ($pathEntries -inotcontains $normalizedExpectedBin) {
         Write-Log "PATH validation failed. Expected entry not found: $normalizedExpectedBin" -Level ERROR
         $valid = $false

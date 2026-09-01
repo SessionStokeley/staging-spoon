@@ -8,14 +8,26 @@ $script:AppConfig = @{
     MsiArguments       = '/qn /norestart'
 
     # Registry path where JavaSoft registers the JDK
-    RegistryPath       = 'HKLM:\SOFTWARE\JavaSoft\JDK'
+    JdkRegistryPath    = 'HKLM:\SOFTWARE\JavaSoft\JDK'
 
-    # Filesystem fallback: parent directory under which JDK versions are installed
-    InstallParentDir   = Join-Path $env:ProgramFiles 'Java'
+    # Uninstall registry locations to search for the installed product GUID
+    UninstallRegistryPaths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
 
-    # Pattern matching any JDK bin directory this package manages (used for old-entry cleanup)
-    # Must match paths like C:\Program Files\Java\jdk-21\bin, C:\Program Files\Java\jdk-26\bin, etc.
-    VendorPathPattern  = '(?i)^[A-Z]:\\Program Files\\Java\\jdk-[\d.]+\\bin\\?$'
+    # DisplayName pattern to match the JDK in the uninstall registry (case-insensitive -like)
+    ProductNamePattern = 'Java*JDK*'
+
+    # Filesystem fallback: parent directories under which JDK versions may be installed
+    InstallParentDirs  = @(
+        (Join-Path $env:ProgramFiles 'Java')
+        (Join-Path ${env:ProgramFiles(x86)} 'Java')
+    )
+
+    # Regex matching any JDK bin directory this package manages (used for old-entry cleanup).
+    # Matches: C:\Program Files\Java\jdk-21\bin, C:\Program Files (x86)\Java\jdk-26.0.1\bin, etc.
+    VendorPathPattern  = '(?i)^[A-Z]:\\Program Files( \(x86\))?\\Java\\jdk-[\d.]+\\bin\\?$'
 
     # Log file location
     LogDirectory       = Join-Path $env:ProgramData 'IntuneApps\OracleJDK'
