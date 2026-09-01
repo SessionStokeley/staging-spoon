@@ -370,63 +370,214 @@ function Stop-ConfiguredServices {
     }
 }
 
+# --- Dynamic Path Discovery ---
+
+function Resolve-DynamicPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Discovery
+    )
+
+    $base    = $Discovery.DiscoveryBase
+    $pattern = $Discovery.Pattern
+
+    if (-not $base -or -not $pattern) {
+        Write-Log -Message "Dynamic path discovery requires DiscoveryBase and Pattern." -Level 'Error'
+        return $null
+    }
+
+    if (-not (Test-Path $base)) {
+        Write-Log -Message "Discovery base does not exist: $base" -Level 'Warning'
+        return $null
+    }
+
+    Write-Log -Message "Searching for '$pattern' in '$base'..." -Level 'Info'
+
+    $candidates = Get-ChildItem -Path $base -Filter $pattern -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending
+
+    if (-not $candidates -or $candidates.Count -eq 0) {
+        Write-Log -Message "No directories matching '$pattern' found in '$base'." -Level 'Warning'
+        return $null
+    }
+
+    Write-Log -Message "Found $($candidates.Count) candidate(s): $($candidates.Name -join ', ')" -Level 'Info'
+
+    $validationFile = $Discovery.ValidationFile
+    $selected = $null
+
+    foreach ($candidate in $candidates) {
+        $resolvedPath = $candidate.FullName
+        if ($Discovery.SubPath) {
+            $resolvedPath = Join-Path $resolvedPath $Discovery.SubPath
+        }
+
+        if (-not (Test-Path $resolvedPath)) {
+            Write-Log -Message "Skipping '$($candidate.Name)': resolved path does not exist." -Level 'Info'
+            continue
+        }
+
+        if ($validationFile) {
+            $checkPath = Join-Path $resolvedPath $validationFile
+            if (-not (Test-Path $checkPath)) {
+                Write-Log -Message "Skipping '$($candidate.Name)': validation file '$validationFile' not found." -Level 'Info'
+                continue
+            }
+            Write-Log -Message "Selected '$($candidate.Name)': validated by '$validationFile'." -Level 'Info'
+        }
+
+        $selected = $resolvedPath
+        break
+    }
+
+    if (-not $selected) {
+        Write-Log -Message "No valid installation found matching '$pattern' in '$base'." -Level 'Warning'
+    }
+
+    return $selected
+}
+
 # --- PATH Management ---
 
 function Add-PathEntries {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string[]]$Entries
+        [Parameter(Mandatory)][object[]]$Entries
     )
 
     $currentPath = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
-    $pathItems = $currentPath -split ';' | Where-Object { $_ -ne '' }
+    $pathItems = @($currentPath -split ';' | Where-Object { $_ -ne '' })
+    Write-Log -Message "Machine PATH before ($($pathItems.Count) entries): $currentPath" -Level 'Info'
+
     $changed = $false
 
     foreach ($entry in $Entries) {
-        if (-not $entry) { continue }
-        $normalized = $entry.TrimEnd('\')
-        $exists = $pathItems | Where-Object { $_.TrimEnd('\') -eq $normalized }
-        if ($exists) {
-            Write-Log -Message "PATH already contains: $entry" -Level 'Info'
+        if ($null -eq $entry) { continue }
+
+        $resolvedPath  = $null
+        $managedPrefix = $null
+
+        if ($entry -is [hashtable]) {
+            $resolvedPath = Resolve-DynamicPath -Discovery $entry
+            if (-not $resolvedPath) {
+                Write-Log -Message "Dynamic PATH entry could not be resolved; skipping." -Level 'Warning'
+                continue
+            }
+            $managedPrefix = $entry.ManagedPrefix
+        }
+        else {
+            $resolvedPath = [string]$entry
+            if (-not (Test-Path $resolvedPath)) {
+                Write-Log -Message "Static PATH entry does not exist on disk: $resolvedPath" -Level 'Warning'
+            }
+        }
+
+        if ($managedPrefix) {
+            $normalizedPrefix = $managedPrefix.TrimEnd('\', '/').ToLowerInvariant()
+            $obsolete = @($pathItems | Where-Object {
+                $norm = $_.TrimEnd('\', '/').ToLowerInvariant()
+                $norm.StartsWith($normalizedPrefix) -and
+                    ($_.TrimEnd('\', '/') -ine $resolvedPath.TrimEnd('\', '/'))
+            })
+            foreach ($old in $obsolete) {
+                Write-Log -Message "Removing obsolete PATH entry (upgrade): $old" -Level 'Info'
+                $pathItems = @($pathItems | Where-Object {
+                    $_.TrimEnd('\', '/') -ine $old.TrimEnd('\', '/')
+                })
+                $changed = $true
+            }
+        }
+
+        $alreadyPresent = $pathItems | Where-Object {
+            $_.TrimEnd('\', '/') -ieq $resolvedPath.TrimEnd('\', '/')
+        } | Select-Object -First 1
+
+        if ($alreadyPresent) {
+            Write-Log -Message "PATH already contains: $resolvedPath" -Level 'Info'
             continue
         }
-        $pathItems += $entry
+
+        $pathItems += $resolvedPath
         $changed = $true
-        Write-Log -Message "Added to Machine PATH: $entry" -Level 'Info'
+        Write-Log -Message "Added to Machine PATH: $resolvedPath" -Level 'Info'
     }
 
     if ($changed) {
         $newPath = ($pathItems -join ';')
         [System.Environment]::SetEnvironmentVariable('Path', $newPath, 'Machine')
-        Write-Log -Message "Machine PATH updated successfully." -Level 'Info'
+        Write-Log -Message "Machine PATH after ($($pathItems.Count) entries): $newPath" -Level 'Info'
+    }
+    else {
+        Write-Log -Message "No PATH changes required." -Level 'Info'
     }
 }
 
 function Remove-PathEntries {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string[]]$Entries
+        [Parameter(Mandatory)][object[]]$Entries
     )
 
     $currentPath = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
-    $pathItems = $currentPath -split ';' | Where-Object { $_ -ne '' }
+    $pathItems = @($currentPath -split ';' | Where-Object { $_ -ne '' })
+    Write-Log -Message "Machine PATH before ($($pathItems.Count) entries): $currentPath" -Level 'Info'
+
     $changed = $false
 
     foreach ($entry in $Entries) {
-        if (-not $entry) { continue }
-        $normalized = $entry.TrimEnd('\')
-        $before = $pathItems.Count
-        $pathItems = @($pathItems | Where-Object { $_.TrimEnd('\') -ne $normalized })
-        if ($pathItems.Count -lt $before) {
-            $changed = $true
-            Write-Log -Message "Removed from Machine PATH: $entry" -Level 'Info'
+        if ($null -eq $entry) { continue }
+
+        if ($entry -is [hashtable]) {
+            $managedPrefix = $entry.ManagedPrefix
+            if ($managedPrefix) {
+                $normalizedPrefix = $managedPrefix.TrimEnd('\', '/').ToLowerInvariant()
+                $matching = @($pathItems | Where-Object {
+                    $_.TrimEnd('\', '/').ToLowerInvariant().StartsWith($normalizedPrefix)
+                })
+                foreach ($match in $matching) {
+                    Write-Log -Message "Removing managed PATH entry: $match" -Level 'Info'
+                    $pathItems = @($pathItems | Where-Object {
+                        $_.TrimEnd('\', '/') -ine $match.TrimEnd('\', '/')
+                    })
+                    $changed = $true
+                }
+                if (-not $matching) {
+                    Write-Log -Message "No PATH entries found matching managed prefix '$managedPrefix'." -Level 'Info'
+                }
+            }
+
+            $resolvedPath = Resolve-DynamicPath -Discovery $entry
+            if ($resolvedPath) {
+                $before = $pathItems.Count
+                $pathItems = @($pathItems | Where-Object {
+                    $_.TrimEnd('\', '/') -ine $resolvedPath.TrimEnd('\', '/')
+                })
+                if ($pathItems.Count -lt $before) {
+                    $changed = $true
+                    Write-Log -Message "Removed resolved PATH entry: $resolvedPath" -Level 'Info'
+                }
+            }
+        }
+        else {
+            $staticPath = [string]$entry
+            $before = $pathItems.Count
+            $pathItems = @($pathItems | Where-Object {
+                $_.TrimEnd('\', '/') -ine $staticPath.TrimEnd('\', '/')
+            })
+            if ($pathItems.Count -lt $before) {
+                $changed = $true
+                Write-Log -Message "Removed from Machine PATH: $staticPath" -Level 'Info'
+            }
         }
     }
 
     if ($changed) {
         $newPath = ($pathItems -join ';')
         [System.Environment]::SetEnvironmentVariable('Path', $newPath, 'Machine')
-        Write-Log -Message "Machine PATH updated successfully." -Level 'Info'
+        Write-Log -Message "Machine PATH after ($($pathItems.Count) entries): $newPath" -Level 'Info'
+    }
+    else {
+        Write-Log -Message "No PATH removals required." -Level 'Info'
     }
 }
 
@@ -440,9 +591,38 @@ function Set-PersistentEnvironmentVariables {
 
     foreach ($key in $Variables.Keys) {
         $value = $Variables[$key]
+        $resolvedValue = $null
+
+        if ($value -is [hashtable]) {
+            $resolvedValue = Resolve-DynamicPath -Discovery $value
+            if (-not $resolvedValue) {
+                Write-Log -Message "Could not resolve dynamic value for env var '$key'; skipping." -Level 'Warning'
+                continue
+            }
+        }
+        else {
+            $resolvedValue = [string]$value
+        }
+
         try {
-            [System.Environment]::SetEnvironmentVariable($key, $value, 'Machine')
-            Write-Log -Message "Set Machine env var: $key = $value" -Level 'Info'
+            $currentValue = [System.Environment]::GetEnvironmentVariable($key, 'Machine')
+            if ($currentValue) {
+                Write-Log -Message "Env var '$key' current value: $currentValue" -Level 'Info'
+            }
+            else {
+                Write-Log -Message "Env var '$key' not currently set." -Level 'Info'
+            }
+
+            [System.Environment]::SetEnvironmentVariable($key, $resolvedValue, 'Machine')
+            Write-Log -Message "Set Machine env var: $key = $resolvedValue" -Level 'Info'
+
+            $verifyValue = [System.Environment]::GetEnvironmentVariable($key, 'Machine')
+            if ($verifyValue -ieq $resolvedValue) {
+                Write-Log -Message "Verified env var '$key' set correctly." -Level 'Info'
+            }
+            else {
+                Write-Log -Message "Env var '$key' verification failed. Expected: $resolvedValue, Actual: $verifyValue" -Level 'Warning'
+            }
         }
         catch {
             Write-Log -Message "Failed to set env var '$key': $_" -Level 'Warning'
@@ -458,6 +638,13 @@ function Remove-PersistentEnvironmentVariables {
 
     foreach ($key in $Variables.Keys) {
         try {
+            $currentValue = [System.Environment]::GetEnvironmentVariable($key, 'Machine')
+            if ($null -eq $currentValue) {
+                Write-Log -Message "Env var '$key' not set; nothing to remove." -Level 'Info'
+                continue
+            }
+
+            Write-Log -Message "Removing env var '$key' (current value: $currentValue)." -Level 'Info'
             [System.Environment]::SetEnvironmentVariable($key, $null, 'Machine')
             Write-Log -Message "Removed Machine env var: $key" -Level 'Info'
         }
@@ -465,6 +652,124 @@ function Remove-PersistentEnvironmentVariables {
             Write-Log -Message "Failed to remove env var '$key': $_" -Level 'Warning'
         }
     }
+}
+
+# --- Environment Validation ---
+
+function Test-EnvironmentConfiguration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$EnvironmentConfig
+    )
+
+    $failures = @()
+
+    if ($EnvironmentConfig.AddToMachinePath -and $EnvironmentConfig.AddToMachinePath.Count -gt 0) {
+        $currentPath = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $pathItems = @($currentPath -split ';' | Where-Object { $_ -ne '' })
+
+        foreach ($entry in $EnvironmentConfig.AddToMachinePath) {
+            if ($null -eq $entry) { continue }
+
+            $expectedPath = $null
+            if ($entry -is [hashtable]) {
+                $expectedPath = Resolve-DynamicPath -Discovery $entry
+            }
+            else {
+                $expectedPath = [string]$entry
+            }
+
+            if (-not $expectedPath) { continue }
+
+            $found = $pathItems | Where-Object {
+                $_.TrimEnd('\', '/') -ieq $expectedPath.TrimEnd('\', '/')
+            } | Select-Object -First 1
+
+            if ($found) {
+                Write-Log -Message "PATH validation PASS: '$expectedPath' is present." -Level 'Info'
+            }
+            else {
+                $msg = "PATH entry '$expectedPath' not found in Machine PATH."
+                Write-Log -Message "PATH validation FAIL: $msg" -Level 'Warning'
+                $failures += $msg
+            }
+
+            if (-not (Test-Path $expectedPath)) {
+                $msg = "PATH directory '$expectedPath' does not exist on disk."
+                Write-Log -Message "PATH validation FAIL: $msg" -Level 'Warning'
+                $failures += $msg
+            }
+
+            if ($entry -is [hashtable] -and $entry.ValidationFile) {
+                $exePath = Join-Path $expectedPath $entry.ValidationFile
+                if (Test-Path $exePath) {
+                    Write-Log -Message "Executable validation PASS: '$exePath'" -Level 'Info'
+                }
+                else {
+                    $msg = "Executable '$exePath' not found."
+                    Write-Log -Message "Executable validation FAIL: $msg" -Level 'Warning'
+                    $failures += $msg
+                }
+            }
+        }
+    }
+
+    if ($EnvironmentConfig.Variables -and $EnvironmentConfig.Variables.Count -gt 0) {
+        foreach ($key in $EnvironmentConfig.Variables.Keys) {
+            $value = $EnvironmentConfig.Variables[$key]
+            $expectedValue = $null
+
+            if ($value -is [hashtable]) {
+                $expectedValue = Resolve-DynamicPath -Discovery $value
+            }
+            else {
+                $expectedValue = [string]$value
+            }
+
+            if (-not $expectedValue) { continue }
+
+            $actualValue = [System.Environment]::GetEnvironmentVariable($key, 'Machine')
+            if ($actualValue -ieq $expectedValue) {
+                Write-Log -Message "Env var validation PASS: $key = $actualValue" -Level 'Info'
+            }
+            else {
+                $msg = "Env var '$key' expected '$expectedValue', got '$actualValue'."
+                Write-Log -Message "Env var validation FAIL: $msg" -Level 'Warning'
+                $failures += $msg
+            }
+
+            if ($expectedValue -match '\\' -and (Test-Path -Path $expectedValue -IsValid)) {
+                if (Test-Path $expectedValue) {
+                    Write-Log -Message "Env var path validation PASS: '$expectedValue' exists on disk." -Level 'Info'
+                }
+                else {
+                    $msg = "Env var '$key' path '$expectedValue' does not exist on disk."
+                    Write-Log -Message "Env var path validation FAIL: $msg" -Level 'Warning'
+                    $failures += $msg
+                }
+            }
+
+            if ($value -is [hashtable] -and $value.ValidationFile) {
+                $exePath = Join-Path $expectedValue $value.ValidationFile
+                if (Test-Path $exePath) {
+                    Write-Log -Message "Executable validation PASS: '$exePath'" -Level 'Info'
+                }
+                else {
+                    $msg = "Executable '$exePath' not found for env var '$key'."
+                    Write-Log -Message "Executable validation FAIL: $msg" -Level 'Warning'
+                    $failures += $msg
+                }
+            }
+        }
+    }
+
+    if ($failures.Count -eq 0) {
+        Write-Log -Message "Environment configuration validation PASSED." -Level 'Info'
+        return [PSCustomObject]@{ Passed = $true; Failures = @() }
+    }
+
+    Write-Log -Message "Environment validation: $($failures.Count) issue(s) found." -Level 'Warning'
+    return [PSCustomObject]@{ Passed = $false; Failures = $failures }
 }
 
 # --- File Associations (Framework-managed) ---

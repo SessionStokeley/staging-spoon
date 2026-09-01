@@ -596,7 +596,25 @@ if ($Config.Environment) {
         Add-Finding -Id 'PKG-090' -Severity 'Pass' -Component 'Environment' `
             -Message "AddToMachinePath: $($Config.Environment.AddToMachinePath.Count) entries"
         foreach ($pathEntry in $Config.Environment.AddToMachinePath) {
-            if ($pathEntry -and -not [System.IO.Path]::IsPathRooted($pathEntry)) {
+            if ($pathEntry -is [hashtable]) {
+                if (-not $pathEntry.DiscoveryBase -or -not $pathEntry.Pattern) {
+                    Add-Finding -Id 'PKG-091' -Severity 'Error' -Component 'Environment' `
+                        -Message "Dynamic PATH entry missing DiscoveryBase or Pattern" `
+                        -Expected 'Hashtable with DiscoveryBase and Pattern keys' `
+                        -Fix 'Add DiscoveryBase and Pattern to dynamic PATH entry'
+                }
+                elseif (-not [System.IO.Path]::IsPathRooted($pathEntry.DiscoveryBase)) {
+                    Add-Finding -Id 'PKG-091' -Severity 'Warning' -Component 'Environment' `
+                        -Message "Dynamic PATH DiscoveryBase is not absolute: $($pathEntry.DiscoveryBase)" `
+                        -Expected 'Absolute path (e.g. C:\Program Files\Java)' `
+                        -Fix 'Use fully qualified path for DiscoveryBase'
+                }
+                else {
+                    Add-Finding -Id 'PKG-091' -Severity 'Pass' -Component 'Environment' `
+                        -Message "Dynamic PATH: $($pathEntry.DiscoveryBase)\$($pathEntry.Pattern)$(if ($pathEntry.SubPath) { "\$($pathEntry.SubPath)" })"
+                }
+            }
+            elseif ($pathEntry -and -not [System.IO.Path]::IsPathRooted($pathEntry)) {
                 Add-Finding -Id 'PKG-091' -Severity 'Warning' -Component 'Environment' `
                     -Message "PATH entry is not absolute: $pathEntry" `
                     -Expected 'Absolute path (e.g. C:\Program Files\App\bin)' `
@@ -607,6 +625,21 @@ if ($Config.Environment) {
     if ($Config.Environment.Variables -and $Config.Environment.Variables.Count -gt 0) {
         Add-Finding -Id 'PKG-092' -Severity 'Pass' -Component 'Environment' `
             -Message "Environment variables: $($Config.Environment.Variables.Count)"
+        foreach ($varKey in $Config.Environment.Variables.Keys) {
+            $varValue = $Config.Environment.Variables[$varKey]
+            if ($varValue -is [hashtable]) {
+                if (-not $varValue.DiscoveryBase -or -not $varValue.Pattern) {
+                    Add-Finding -Id 'PKG-093' -Severity 'Error' -Component 'Environment' `
+                        -Message "Dynamic variable '$varKey' missing DiscoveryBase or Pattern" `
+                        -Expected 'Hashtable with DiscoveryBase and Pattern keys' `
+                        -Fix 'Add DiscoveryBase and Pattern to dynamic variable entry'
+                }
+                else {
+                    Add-Finding -Id 'PKG-093' -Severity 'Pass' -Component 'Environment' `
+                        -Message "Dynamic variable '$varKey': $($varValue.DiscoveryBase)\$($varValue.Pattern)"
+                }
+            }
+        }
     }
 }
 

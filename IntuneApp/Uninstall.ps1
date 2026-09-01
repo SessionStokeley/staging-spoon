@@ -129,6 +129,14 @@ try {
         Remove-PersistentEnvironmentVariables -Variables $Config.Environment.Variables
     }
 
+    # Environment refresh note
+    if ($Config.Environment -and (
+        ($Config.Environment.AddToMachinePath -and $Config.Environment.AddToMachinePath.Count -gt 0) -or
+        ($Config.Environment.Variables -and $Config.Environment.Variables.Count -gt 0)
+    )) {
+        Write-Log -Message "Environment changes apply to new processes. Existing shells retain previous values until restarted." -Level 'Info'
+    }
+
     # Remove framework-managed file associations
     $faConfig = $Config.FileAssociations
     if ($faConfig -and $faConfig.Mode -eq 'Framework' -and $faConfig.Associations -and $faConfig.Associations.Count -gt 0) {

@@ -109,17 +109,46 @@
     # ================================================================
     # ENVIRONMENT
     # ================================================================
+    # Supports static strings and dynamic discovery hashtables.
+    # Dynamic entries resolve installation paths at runtime via filesystem
+    # search, eliminating hardcoded version numbers.
+    #
+    # AddToMachinePath entries:
+    #   Static:  "C:\Program Files\Example\bin"
+    #   Dynamic: @{
+    #       DiscoveryBase  = "C:\Program Files\Java"       # Parent directory to search
+    #       Pattern        = "jdk-*"                        # Wildcard for directory matching
+    #       SubPath        = "bin"                          # Appended after matched directory
+    #       ValidationFile = "java.exe"                     # Must exist at resolved path
+    #       ManagedPrefix  = "C:\Program Files\Java\jdk-"   # For upgrade cleanup of old entries
+    #   }
+    #
+    # Variables values:
+    #   Static:  "JAVA_HOME" = "C:\Program Files\Java\jdk"
+    #   Dynamic: "JAVA_HOME" = @{
+    #       DiscoveryBase  = "C:\Program Files\Java"
+    #       Pattern        = "jdk-*"
+    #       ValidationFile = "bin\java.exe"
+    #   }
     Environment = @{
-        # Directories to add to the Machine-level PATH after installation.
-        # Automatically removed on uninstall.
         AddToMachinePath = @(
             # "C:\Program Files\Example\bin"
+            # @{
+            #     DiscoveryBase  = "C:\Program Files\Java"
+            #     Pattern        = "jdk-*"
+            #     SubPath        = "bin"
+            #     ValidationFile = "java.exe"
+            #     ManagedPrefix  = "C:\Program Files\Java\jdk-"
+            # }
         )
 
-        # Persistent Machine-level environment variables created after installation.
-        # Automatically removed on uninstall.
         Variables = @{
             # "JAVA_HOME" = "C:\Program Files\Java\jdk"
+            # "JAVA_HOME" = @{
+            #     DiscoveryBase  = "C:\Program Files\Java"
+            #     Pattern        = "jdk-*"
+            #     ValidationFile = "bin\java.exe"
+            # }
         }
     }
 

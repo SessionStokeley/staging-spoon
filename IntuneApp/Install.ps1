@@ -194,16 +194,29 @@ try {
     # POST-INSTALL PHASE
     # =====================================================================
 
+    # Environment: Persistent variables (set before PATH so vars like JAVA_HOME are established first)
+    if ($Config.Environment -and $Config.Environment.Variables -and $Config.Environment.Variables.Count -gt 0) {
+        Write-Log -Message "Configuring persistent environment variables..." -Level 'Info'
+        Set-PersistentEnvironmentVariables -Variables $Config.Environment.Variables
+    }
+
     # Environment: Machine PATH
     if ($Config.Environment -and $Config.Environment.AddToMachinePath -and $Config.Environment.AddToMachinePath.Count -gt 0) {
-        Write-Log -Message "Applying Machine PATH modifications..." -Level 'Info'
+        Write-Log -Message "Configuring Machine PATH..." -Level 'Info'
         Add-PathEntries -Entries $Config.Environment.AddToMachinePath
     }
 
-    # Environment: Persistent variables
-    if ($Config.Environment -and $Config.Environment.Variables -and $Config.Environment.Variables.Count -gt 0) {
-        Write-Log -Message "Setting persistent environment variables..." -Level 'Info'
-        Set-PersistentEnvironmentVariables -Variables $Config.Environment.Variables
+    # Environment: Post-configuration validation
+    if ($Config.Environment -and (
+        ($Config.Environment.AddToMachinePath -and $Config.Environment.AddToMachinePath.Count -gt 0) -or
+        ($Config.Environment.Variables -and $Config.Environment.Variables.Count -gt 0)
+    )) {
+        Write-Log -Message "Validating environment configuration..." -Level 'Info'
+        $envValidation = Test-EnvironmentConfiguration -EnvironmentConfig $Config.Environment
+        if (-not $envValidation.Passed) {
+            Write-Log -Message "Environment validation completed with warnings." -Level 'Warning'
+        }
+        Write-Log -Message "Environment changes apply to new processes. Existing shells require restart." -Level 'Info'
     }
 
     # File associations (Framework-managed only)
