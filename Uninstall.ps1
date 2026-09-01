@@ -1,10 +1,11 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Intune Win32 app uninstall script for Oracle JDK.
+    Intune Win32 app uninstall script. Supports MSI and EXE uninstall methods.
 .DESCRIPTION
-    Uninstalls JDK via product GUID (preferred) or MSI file fallback,
-    removes JAVA_HOME and managed PATH entries.
+    For MSI: uses product GUID from registry (preferred), falls back to MSI file.
+    For EXE: uses QuietUninstallString from registry, falls back to configured uninstall command.
+    Removes JAVA_HOME and managed PATH entries after product removal.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -16,68 +17,46 @@ Initialize-Logging
 
 try {
     Write-Log '=== Uninstallation started ==='
+    Write-Log "Application: $($AppConfig.ApplicationName)"
+    Write-Log "Uninstall type: $($AppConfig.UninstallType)"
 
-    $msiLogFile = Join-Path $AppConfig.LogDirectory 'msi-uninstall.log'
-    $uninstalled = $false
+    # --- Execute uninstaller ---
+    $exitCode = Invoke-Uninstaller -PackageRoot $PSScriptRoot
 
-    # --- Strategy 1: Uninstall via product GUID from registry ---
-    $productGuid = Get-InstalledProductGuid
-    if ($productGuid) {
-        Write-Log "Uninstalling via product GUID: $productGuid"
-        $arguments = "/x `"$productGuid`" /qn /norestart /l*v `"$msiLogFile`""
-        $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $arguments -Wait -PassThru -NoNewWindow
-
-        Write-Log "MSI uninstall exit code: $($process.ExitCode)"
-
-        if ($process.ExitCode -notin ($AppConfig.SuccessExitCodes + @(1605))) {
-            Write-Log "MSI uninstall failed with exit code $($process.ExitCode)" -Level ERROR
+    # -1 means no uninstall method was found (already removed or never installed)
+    if ($exitCode -ne -1) {
+        $allowedCodes = $AppConfig.SuccessExitCodes + @(1605)
+        if ($exitCode -notin $allowedCodes) {
+            Write-Log "Uninstall failed with exit code $exitCode" -Level ERROR
             exit 1
         }
-        $uninstalled = $true
     }
 
-    # --- Strategy 2: Fallback to MSI file if GUID not found ---
-    if (-not $uninstalled) {
-        $msiPath = Join-Path $PSScriptRoot $AppConfig.MsiFileName
-        if (Test-Path $msiPath) {
-            Write-Log "Product GUID not found. Uninstalling via MSI file: $msiPath"
-            $arguments = "/x `"$msiPath`" /qn /norestart /l*v `"$msiLogFile`""
-            $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+    # --- Clean up environment variables ---
+    if ($AppConfig.ConfigureEnvironment) {
+        Set-MachineEnvVar -Name 'JAVA_HOME' -Value ''
+        Remove-ManagedPathEntries
 
-            Write-Log "MSI uninstall exit code: $($process.ExitCode)"
-
-            if ($process.ExitCode -notin ($AppConfig.SuccessExitCodes + @(1605))) {
-                Write-Log "MSI uninstall failed with exit code $($process.ExitCode)" -Level ERROR
-                exit 1
-            }
+        # Validate cleanup
+        $javaHome = [Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')
+        if ($javaHome) {
+            Write-Log "JAVA_HOME still set after removal: $javaHome" -Level WARN
         } else {
-            Write-Log 'No product GUID or MSI file found — performing environment cleanup only' -Level WARN
+            Write-Log 'JAVA_HOME removed successfully'
         }
-    }
 
-    # --- Remove JAVA_HOME ---
-    Set-MachineEnvVar -Name 'JAVA_HOME' -Value ''
-
-    # --- Remove managed PATH entries ---
-    Remove-ManagedPathEntries
-
-    # --- Validate cleanup ---
-    $javaHome = [Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')
-    if ($javaHome) {
-        Write-Log "JAVA_HOME still set after removal: $javaHome" -Level WARN
-    } else {
-        Write-Log 'JAVA_HOME removed successfully'
-    }
-
-    $machinePath = Get-MachinePathRaw
-    $remaining = ($machinePath -split ';') | Where-Object {
-        $expanded = Resolve-NormalizedPath ([Environment]::ExpandEnvironmentVariables($_))
-        $expanded -match $AppConfig.VendorPathPattern
-    }
-    if ($remaining) {
-        Write-Log "Managed PATH entries still present: $($remaining -join '; ')" -Level WARN
-    } else {
-        Write-Log 'All managed PATH entries removed successfully'
+        if ($AppConfig.VendorPathPattern) {
+            $machinePath = Get-MachinePathRaw
+            $remaining = ($machinePath -split ';') | Where-Object {
+                $expanded = Resolve-NormalizedPath ([Environment]::ExpandEnvironmentVariables($_))
+                $expanded -match $AppConfig.VendorPathPattern
+            }
+            if ($remaining) {
+                Write-Log "Managed PATH entries still present: $($remaining -join '; ')" -Level WARN
+            } else {
+                Write-Log 'All managed PATH entries removed successfully'
+            }
+        }
     }
 
     Write-Log '=== Uninstallation completed ==='

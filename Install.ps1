@@ -1,20 +1,20 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Intune Win32 app install script for Oracle JDK.
+    Intune Win32 app install script. Supports MSI and EXE installers.
 .DESCRIPTION
-    Installs JDK via MSI, dynamically determines the installation path,
-    configures JAVA_HOME and Machine PATH using .NET environment APIs.
+    Executes the configured installer (MSI via msiexec or EXE directly),
+    dynamically determines the installation path, and optionally configures
+    JAVA_HOME and Machine PATH using registry-safe APIs.
     Idempotent, version-independent, safe for repeated execution.
 .NOTES
     Run context: SYSTEM (Intune managed installer)
     Machine-level environment changes do not affect already-running processes.
-    New processes launched after this script completes will inherit the updated PATH.
+    New processes launched after this script completes will inherit the updated environment.
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# Load configuration and helpers
 . (Join-Path $PSScriptRoot 'Config.ps1')
 . (Join-Path $PSScriptRoot 'Helpers.ps1')
 
@@ -23,59 +23,59 @@ Initialize-Logging
 try {
     Write-Log '=== Installation started ==='
     Write-Log "Application: $($AppConfig.ApplicationName)"
+    Write-Log "Installer type: $($AppConfig.InstallerType)"
 
-    # --- MSI Installation ---
-    $msiPath = Join-Path $PSScriptRoot $AppConfig.MsiFileName
-
-    if (-not (Test-Path $msiPath)) {
-        Write-Log "MSI not found: $msiPath" -Level ERROR
+    # --- Validate configuration ---
+    if (-not (Test-PackageConfiguration -PackageRoot $PSScriptRoot -ValidateInstallerExists)) {
+        Write-Log 'Package configuration validation failed' -Level ERROR
         exit 1
     }
 
-    Write-Log "Installing MSI: $msiPath"
+    # --- Execute installer ---
+    $exitCode = Invoke-Installer -PackageRoot $PSScriptRoot
 
-    $msiLogFile = Join-Path $AppConfig.LogDirectory 'msi-install.log'
-    $arguments = "/i `"$msiPath`" $($AppConfig.MsiArguments) /l*v `"$msiLogFile`""
-
-    $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $arguments -Wait -PassThru -NoNewWindow
-
-    Write-Log "MSI exit code: $($process.ExitCode)"
-
-    if ($process.ExitCode -notin $AppConfig.SuccessExitCodes) {
-        Write-Log "MSI installation failed with exit code $($process.ExitCode)" -Level ERROR
+    if ($exitCode -notin $AppConfig.SuccessExitCodes) {
+        Write-Log "Installation failed with exit code $exitCode" -Level ERROR
         exit 1
     }
 
-    $rebootRequired = $process.ExitCode -in $AppConfig.RebootExitCodes
+    $rebootRequired = $exitCode -in $AppConfig.RebootExitCodes
 
-    # --- Determine Installed Path ---
-    $javaHome = Get-InstalledJdkPath
+    # --- Post-install: environment configuration ---
+    if ($AppConfig.ConfigureEnvironment) {
+        Write-Log 'Configuring environment variables...'
 
-    if (-not $javaHome) {
-        Write-Log 'Failed to determine JDK installation path after MSI completed' -Level ERROR
-        exit 1
-    }
+        # Determine installed application path
+        $installPath = Get-InstalledJdkPath
 
-    # --- Verify Installation ---
-    if (-not (Test-JdkInstalled -JdkPath $javaHome)) {
-        Write-Log 'JDK verification failed — java.exe not found' -Level ERROR
-        exit 1
-    }
+        if (-not $installPath) {
+            Write-Log 'Failed to determine installation path after installer completed' -Level ERROR
+            exit 1
+        }
 
-    $javaBin = Join-Path $javaHome 'bin'
+        # Verify executable exists
+        if (-not (Test-JdkInstalled -JdkPath $installPath)) {
+            Write-Log 'Post-install verification failed' -Level ERROR
+            exit 1
+        }
 
-    # --- Configure JAVA_HOME ---
-    Set-MachineEnvVar -Name 'JAVA_HOME' -Value $javaHome
+        $binDir = Join-Path $installPath $AppConfig.PathSubdirectory
 
-    # --- Configure PATH (removes obsolete JDK entries, adds current) ---
-    Update-MachinePath -NewEntry $javaBin
+        # Set JAVA_HOME
+        Set-MachineEnvVar -Name 'JAVA_HOME' -Value $installPath
 
-    # --- Validate ---
-    $configValid = Test-EnvironmentConfiguration -ExpectedJavaHome $javaHome -ExpectedBinDir $javaBin
+        # Configure PATH (removes obsolete entries, adds current)
+        Update-MachinePath -NewEntry $binDir
 
-    if (-not $configValid) {
-        Write-Log 'Post-installation environment validation failed' -Level ERROR
-        exit 1
+        # Validate environment
+        $configValid = Test-EnvironmentConfiguration -ExpectedJavaHome $installPath -ExpectedBinDir $binDir
+
+        if (-not $configValid) {
+            Write-Log 'Post-installation environment validation failed' -Level ERROR
+            exit 1
+        }
+    } else {
+        Write-Log 'Environment configuration disabled — skipping PATH/env-var setup'
     }
 
     Write-Log '=== Installation completed successfully ==='
