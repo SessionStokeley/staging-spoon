@@ -107,10 +107,13 @@ Write-Host ""
 Write-Host "State Tracking" -ForegroundColor White
 
 $testApp = "TestApp_$(Get-Random)"
-$statePath = Get-EnvironmentStatePath $testApp
-Test-Assert 'State path contains app name' ($statePath -like "*$testApp*")
 
 try {
+    # Inside the try: resolving a C:\ path throws on non-Windows, and this
+    # whole section is Windows-only.
+    $statePath = Get-EnvironmentStatePath $testApp
+    Test-Assert 'State path contains app name' ($statePath -like "*$testApp*")
+
     $savedPath = Save-EnvironmentState -ApplicationName $testApp `
         -MachinePathEntries @('C:\Test\bin') `
         -UserPathEntries @() `
@@ -136,7 +139,7 @@ Write-Host ""
 # --- Find-CliDirectories ---
 Write-Host "Find-CliDirectories" -ForegroundColor White
 
-$testDir = Join-Path $env:TEMP "cli_test_$(Get-Random)"
+$testDir = Join-Path ([System.IO.Path]::GetTempPath()) "cli_test_$(Get-Random)"
 try {
     New-Item -Path $testDir -ItemType Directory -Force | Out-Null
     New-Item -Path (Join-Path $testDir 'bin') -ItemType Directory -Force | Out-Null
@@ -175,8 +178,18 @@ Write-Host ""
 # --- PATH Modification Tests (require elevation) ---
 Write-Host "PATH Modification (requires elevation)" -ForegroundColor White
 
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-$isSystem = ([Security.Principal.WindowsIdentity]::GetCurrent().Name -eq 'NT AUTHORITY\SYSTEM')
+# Windows principal APIs throw on other platforms, so probe defensively.
+$isAdmin = $false
+$isSystem = $false
+try {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $isAdmin = ([Security.Principal.WindowsPrincipal]$identity).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    $isSystem = ($identity.Name -eq 'NT AUTHORITY\SYSTEM')
+}
+catch {
+    # Not Windows: the elevated tests below are skipped.
+}
 
 if ($isAdmin -or $isSystem) {
     $testEntry = "C:\IntunePkgTest_$(Get-Random)"

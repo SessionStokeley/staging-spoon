@@ -6,26 +6,132 @@ Configuration-driven Microsoft Intune Win32 application packaging. Supports EXE 
 
 ```
 IntuneApp\
+├── New-IntuneApp.ps1        # Studio entry point (interactive generator)
 ├── Install.ps1              # Installation script
 ├── Uninstall.ps1            # Uninstallation script
 ├── Detection.ps1            # Detection script (used by Intune)
 ├── Configuration.psd1       # All app-specific settings
 ├── Test-Local.ps1           # Local testing helper
+├── Studio\                  # Interactive configuration generator
+│   ├── Analyzer.ps1         # Read-only installer analysis
+│   ├── ConfigModel.ps1      # Configuration schema and psd1 round-trip
+│   ├── ConfigGenerator.ps1  # Model -> .psd1 serializer
+│   ├── ConfigValidator.ps1  # Graded validation (error/warning/info)
+│   ├── Preview.ps1          # Plain-language description of a config
+│   ├── Prompt.ps1           # Console prompt primitives
+│   ├── Wizard.ps1           # The question flow
+│   ├── Runner.ps1           # Approval gate and engine hand-off
+│   └── Studio.ps1           # WPF graphical front end (Windows)
 ├── Helpers\
 │   └── Environment.ps1      # PATH and environment variable helpers
 ├── Tests\
-│   └── Test-Environment.ps1 # Automated tests
+│   ├── Test-Environment.ps1 # PATH/environment tests
+│   └── Test-Studio.ps1      # Generator tests
 └── Files\
     └── <installer>          # Your EXE or MSI
 ```
 
 ## Quick Start
 
+Let the Studio build the configuration for you:
+
+```powershell
+cd IntuneApp
+.\New-IntuneApp.ps1                      # console wizard
+.\New-IntuneApp.ps1 -Mode Gui            # graphical (Windows)
+```
+
+Or configure by hand:
+
 1. Place your installer in `IntuneApp\Files\`
 2. Edit `Configuration.psd1` with your application details
 3. Validate: `.\Test-Local.ps1 -Mode Validate`
 4. Test locally as Administrator: `.\Test-Local.ps1 -Mode Install`
 5. Package with `IntuneWinAppUtil.exe -c IntuneApp -s Install.ps1 -o Output`
+
+## Interactive Configuration Generator
+
+The Studio analyzes an installer, asks what it needs, and writes the
+`Configuration.psd1`. It does not install anything: generating a configuration
+and running one are separate, explicitly approved steps.
+
+```
+Select installer -> Analyze -> Questions -> Generate Config.psd1
+   -> Review -> Validate -> Approve -> Run -> Validate -> Build
+```
+
+The `.psd1` is the source of truth. The wizard is just a convenient way to
+write it, and the existing engine (`Install.ps1`, `Uninstall.ps1`,
+`Detection.ps1`) is what executes it.
+
+### Modes
+
+| Command | What it does |
+|---|---|
+| `.\New-IntuneApp.ps1` | Console wizard: analyze, ask, generate |
+| `.\New-IntuneApp.ps1 -Mode Gui` | Graphical version of the same flow (Windows only) |
+| `.\New-IntuneApp.ps1 -Mode Analyze -InstallerPath <file>` | Analysis only; writes nothing |
+| `.\New-IntuneApp.ps1 -Mode Validate` | Check a configuration |
+| `.\New-IntuneApp.ps1 -Mode Preview` | Describe what a configuration would do |
+| `.\New-IntuneApp.ps1 -Mode Run` | Validate, review, **approve**, then run the engine |
+| `.\New-IntuneApp.ps1 -Mode Build` | Build the `.intunewin` |
+| `.\New-IntuneApp.ps1 -OpenConfig <file>` | Re-open an existing configuration to edit |
+
+### What the analyzer reads
+
+Metadata only — the installer is never launched:
+
+- Name, publisher, version, architecture (from the PE header and version resource)
+- SHA256 hash and Authenticode signature status
+- Installer technology (Inno Setup, NSIS, WiX Burn, InstallShield, Squirrel, MSI and others)
+- Suggested silent switches for that technology, with a confidence level
+- MSI `ProductCode`, `ProductName` and `Manufacturer` from the MSI property table
+- Candidate CLI directories, when the application is already installed
+
+Recommendations carry `High`, `Medium` or `Low` confidence. Anything below
+`High` is called out so you can verify it against vendor documentation rather
+than trusting a guess.
+
+### Safety boundary
+
+```
+ANALYSIS -> CONFIGURATION -> REVIEW -> APPROVAL -> EXECUTION
+```
+
+While you are answering questions, nothing is installed, no PATH or registry
+value is touched, no shortcut or service is created, and no package is built.
+The wizard's only output is a file.
+
+`-Mode Run` shows the exact configuration path, lists only the effects that
+configuration actually enables, and requires you to type `run`. Validation
+errors block execution; warnings do not. Automation can pass `-Force` to skip
+the prompt, which should only be used where approval has already been obtained.
+
+The test suite enforces this boundary: it inspects the generator's source (with
+comments stripped) and fails if it ever gains a call that starts a process,
+writes the registry, modifies PATH, invokes the engine, or builds a package.
+
+### Editing the generated file
+
+The wizard prints the real `.psd1` with line numbers and syntax colouring, not
+a summary. You can edit the file directly at any point and re-open it:
+
+```powershell
+.\New-IntuneApp.ps1 -OpenConfig .\Configuration.psd1
+```
+
+Re-opening merges the file over the schema defaults, so older configurations
+still load, missing sections get sensible defaults, and hand-written keys the
+Studio does not know about are preserved. Saving is byte-stable: re-saving an
+unchanged configuration produces an identical file, so diffs stay clean.
+
+### Windows integration sections
+
+`WindowsIntegration` (shortcuts, file associations, context menu, services,
+scheduled tasks) is **recorded for review and hand-off**. The installer itself
+normally creates these, and the current packaging engine does not apply that
+section. Validation reports this as an informational finding rather than
+implying behavior the engine does not have.
 
 ## Intune Configuration
 
@@ -242,11 +348,18 @@ Test-Local.ps1 sets `$env:INTUNE_LOCAL_TEST` to suppress SYSTEM account warnings
 ## Automated Tests
 
 ```powershell
-# Run from IntuneApp directory
+# Run from the IntuneApp directory
 powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Environment.ps1
+powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Studio.ps1
 ```
 
-Tests cover path normalization, case-insensitive comparison, duplicate detection, state tracking, CLI discovery, expandable variable preservation, idempotency, and backward compatibility. PATH modification tests require Administrator elevation and skip gracefully otherwise.
+`Test-Studio.ps1` covers the configuration generator: psd1 serialization and
+round-tripping, save-cycle stability, schema merging and backward
+compatibility, installer analysis, validation grading, preview output, the
+end-to-end wizard flow, and the analysis/execution safety boundary. It runs on
+Windows PowerShell 5.1 and PowerShell 7, and installs nothing.
+
+`Test-Environment.ps1` covers path normalization, case-insensitive comparison, duplicate detection, state tracking, CLI discovery, expandable variable preservation, idempotency, and backward compatibility. PATH modification tests require Administrator elevation and skip gracefully otherwise.
 
 ## Packaging
 

@@ -358,7 +358,9 @@ function Find-CliDirectories {
             }
         }
 
-        $hasCli = ($cliExes | Where-Object { $_.IsCli }).Count -gt 0
+        # @() keeps a single match an array; without it .Count is missing when
+        # exactly one executable matches and strict mode is on.
+        $hasCli = @($cliExes | Where-Object { $_.IsCli }).Count -gt 0
         if (-not $hasCli -and $dir -eq $InstallPath) {
             if ($executables.Count -gt 0) { $hasCli = $true }
         }
@@ -428,7 +430,7 @@ function Remove-EnvironmentState {
     if (Test-Path $statePath) {
         Remove-Item $statePath -Force
         $stateDir = Split-Path $statePath -Parent
-        if ((Get-ChildItem $stateDir -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+        if (@(Get-ChildItem $stateDir -Force -ErrorAction SilentlyContinue).Count -eq 0) {
             Remove-Item $stateDir -Force -ErrorAction SilentlyContinue
         }
     }
