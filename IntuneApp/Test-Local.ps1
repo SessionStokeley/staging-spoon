@@ -88,7 +88,7 @@ switch ($Mode) {
     }
 
     'Install' {
-        Write-Banner "Intune Application Test — Install"
+        Write-Banner "Intune Application Test - Install"
         Write-Host "Application: $($Config.ApplicationName)"
         Write-Host "Mode: Install"
         Write-Host ""
@@ -110,7 +110,7 @@ switch ($Mode) {
     }
 
     'Uninstall' {
-        Write-Banner "Intune Application Test — Uninstall"
+        Write-Banner "Intune Application Test - Uninstall"
         Write-Host "Application: $($Config.ApplicationName)"
         Write-Host "Mode: Uninstall"
         Write-Host ""
@@ -132,7 +132,7 @@ switch ($Mode) {
     }
 
     'Detection' {
-        Write-Banner "Intune Application Test — Detection"
+        Write-Banner "Intune Application Test - Detection"
         Write-Host "Application: $($Config.ApplicationName)"
         Write-Host "Mode: Detection"
         Write-Host ""
