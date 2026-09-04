@@ -42,16 +42,24 @@ try {
     Write-Log "=== Install started for $appName ===" $logFile
     Write-Log "Running as: $([Security.Principal.WindowsIdentity]::GetCurrent().Name)" $logFile
 
-    # Verify SYSTEM (warn but don't block for local testing)
     if (-not (Test-SystemAccount)) {
-        Write-Log "WARNING: Not running as SYSTEM. Production deployments must run as SYSTEM." $logFile
+        if ($env:INTUNE_LOCAL_TEST) {
+            Write-Log "Local test mode: skipping SYSTEM check." $logFile
+        }
+        else {
+            Write-Log "WARNING: Not running as SYSTEM. Production deployments must run as SYSTEM." $logFile
+            Write-Warning "Not running as SYSTEM. Use Test-Local.ps1 for local testing."
+        }
     }
 
     # Locate installer
-    $installerPath = Join-Path (Join-Path $ScriptDir 'Files') $Config.Installer.File
+    $filesDir = Join-Path $ScriptDir 'Files'
+    $installerPath = Join-Path $filesDir $Config.Installer.File
     if (-not (Test-Path $installerPath)) {
-        Write-Log "ERROR: Installer not found: $installerPath" $logFile
-        Write-Error "Installer not found: $installerPath"
+        $available = if (Test-Path $filesDir) { (Get-ChildItem $filesDir -File | Select-Object -ExpandProperty Name) -join ', ' } else { '(Files directory missing)' }
+        if (-not $available) { $available = '(empty)' }
+        Write-Log "ERROR: Installer not found: $($Config.Installer.File). Files directory contains: $available" $logFile
+        Write-Error "Installer not found: $($Config.Installer.File). Files directory contains: $available"
         exit 1
     }
     Write-Log "Installer: $installerPath" $logFile

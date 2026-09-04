@@ -41,10 +41,27 @@ function Test-Package {
     }
 
     # Installer file
-    $installerPath = Join-Path (Join-Path $ScriptDir 'Files') $Config.Installer.File
+    $filesDir = Join-Path $ScriptDir 'Files'
+    $installerPath = Join-Path $filesDir $Config.Installer.File
     $installerExists = Test-Path $installerPath
     Write-Result "Installer: $($Config.Installer.File)" $installerExists
-    if (-not $installerExists) { $allPass = $false }
+    if (-not $installerExists) {
+        $allPass = $false
+        if (Test-Path $filesDir) {
+            $found = Get-ChildItem $filesDir -File | Select-Object -ExpandProperty Name
+            if ($found) {
+                Write-Host "  Files directory contains:" -ForegroundColor Yellow
+                $found | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
+                Write-Host "  Update Configuration.psd1 Installer.File to match." -ForegroundColor Yellow
+            }
+            else {
+                Write-Host "  Files directory is empty. Place your installer there." -ForegroundColor Yellow
+            }
+        }
+        else {
+            Write-Host "  Files directory missing. Create it and place your installer there." -ForegroundColor Yellow
+        }
+    }
 
     # Configuration checks
     $hasName = [bool]$Config.ApplicationName
@@ -79,6 +96,8 @@ function Test-Package {
 }
 
 # --- Main ---
+
+$env:INTUNE_LOCAL_TEST = '1'
 
 $Config = Import-PowerShellDataFile (Join-Path $ScriptDir 'Configuration.psd1')
 

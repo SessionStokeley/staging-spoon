@@ -43,7 +43,13 @@ try {
     Write-Log "Running as: $([Security.Principal.WindowsIdentity]::GetCurrent().Name)" $logFile
 
     if (-not (Test-SystemAccount)) {
-        Write-Log "WARNING: Not running as SYSTEM. Production deployments must run as SYSTEM." $logFile
+        if ($env:INTUNE_LOCAL_TEST) {
+            Write-Log "Local test mode: skipping SYSTEM check." $logFile
+        }
+        else {
+            Write-Log "WARNING: Not running as SYSTEM. Production deployments must run as SYSTEM." $logFile
+            Write-Warning "Not running as SYSTEM. Use Test-Local.ps1 for local testing."
+        }
     }
 
     $uninstallType = $Config.Uninstaller.Type.ToUpper()
