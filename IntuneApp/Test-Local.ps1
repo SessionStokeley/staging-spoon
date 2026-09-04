@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Install', 'Uninstall', 'Detection', 'Validate', 'Environment', 'DetectPaths', 'TestCommand')]
+    [ValidateSet('Install', 'Uninstall', 'Detection', 'Validate', 'Environment', 'DetectPaths', 'TestCommand', 'PathDiagnostics')]
     [string]$Mode,
 
     [string]$Command,
@@ -312,6 +312,16 @@ switch ($Mode) {
         $overallResult = if ($allPass) { "ENVIRONMENT PASS" } else { "ENVIRONMENT FAIL" }
         Write-Host "RESULT: $overallResult" -ForegroundColor $overallColor
         Write-Host "========================================" -ForegroundColor Cyan
+    }
+
+    'PathDiagnostics' {
+        # Read-only report explaining why PATH registration succeeds or fails.
+        $entries = @()
+        if ($Config.Environment) {
+            if ($Config.Environment.SystemPath) { $entries += @($Config.Environment.SystemPath.Entries) }
+            if ($Config.Environment.UserPath)   { $entries += @($Config.Environment.UserPath.Entries) }
+        }
+        Get-PathDiagnostics -Entries ($entries | Where-Object { $_ })
     }
 
     'DetectPaths' {

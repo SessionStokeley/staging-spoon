@@ -81,6 +81,16 @@ Test-Assert 'Empty vs non-empty not equal' (-not $r)
 $r = Test-PathEntriesEqual 'C:\App' $null
 Test-Assert 'Non-empty vs null not equal' (-not $r)
 
+# An expandable entry and its expanded form are the same directory, so the
+# duplicate check must catch it rather than adding the folder twice.
+$expanded = [Environment]::ExpandEnvironmentVariables('%TESTVAR_EQ%')
+$env:TESTVAR_EQ = 'C:\ExpandCompare'
+$r = Test-PathEntriesEqual '%TESTVAR_EQ%\bin' 'C:\ExpandCompare\bin'
+Test-Assert 'Expandable entry equals its expanded form' $r
+$r = Test-PathEntriesEqual '%TESTVAR_EQ%\bin' 'C:\Somewhere\else'
+Test-Assert 'Expansion does not create false matches' (-not $r)
+Remove-Item Env:\TESTVAR_EQ -ErrorAction SilentlyContinue
+
 Write-Host ""
 
 # --- Split-PathString / Join-PathEntries ---
@@ -242,6 +252,18 @@ if ($isAdmin -or $isSystem) {
     Test-Assert 'Idempotent add: only one entry' ($count -eq 1)
     Remove-PathEntry -Entry $testEntry2 -Scope 'Machine' | Out-Null
 
+    # Regression: passing -AddIfMissing:$false used to skip the write silently
+    # and still report Success, so registration "failed" with no reason logged.
+    $testEntry3 = "C:\AddIfMissingFalse_$(Get-Random)"
+    $r10 = Add-PathEntry -Entry $testEntry3 -Scope 'Machine' -AddIfMissing:$false
+    Test-Assert 'AddIfMissing:$false still adds a missing entry' ($r10.Action -eq 'Added') "Action was $($r10.Action)"
+    Test-Assert 'AddIfMissing:$false entry is really registered' (Test-PathEntry -Entry $testEntry3 -Scope 'Machine')
+    Remove-PathEntry -Entry $testEntry3 -Scope 'Machine' | Out-Null
+
+    # A failed write must report Success = $false, never a silent no-op.
+    $r11 = Add-PathEntry -Entry '' -Scope 'Machine'
+    Test-Assert 'Empty entry reports failure' (-not $r11.Success)
+
     # Environment variable test
     $testVarName = "INTUNE_TEST_VAR_$(Get-Random)"
     $r7 = Add-EnvironmentVariable -Name $testVarName -Value 'TestValue' -Scope 'Machine'
@@ -269,16 +291,37 @@ if ($isAdmin -or $isSystem) {
     $hasExpandable = $beforePath -match '%\w+%'
     Test-Assert 'Machine PATH has expandable vars' $hasExpandable
 
+    # The read must not expand: Get-ItemProperty and
+    # [Environment]::GetEnvironmentVariable both do, and writing the expanded
+    # text back would strip every %VAR% from the machine PATH.
+    $expandedRead = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    if ($hasExpandable) {
+        Test-Assert 'Get-PersistentPath returns the raw, unexpanded value' `
+            ($beforePath -ne $expandedRead) `
+            'The raw read matched the expanded read, so expansion is leaking through.'
+    }
+
     $testEntry = "C:\ExpandTest_$(Get-Random)"
     Add-PathEntry -Entry $testEntry -Scope 'Machine' | Out-Null
     $afterPath = Get-PersistentPath -Scope 'Machine'
-    $stillHasExpandable = $afterPath -match '%\w+%'
-    Test-Assert 'Expandable vars preserved after add' $stillHasExpandable
+    Test-Assert 'Expandable vars preserved after add' ($afterPath -match '%\w+%')
+
+    # The exact %VAR% tokens must survive, not merely "some" variable.
+    $beforeVars = @([regex]::Matches($beforePath, '%\w+%') | ForEach-Object { $_.Value.ToLower() } | Sort-Object -Unique)
+    $afterVars  = @([regex]::Matches($afterPath,  '%\w+%') | ForEach-Object { $_.Value.ToLower() } | Sort-Object -Unique)
+    Test-Assert 'Every expandable token survives the write' `
+        ((($beforeVars -join ',') -eq ($afterVars -join ','))) `
+        "before: $($beforeVars -join ',') / after: $($afterVars -join ',')"
+
+    # The value must stay REG_EXPAND_SZ, or %VAR% entries stop resolving.
+    Test-Assert 'PATH remains REG_EXPAND_SZ' `
+        ((Get-PersistentPathKind -Scope 'Machine') -eq [Microsoft.Win32.RegistryValueKind]::ExpandString)
 
     Remove-PathEntry -Entry $testEntry -Scope 'Machine' | Out-Null
     $finalPath = Get-PersistentPath -Scope 'Machine'
-    $stillPreserved = $finalPath -match '%\w+%'
-    Test-Assert 'Expandable vars preserved after remove' $stillPreserved
+    Test-Assert 'Expandable vars preserved after remove' ($finalPath -match '%\w+%')
+    Test-Assert 'PATH restored exactly after add and remove' ($finalPath -eq $beforePath) `
+        'Add followed by remove did not return the PATH to its original text.'
 }
 else {
     Test-Skip 'Expandable variable preservation' 'Not elevated'

@@ -3,6 +3,55 @@
 # Shared helper functions for PATH and environment variable management.
 # Dot-source this file from Install.ps1, Uninstall.ps1, or Test-Local.ps1.
 
+# Install.ps1 and Uninstall.ps1 define their own Write-Log. This fallback keeps
+# the orchestrators usable when the helper is dot-sourced anywhere else
+# (Test-Local.ps1, the Studio, the test suite), where a missing Write-Log would
+# otherwise abort the whole environment step.
+if (-not (Get-Command Write-Log -ErrorAction SilentlyContinue)) {
+    function Write-Log {
+        param([string]$Message, [string]$LogFile)
+        if (-not $LogFile) { return }
+        $entry = "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
+        $entry | Out-File -FilePath $LogFile -Append -Encoding utf8
+    }
+}
+
+# Registry locations of the persistent environment blocks.
+$script:MachineEnvKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+$script:UserEnvKey    = 'Environment'
+
+function Get-EnvRegistryKey {
+    <#
+        Opens the environment registry key for a scope.
+
+        The raw RegistryKey API is used rather than Get-ItemProperty because
+        only it can read a REG_EXPAND_SZ without expanding it - see
+        Get-PersistentPath.
+    #>
+    param(
+        [Parameter(Mandatory)][ValidateSet('Machine', 'User')][string]$Scope,
+        [switch]$Writable
+    )
+
+    # Fail with a clear reason off-Windows instead of a null-reference error.
+    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
+        throw 'The Windows registry is not available on this platform. PATH management requires Windows.'
+    }
+
+    $hive = if ($Scope -eq 'Machine') {
+        [Microsoft.Win32.Registry]::LocalMachine
+    }
+    else {
+        [Microsoft.Win32.Registry]::CurrentUser
+    }
+    if (-not $hive) {
+        throw 'The Windows registry is not available on this platform. PATH management requires Windows.'
+    }
+
+    $subKey = if ($Scope -eq 'Machine') { $script:MachineEnvKey } else { $script:UserEnvKey }
+    return $hive.OpenSubKey($subKey, [bool]$Writable)
+}
+
 function Normalize-PathEntry {
     param([string]$Path)
     if (-not $Path) { return $null }
@@ -10,49 +59,147 @@ function Normalize-PathEntry {
     return $Path
 }
 
+function Expand-PathEntry {
+    <#
+        Expands %VARIABLES% for comparison purposes only. The raw form is
+        always what gets written back to the registry.
+    #>
+    param([string]$Path)
+    if (-not $Path) { return $null }
+    try { return [Environment]::ExpandEnvironmentVariables($Path) }
+    catch { return $Path }
+}
+
 function Test-PathEntriesEqual {
+    <#
+        Case-insensitive comparison that ignores trailing slashes and treats
+        an expandable entry as equal to its expanded form, so
+        '%ProgramFiles%\App' and 'C:\Program Files\App' are recognised as the
+        same directory rather than added twice.
+    #>
     param([string]$A, [string]$B)
+
     $normA = Normalize-PathEntry $A
     $normB = Normalize-PathEntry $B
     if (-not $normA -or -not $normB) { return $false }
-    return ($normA.Equals($normB, [StringComparison]::OrdinalIgnoreCase))
+
+    if ($normA.Equals($normB, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+
+    $expA = Normalize-PathEntry (Expand-PathEntry $normA)
+    $expB = Normalize-PathEntry (Expand-PathEntry $normB)
+    if (-not $expA -or -not $expB) { return $false }
+
+    return ($expA.Equals($expB, [StringComparison]::OrdinalIgnoreCase))
 }
 
 function Get-PersistentPath {
+    <#
+        Reads the persistent PATH for a scope, WITHOUT expanding environment
+        variables.
+
+        This must not use Get-ItemProperty or [Environment]::GetEnvironmentVariable:
+        both expand REG_EXPAND_SZ, so '%SystemRoot%\system32' comes back as
+        'C:\Windows\system32'. Writing that expanded text back would strip every
+        %VAR% out of the machine PATH permanently.
+    #>
     param(
         [Parameter(Mandatory)]
         [ValidateSet('Machine', 'User')]
         [string]$Scope
     )
-    $target = [System.EnvironmentVariableTarget]::$Scope
-    $regPath = if ($Scope -eq 'Machine') {
-        'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+
+    $key = $null
+    try {
+        $key = Get-EnvRegistryKey -Scope $Scope
+        if (-not $key) { return '' }
+
+        $value = $key.GetValue(
+            'Path', '',
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+
+        if ($null -eq $value) { return '' }
+        return [string]$value
     }
-    else {
-        'HKCU:\Environment'
+    finally {
+        if ($key) { $key.Close() }
     }
-    $prop = Get-ItemProperty -Path $regPath -Name 'Path' -ErrorAction SilentlyContinue
-    if ($prop) {
-        return $prop.Path
+}
+
+function Get-PersistentPathKind {
+    <#
+        Returns the registry value kind of the PATH value so a write can
+        preserve it (normally ExpandString).
+    #>
+    param(
+        [Parameter(Mandatory)][ValidateSet('Machine', 'User')][string]$Scope
+    )
+
+    $key = $null
+    try {
+        $key = Get-EnvRegistryKey -Scope $Scope
+        if (-not $key) { return [Microsoft.Win32.RegistryValueKind]::ExpandString }
+
+        $kind = $key.GetValueKind('Path')
+        # Never downgrade to REG_SZ: PATH is expected to be REG_EXPAND_SZ, and
+        # a REG_SZ PATH stops %VAR% entries resolving for other software.
+        if ($kind -eq [Microsoft.Win32.RegistryValueKind]::String) {
+            return [Microsoft.Win32.RegistryValueKind]::ExpandString
+        }
+        return $kind
     }
-    return [Environment]::GetEnvironmentVariable('Path', $target)
+    catch {
+        return [Microsoft.Win32.RegistryValueKind]::ExpandString
+    }
+    finally {
+        if ($key) { $key.Close() }
+    }
 }
 
 function Set-PersistentPath {
+    <#
+        Writes the persistent PATH for a scope and confirms the write landed.
+
+        Throws on failure so callers report a real reason instead of silently
+        reporting success for a PATH that was never changed.
+    #>
     param(
         [Parameter(Mandatory)]
         [ValidateSet('Machine', 'User')]
         [string]$Scope,
         [Parameter(Mandatory)]
+        [AllowEmptyString()]
         [string]$Value
     )
-    $regPath = if ($Scope -eq 'Machine') {
-        'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+
+    # The registry caps a value at 32767 characters. Refuse rather than let
+    # Windows truncate a PATH, which is unrecoverable for the machine.
+    if ($Value.Length -gt 32767) {
+        throw "The resulting $Scope PATH would be $($Value.Length) characters, over the 32767 limit. No change was made."
     }
-    else {
-        'HKCU:\Environment'
+
+    $kind = Get-PersistentPathKind -Scope $Scope
+
+    $key = $null
+    try {
+        $key = Get-EnvRegistryKey -Scope $Scope -Writable
+        if (-not $key) {
+            throw "Could not open the $Scope environment registry key for writing. Machine scope requires administrator or SYSTEM rights."
+        }
+        $key.SetValue('Path', $Value, $kind)
+        $key.Flush()
     }
-    Set-ItemProperty -Path $regPath -Name 'Path' -Value $Value -Type ExpandString
+    catch [System.UnauthorizedAccessException] {
+        throw "Access denied writing the $Scope PATH. Machine scope requires administrator or SYSTEM rights."
+    }
+    finally {
+        if ($key) { $key.Close() }
+    }
+
+    # Read back: a write that did not persist must not look like success.
+    $written = Get-PersistentPath -Scope $Scope
+    if ($written -ne $Value) {
+        throw "The $Scope PATH did not persist. Expected $($Value.Length) characters, read back $($written.Length)."
+    }
 }
 
 function Split-PathString {
@@ -89,6 +236,8 @@ function Add-PathEntry {
         [Parameter(Mandatory)]
         [ValidateSet('Machine', 'User')]
         [string]$Scope,
+        # Retained so existing callers keep working. Adding only when missing
+        # is now unconditional, since adding a duplicate is never correct.
         [switch]$AddIfMissing
     )
     $result = @{ Action = 'None'; Success = $true; Message = '' }
@@ -111,19 +260,23 @@ function Add-PathEntry {
         }
     }
 
-    if ($AddIfMissing -or (-not $AddIfMissing.IsPresent)) {
-        $entries += $normalized
-        $newPath = Join-PathEntries $entries
-        try {
-            Set-PersistentPath -Scope $Scope -Value $newPath
-            $result.Action = 'Added'
-            $result.Message = "PATH entry added to $Scope scope: $normalized"
-        }
-        catch {
-            $result.Success = $false
-            $result.Action = 'Failed'
-            $result.Message = "Failed to modify $Scope PATH: $($_.Exception.Message)"
-        }
+    # The duplicate check above already implements "add only if missing", so
+    # reaching here means the entry is absent and must be added. The previous
+    # gate here evaluated to false whenever AddIfMissing was passed as $false,
+    # which skipped the write silently and then failed validation with no
+    # reason logged.
+    $entries += $normalized
+    $newPath = Join-PathEntries $entries
+
+    try {
+        Set-PersistentPath -Scope $Scope -Value $newPath
+        $result.Action = 'Added'
+        $result.Message = "PATH entry added to $Scope scope: $normalized"
+    }
+    catch {
+        $result.Success = $false
+        $result.Action = 'Failed'
+        $result.Message = "Failed to modify $Scope PATH: $($_.Exception.Message)"
     }
 
     return $result
@@ -239,6 +392,95 @@ function Remove-EnvironmentVariable {
     }
 
     return $result
+}
+
+function Get-PathDiagnostics {
+    <#
+        .SYNOPSIS
+        Reports why PATH registration is or is not working on this machine.
+
+        .DESCRIPTION
+        Read-only. Shows the identity, whether each scope is writable, the raw
+        (unexpanded) PATH, and whether expandable variables are still intact.
+        Run this first when a PATH change reports failure.
+    #>
+    param([string[]]$Entries = @())
+
+    $identity = try { [Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { 'unknown' }
+    $isAdmin = $false
+    try {
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch { }
+
+    Write-Host ''
+    Write-Host 'PATH Diagnostics' -ForegroundColor Cyan
+    Write-Host ('=' * 62) -ForegroundColor Cyan
+    Write-Host "  Identity      : $identity"
+    Write-Host "  Elevated      : $isAdmin"
+    Write-Host "  PowerShell    : $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
+    Write-Host "  Process bits  : $(if ([Environment]::Is64BitProcess) { '64-bit' } else { '32-bit' })"
+
+    foreach ($scope in @('Machine', 'User')) {
+        Write-Host ''
+        Write-Host "  $scope scope" -ForegroundColor White
+        Write-Host ('  ' + ('-' * 40))
+
+        # Readable?
+        try {
+            $raw = Get-PersistentPath -Scope $scope
+            $entryList = @(Split-PathString $raw)
+            Write-Host "    Readable        : yes"
+            Write-Host "    Entries         : $($entryList.Count)"
+            Write-Host "    Length          : $($raw.Length) / 32767 characters"
+
+            $kind = Get-PersistentPathKind -Scope $scope
+            Write-Host "    Value kind      : $kind"
+
+            $expandable = @($entryList | Where-Object { $_ -match '%\w+%' })
+            Write-Host "    Expandable vars : $($expandable.Count)"
+            foreach ($e in ($expandable | Select-Object -First 5)) {
+                Write-Host "                      $e" -ForegroundColor DarkGray
+            }
+        }
+        catch {
+            Write-Host "    Readable        : NO - $($_.Exception.Message)" -ForegroundColor Red
+            continue
+        }
+
+        # Writable? Rewrites the current value unchanged, so nothing is altered.
+        try {
+            $key = Get-EnvRegistryKey -Scope $scope -Writable
+            if ($key) {
+                Write-Host "    Writable        : yes"
+                $key.Close()
+            }
+            else {
+                Write-Host "    Writable        : NO (key could not be opened for writing)" -ForegroundColor Red
+                if ($scope -eq 'Machine' -and -not $isAdmin) {
+                    Write-Host "                      Machine scope needs administrator or SYSTEM." -ForegroundColor Yellow
+                }
+            }
+        }
+        catch {
+            Write-Host "    Writable        : NO - $($_.Exception.Message)" -ForegroundColor Red
+            if ($scope -eq 'Machine' -and -not $isAdmin) {
+                Write-Host "                      Machine scope needs administrator or SYSTEM." -ForegroundColor Yellow
+            }
+        }
+
+        foreach ($entry in $Entries) {
+            $present = Test-PathEntry -Entry $entry -Scope $scope
+            $color = if ($present) { 'Green' } else { 'Yellow' }
+            Write-Host "    Registered      : $present  <- $entry" -ForegroundColor $color
+        }
+    }
+
+    Write-Host ''
+    Write-Host ('=' * 62) -ForegroundColor Cyan
+    Write-Host 'Nothing was modified by this check.' -ForegroundColor Green
+    Write-Host ''
 }
 
 function Broadcast-EnvironmentChange {
@@ -459,7 +701,7 @@ function Install-EnvironmentConfig {
     if ($envConfig.SystemPath -and $envConfig.SystemPath.Enabled) {
         foreach ($entry in $envConfig.SystemPath.Entries) {
             Write-Log "Scope: Machine | Requested PATH: $entry" $LogFile
-            $r = Add-PathEntry -Entry $entry -Scope 'Machine' -AddIfMissing:($envConfig.SystemPath.AddIfMissing)
+            $r = Add-PathEntry -Entry $entry -Scope 'Machine'
             Write-Log "$($r.Action): $($r.Message)" $LogFile
             if (-not $r.Success) { $allSuccess = $false }
             if ($r.Action -eq 'Added') { $machineAdded += $entry }
@@ -471,7 +713,7 @@ function Install-EnvironmentConfig {
         Write-Log 'WARNING: User PATH from SYSTEM context only affects the Default user profile.' $LogFile
         foreach ($entry in $envConfig.UserPath.Entries) {
             Write-Log "Scope: User | Requested PATH: $entry" $LogFile
-            $r = Add-PathEntry -Entry $entry -Scope 'User' -AddIfMissing:($envConfig.UserPath.AddIfMissing)
+            $r = Add-PathEntry -Entry $entry -Scope 'User'
             Write-Log "$($r.Action): $($r.Message)" $LogFile
             if (-not $r.Success) { $allSuccess = $false }
             if ($r.Action -eq 'Added') { $userAdded += $entry }
@@ -500,19 +742,42 @@ function Install-EnvironmentConfig {
         if (-not $bc.Success) { $allSuccess = $false }
     }
 
-    # Validate PATH entries were persisted
-    if ($envConfig.SystemPath -and $envConfig.SystemPath.Enabled) {
-        foreach ($entry in $envConfig.SystemPath.Entries) {
-            $exists = Test-PathEntry -Entry $entry -Scope 'Machine'
-            Write-Log "Validation: Machine PATH '$entry' registered = $exists" $LogFile
-            if (-not $exists) { $allSuccess = $false }
-        }
-    }
-    if ($envConfig.UserPath -and $envConfig.UserPath.Enabled) {
-        foreach ($entry in $envConfig.UserPath.Entries) {
-            $exists = Test-PathEntry -Entry $entry -Scope 'User'
-            Write-Log "Validation: User PATH '$entry' registered = $exists" $LogFile
-            if (-not $exists) { $allSuccess = $false }
+    # Validate PATH entries were persisted. A failure here logs why, so the
+    # log answers "why did registration fail" without a second run.
+    foreach ($check in @(
+        @{ Scope = 'Machine'; Section = $envConfig.SystemPath },
+        @{ Scope = 'User';    Section = $envConfig.UserPath }
+    )) {
+        if (-not $check.Section -or -not $check.Section.Enabled) { continue }
+
+        foreach ($entry in $check.Section.Entries) {
+            $exists = Test-PathEntry -Entry $entry -Scope $check.Scope
+            Write-Log "Validation: $($check.Scope) PATH '$entry' registered = $exists" $LogFile
+
+            if (-not $exists) {
+                $allSuccess = $false
+                Write-Log "ERROR: $($check.Scope) PATH entry was not registered: $entry" $LogFile
+
+                # Narrow it down for whoever reads the log.
+                try {
+                    $key = Get-EnvRegistryKey -Scope $check.Scope -Writable
+                    if ($key) {
+                        $key.Close()
+                        Write-Log "  The $($check.Scope) key is writable, so this is not a permissions problem." $LogFile
+                    }
+                    else {
+                        Write-Log "  The $($check.Scope) environment key could not be opened for writing." $LogFile
+                        Write-Log "  Machine scope requires administrator or SYSTEM rights." $LogFile
+                    }
+                }
+                catch {
+                    Write-Log "  Cannot open the $($check.Scope) environment key: $($_.Exception.Message)" $LogFile
+                }
+
+                $current = Get-PersistentPath -Scope $check.Scope
+                Write-Log "  Current $($check.Scope) PATH length: $($current.Length) characters." $LogFile
+                Write-Log "  Run Test-Local.ps1 -Mode PathDiagnostics for a full report." $LogFile
+            }
         }
     }
 
