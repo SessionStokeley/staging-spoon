@@ -264,6 +264,24 @@ function Test-ConfigModel {
             if ($vScope -and $vScope -notin @('Machine', 'User')) {
                 & $add 'Error' 'Environment' "Environment variable '$vName' has invalid scope '$vScope'." 'Use Machine or User.'
             }
+
+            $vMode = if ($var.Contains('Mode')) { [string]$var['Mode'] } else { 'Set' }
+            if ($vMode -and $vMode -notin @('Set', 'Append', 'Prepend')) {
+                & $add 'Error' 'Environment' "Environment variable '$vName' has invalid mode '$vMode'." 'Use Set, Append or Prepend.'
+            }
+
+            $vValue = if ($var.Contains('Value')) { [string]$var['Value'] } else { '' }
+
+            # A semicolon means several entries; each needs its own append so
+            # the list stays de-duplicated and can be un-appended cleanly.
+            if ($vMode -in @('Append', 'Prepend') -and $vValue.Contains(';')) {
+                & $add 'Error' 'Environment' "Environment variable '$vName' appends a value containing a semicolon." 'Add one entry per variable definition; the semicolon is the list separator.'
+            }
+
+            # Replacing a variable whose name implies a list is usually a mistake.
+            if ($vMode -eq 'Set' -and $vName -match '(?i)(PATH|CLASSPATH|LIB|INCLUDE)$') {
+                & $add 'Warning' 'Environment' "'$vName' is set to replace its whole value." "Variables of this kind normally hold a ';'-separated list. Append is usually correct, or an existing value will be replaced (uninstall restores it)."
+            }
         }
     }
 

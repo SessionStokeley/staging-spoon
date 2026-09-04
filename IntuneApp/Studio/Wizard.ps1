@@ -380,11 +380,21 @@ function Invoke-EnvironmentQuestions {
                 @{ Label = 'System (Machine)'; Value = 'Machine' }
                 @{ Label = 'User';             Value = 'User' }
             )
+
+            $vMode = Read-WizardChoice -Question "How should $name be written?" -Options @(
+                @{ Label = 'Append to the existing list'; Value = 'Append'
+                   Note  = "Keeps any current value and adds this one, separated by ';'.`nUse for list variables such as CLASSPATH or PSModulePath." }
+                @{ Label = 'Prepend to the existing list'; Value = 'Prepend'
+                   Note  = 'As above, but this entry goes first so it takes priority.' }
+                @{ Label = 'Replace the whole value'; Value = 'Set'
+                   Note  = 'Use for single-value variables such as JAVA_HOME. Any existing value is restored on uninstall.' }
+            )
+
             $expandable = Read-WizardYesNo -Question 'Value contains %VARIABLES% that should stay expandable?' -Default $false
             $removeVar  = Read-WizardYesNo -Question 'Remove during uninstall?' -Default $true
 
             $vars += New-EnvironmentVariableEntry -Name $name -Value $value -Scope $vScope `
-                -Expandable $expandable -RemoveOnUninstall $removeVar
+                -Mode $vMode -Expandable $expandable -RemoveOnUninstall $removeVar
         }
         $Model.Environment.Variables = $vars
     }

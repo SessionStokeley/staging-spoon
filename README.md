@@ -259,15 +259,56 @@ UserPath = @{
 
 ```powershell
 Variables = @(
+    # Append to a list variable: existing entries are kept.
+    @{
+        Name              = "CLASSPATH"
+        Value             = "C:\Program Files\Example\lib"
+        Scope             = "Machine"      # Machine or User
+        Mode              = "Append"       # Append, Prepend, or Set
+        Expandable        = $false
+        RemoveOnUninstall = $true
+    }
+    # Replace a single-value variable.
     @{
         Name              = "JAVA_HOME"
         Value             = "C:\Program Files\Java\jdk-21"
-        Scope             = "Machine"      # Machine or User
+        Scope             = "Machine"
+        Mode              = "Set"
         Expandable        = $false
         RemoveOnUninstall = $true
     }
 )
 ```
+
+#### Mode
+
+| Mode | Behavior | Use for |
+|---|---|---|
+| `Append` | Adds the value to the variable's `;`-separated list, keeping every existing entry | List variables: `CLASSPATH`, `PSModulePath`, `LIB` |
+| `Prepend` | As `Append`, but the new entry goes first so it takes priority | List variables where order matters |
+| `Set` | Replaces the whole value | Single-value variables: `JAVA_HOME` |
+
+`Append` and `Prepend` are idempotent — re-running an install never duplicates
+an entry. Matching ignores case and trailing slashes, and treats `%VAR%` as
+equal to its expanded form, so a directory is never added twice under two
+spellings.
+
+Values containing `%VAR%` are stored as `REG_EXPAND_SZ` and are never written
+back expanded.
+
+#### What uninstall does
+
+Uninstall removes only this package's own contribution, using the ownership
+recorded at install time:
+
+| At install | At uninstall |
+|---|---|
+| Appended to a variable that already existed | That entry is removed; every other entry stays |
+| Created a variable that did not exist | The variable is deleted |
+| Replaced an existing value (`Set`) | The pre-install value is restored |
+
+A variable that existed before the package is never deleted, and its other
+entries are never disturbed.
 
 ### How It Works
 

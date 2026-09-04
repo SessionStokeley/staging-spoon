@@ -90,7 +90,21 @@ function Get-ConfigurationPreview {
         foreach ($v in @(& $get 'Environment.Variables')) {
             if ($v -isnot [System.Collections.IDictionary]) { continue }
             $scope = if ($v.Contains('Scope')) { $v['Scope'] } else { 'Machine' }
-            $varLines += "  $($v['Name']) = $($v['Value'])  [$scope]"
+            $mode = if ($v.Contains('Mode') -and $v['Mode']) { $v['Mode'] } else { 'Set' }
+
+            $verb = switch ($mode) {
+                'Append'  { "append to  $($v['Name'])" }
+                'Prepend' { "prepend to $($v['Name'])" }
+                default   { "set        $($v['Name'])" }
+            }
+            $varLines += "  $verb = $($v['Value'])  [$scope]"
+
+            if ($mode -in @('Append', 'Prepend')) {
+                $varLines += "      existing entries are kept; the list stays ';'-separated"
+            }
+            else {
+                $varLines += '      replaces any existing value (restored on uninstall)'
+            }
         }
     }
     if ($varLines.Count -eq 0) { $varLines = @('No environment variable changes.') }

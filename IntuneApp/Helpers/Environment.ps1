@@ -203,6 +203,10 @@ function Set-PersistentPath {
 }
 
 function Split-PathString {
+    <#
+        Splits a ';'-separated value into its entries, dropping empty segments.
+        Used for PATH and for any other variable held as a list.
+    #>
     param([string]$PathString)
     if (-not $PathString) { return @() }
     return @($PathString -split ';' | Where-Object { $_.Trim() -ne '' })
@@ -211,6 +215,77 @@ function Split-PathString {
 function Join-PathEntries {
     param([string[]]$Entries)
     return ($Entries -join ';')
+}
+
+function Add-ValueToList {
+    <#
+        .SYNOPSIS
+        Adds one entry to a ';'-separated list without disturbing what is
+        already there.
+
+        .DESCRIPTION
+        The shared list primitive behind both PATH and list-style environment
+        variables, so appending behaves identically for each. Existing entries
+        keep their original text and order; the entry is only added when it is
+        not already present (case-insensitively, ignoring trailing slashes, and
+        treating %VAR% as equal to its expanded form).
+
+        .OUTPUTS
+        Changed  whether the list needs writing back
+        Value    the resulting list
+        Reason   'Added' or 'AlreadyPresent'
+    #>
+    param(
+        [AllowEmptyString()][AllowNull()][string]$CurrentValue,
+        [Parameter(Mandatory)][string]$NewValue,
+        [ValidateSet('Append', 'Prepend')][string]$Position = 'Append'
+    )
+
+    $normalized = Normalize-PathEntry $NewValue
+    if (-not $normalized) {
+        return [pscustomobject]@{ Changed = $false; Value = $CurrentValue; Reason = 'Empty' }
+    }
+
+    $entries = @(Split-PathString $CurrentValue)
+
+    foreach ($existing in $entries) {
+        if (Test-PathEntriesEqual $existing $normalized) {
+            return [pscustomobject]@{ Changed = $false; Value = $CurrentValue; Reason = 'AlreadyPresent' }
+        }
+    }
+
+    $updated = if ($Position -eq 'Prepend') { @($normalized) + $entries } else { $entries + @($normalized) }
+
+    return [pscustomobject]@{
+        Changed = $true
+        Value   = Join-PathEntries $updated
+        Reason  = 'Added'
+    }
+}
+
+function Remove-ValueFromList {
+    <#
+        .SYNOPSIS
+        Removes one entry from a ';'-separated list, leaving every other entry
+        exactly as it was.
+    #>
+    param(
+        [AllowEmptyString()][AllowNull()][string]$CurrentValue,
+        [Parameter(Mandatory)][string]$ValueToRemove
+    )
+
+    $entries = @(Split-PathString $CurrentValue)
+    $kept = @($entries | Where-Object { -not (Test-PathEntriesEqual $_ $ValueToRemove) })
+
+    if ($kept.Count -eq $entries.Count) {
+        return [pscustomobject]@{ Changed = $false; Value = $CurrentValue; Reason = 'NotFound' }
+    }
+
+    return [pscustomobject]@{
+        Changed = $true
+        Value   = Join-PathEntries $kept
+        Reason  = 'Removed'
+    }
 }
 
 function Test-PathEntry {
@@ -324,74 +399,306 @@ function Remove-PathEntry {
     return $result
 }
 
+function Get-PersistentVariable {
+    <#
+        Reads a persistent environment variable WITHOUT expanding it, so an
+        append never rewrites %VAR% references as literal paths. Returns $null
+        when the variable does not exist, which is distinct from an empty value.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][ValidateSet('Machine', 'User')][string]$Scope
+    )
+
+    $key = $null
+    try {
+        $key = Get-EnvRegistryKey -Scope $Scope
+        if (-not $key) { return $null }
+
+        $value = $key.GetValue(
+            $Name, $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+
+        if ($null -eq $value) { return $null }
+        return [string]$value
+    }
+    finally {
+        if ($key) { $key.Close() }
+    }
+}
+
+function Set-PersistentVariable {
+    <#
+        Writes a persistent environment variable and confirms it landed.
+        Preserves REG_EXPAND_SZ when the value contains %VAR% references.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value,
+        [Parameter(Mandatory)][ValidateSet('Machine', 'User')][string]$Scope,
+        [switch]$Expandable
+    )
+
+    if ($Value.Length -gt 32767) {
+        throw "The resulting value of $Name would be $($Value.Length) characters, over the 32767 limit. No change was made."
+    }
+
+    # A value containing %VAR% must be REG_EXPAND_SZ or it will never resolve.
+    $kind = if ($Expandable -or $Value -match '%\w+%') {
+        [Microsoft.Win32.RegistryValueKind]::ExpandString
+    }
+    else {
+        [Microsoft.Win32.RegistryValueKind]::String
+    }
+
+    $key = $null
+    try {
+        $key = Get-EnvRegistryKey -Scope $Scope -Writable
+        if (-not $key) {
+            throw "Could not open the $Scope environment key for writing. Machine scope requires administrator or SYSTEM rights."
+        }
+        $key.SetValue($Name, $Value, $kind)
+        $key.Flush()
+    }
+    catch [System.UnauthorizedAccessException] {
+        throw "Access denied writing $Name in $Scope scope. Machine scope requires administrator or SYSTEM rights."
+    }
+    finally {
+        if ($key) { $key.Close() }
+    }
+
+    $written = Get-PersistentVariable -Name $Name -Scope $Scope
+    if ($written -ne $Value) {
+        throw "$Name did not persist in $Scope scope."
+    }
+}
+
+function Remove-PersistentVariable {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][ValidateSet('Machine', 'User')][string]$Scope
+    )
+
+    $key = $null
+    try {
+        $key = Get-EnvRegistryKey -Scope $Scope -Writable
+        if (-not $key) {
+            throw "Could not open the $Scope environment key for writing."
+        }
+        $key.DeleteValue($Name, $false)
+        $key.Flush()
+    }
+    catch [System.UnauthorizedAccessException] {
+        throw "Access denied removing $Name from $Scope scope."
+    }
+    finally {
+        if ($key) { $key.Close() }
+    }
+}
+
 function Add-EnvironmentVariable {
+    <#
+        .SYNOPSIS
+        Creates or updates a persistent environment variable.
+
+        .PARAMETER Mode
+        Append   add Value to the variable's ';'-separated list, keeping every
+                 existing entry. This is what application installs normally
+                 need for list variables such as CLASSPATH or PSModulePath.
+        Prepend  as Append, but the new entry goes first so it wins.
+        Set      replace the whole value. Correct for single-value variables
+                 such as JAVA_HOME.
+
+        Append and Prepend are idempotent: re-running never duplicates an entry.
+        Whatever the mode, the previous value is returned so uninstall can put
+        the variable back exactly as it was.
+    #>
     param(
         [Parameter(Mandatory)]
         [string]$Name,
         [Parameter(Mandatory)]
+        [AllowEmptyString()]
         [string]$Value,
         [Parameter(Mandatory)]
         [ValidateSet('Machine', 'User')]
         [string]$Scope,
-        [switch]$Expandable
+        [switch]$Expandable,
+        [ValidateSet('Set', 'Append', 'Prepend')]
+        [string]$Mode = 'Set'
     )
-    $result = @{ Action = 'None'; Success = $true; Message = '' }
+
+    $result = @{
+        Action        = 'None'
+        Success       = $true
+        Message       = ''
+        Existed       = $false
+        PreviousValue = $null
+        Mode          = $Mode
+    }
 
     try {
-        $regPath = if ($Scope -eq 'Machine') {
-            'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+        $existing = Get-PersistentVariable -Name $Name -Scope $Scope
+        $result.Existed = ($null -ne $existing)
+        $result.PreviousValue = $existing
+
+        if ($Mode -eq 'Set') {
+            if ($existing -eq $Value) {
+                $result.Action = 'AlreadyPresent'
+                $result.Message = "$Name already has this value in $Scope scope. No change required."
+                return $result
+            }
+
+            Set-PersistentVariable -Name $Name -Value $Value -Scope $Scope -Expandable:$Expandable
+
+            if ($result.Existed) {
+                $result.Action = 'Replaced'
+                $result.Message = "$Name replaced in $Scope scope. Previous value preserved for uninstall: $existing"
+            }
+            else {
+                $result.Action = 'Created'
+                $result.Message = "$Name created in $Scope scope = $Value"
+            }
+            return $result
+        }
+
+        # Append / Prepend: never discard what is already there.
+        $listResult = Add-ValueToList -CurrentValue $existing -NewValue $Value -Position $Mode
+
+        if (-not $listResult.Changed) {
+            $result.Action = if ($listResult.Reason -eq 'Empty') { 'Failed' } else { 'AlreadyPresent' }
+            if ($listResult.Reason -eq 'Empty') {
+                $result.Success = $false
+                $result.Message = "No value supplied for $Name."
+            }
+            else {
+                $result.Message = "$Name already contains '$Value' in $Scope scope. No change required."
+            }
+            return $result
+        }
+
+        Set-PersistentVariable -Name $Name -Value $listResult.Value -Scope $Scope -Expandable:$Expandable
+
+        $result.Action = if ($result.Existed) { 'Appended' } else { 'Created' }
+        $result.Message = if ($result.Existed) {
+            "$Name in $Scope scope: appended '$Value' to the existing list ($(@(Split-PathString $existing).Count) entry/entries kept)."
         }
         else {
-            'HKCU:\Environment'
+            "$Name created in $Scope scope = $Value"
         }
-        $regType = if ($Expandable) { 'ExpandString' } else { 'String' }
-        Set-ItemProperty -Path $regPath -Name $Name -Value $Value -Type $regType
-        $result.Action = 'Set'
-        $result.Message = "Environment variable set: $Name = $Value (Scope: $Scope)"
+        return $result
     }
     catch {
         $result.Success = $false
         $result.Action = 'Failed'
         $result.Message = "Failed to set $Name in $Scope scope: $($_.Exception.Message)"
+        return $result
     }
-
-    return $result
 }
 
 function Remove-EnvironmentVariable {
+    <#
+        .SYNOPSIS
+        Undoes what this package did to an environment variable.
+
+        .DESCRIPTION
+        Removes only the package's own contribution:
+
+          appended to an existing variable -> that entry is removed and every
+            other entry is left in place
+          created by this package          -> the variable is deleted
+          replaced an existing value       -> the previous value is restored
+
+        .PARAMETER Value
+        The entry this package added. Required to un-append.
+
+        .PARAMETER Existed
+        Whether the variable was already present before installation.
+
+        .PARAMETER PreviousValue
+        The value the variable held before installation, used to restore a
+        replaced variable.
+    #>
     param(
         [Parameter(Mandatory)]
         [string]$Name,
         [Parameter(Mandatory)]
         [ValidateSet('Machine', 'User')]
-        [string]$Scope
+        [string]$Scope,
+        [ValidateSet('Set', 'Append', 'Prepend')]
+        [string]$Mode = 'Set',
+        [AllowEmptyString()][AllowNull()]
+        [string]$Value,
+        [bool]$Existed = $false,
+        [AllowEmptyString()][AllowNull()]
+        [string]$PreviousValue
     )
+
     $result = @{ Action = 'None'; Success = $true; Message = '' }
 
     try {
-        $regPath = if ($Scope -eq 'Machine') {
-            'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
-        }
-        else {
-            'HKCU:\Environment'
-        }
-        $existing = Get-ItemProperty -Path $regPath -Name $Name -ErrorAction SilentlyContinue
-        if (-not $existing) {
+        $current = Get-PersistentVariable -Name $Name -Scope $Scope
+        if ($null -eq $current) {
             $result.Action = 'NotFound'
             $result.Message = "Environment variable not found: $Name (Scope: $Scope)"
             return $result
         }
-        Remove-ItemProperty -Path $regPath -Name $Name
+
+        # Appended to a variable that already existed: take out only our entry.
+        if ($Mode -in @('Append', 'Prepend') -and $Existed) {
+            if (-not $Value) {
+                $result.Action = 'Skipped'
+                $result.Message = "$Name was appended to but no entry was recorded, so nothing was removed."
+                return $result
+            }
+
+            $listResult = Remove-ValueFromList -CurrentValue $current -ValueToRemove $Value
+            if (-not $listResult.Changed) {
+                $result.Action = 'NotFound'
+                $result.Message = "$Name no longer contains '$Value'. Left unchanged."
+                return $result
+            }
+
+            if ([string]::IsNullOrWhiteSpace($listResult.Value)) {
+                # Every entry is gone; restore what was there before, or delete.
+                if ($PreviousValue) {
+                    Set-PersistentVariable -Name $Name -Value $PreviousValue -Scope $Scope
+                    $result.Action = 'Restored'
+                    $result.Message = "$Name restored to its pre-install value in $Scope scope."
+                }
+                else {
+                    Remove-PersistentVariable -Name $Name -Scope $Scope
+                    $result.Action = 'Removed'
+                    $result.Message = "$Name removed from $Scope scope (no entries left)."
+                }
+                return $result
+            }
+
+            Set-PersistentVariable -Name $Name -Value $listResult.Value -Scope $Scope
+            $result.Action = 'EntryRemoved'
+            $result.Message = "$Name in $Scope scope: removed '$Value', kept $(@(Split-PathString $listResult.Value).Count) other entry/entries."
+            return $result
+        }
+
+        # Replaced a variable that already existed: restore the old value.
+        if ($Existed -and $PreviousValue) {
+            Set-PersistentVariable -Name $Name -Value $PreviousValue -Scope $Scope
+            $result.Action = 'Restored'
+            $result.Message = "$Name restored to its pre-install value in $Scope scope."
+            return $result
+        }
+
+        # This package created the variable, so it owns the whole thing.
+        Remove-PersistentVariable -Name $Name -Scope $Scope
         $result.Action = 'Removed'
         $result.Message = "Environment variable removed: $Name (Scope: $Scope)"
+        return $result
     }
     catch {
         $result.Success = $false
         $result.Action = 'Failed'
         $result.Message = "Failed to remove $Name from $Scope scope: $($_.Exception.Message)"
+        return $result
     }
-
-    return $result
 }
 
 function Get-PathDiagnostics {
@@ -725,12 +1032,32 @@ function Install-EnvironmentConfig {
         foreach ($var in $envConfig.Variables) {
             $scope = if ($var.Scope) { $var.Scope } else { 'Machine' }
             $expandable = if ($null -ne $var.Expandable) { $var.Expandable } else { $false }
-            Write-Log "Setting environment variable: $($var.Name) = $($var.Value) (Scope: $scope)" $LogFile
-            $r = Add-EnvironmentVariable -Name $var.Name -Value $var.Value -Scope $scope -Expandable:$expandable
+            # Append keeps an existing list intact; Set replaces a single value.
+            $mode = if ($var.Mode) { $var.Mode } else { 'Set' }
+
+            Write-Log "Environment variable: $($var.Name) (Scope: $scope, Mode: $mode) <- $($var.Value)" $LogFile
+
+            $r = Add-EnvironmentVariable -Name $var.Name -Value $var.Value -Scope $scope `
+                -Expandable:$expandable -Mode $mode
+
             Write-Log "$($r.Action): $($r.Message)" $LogFile
             if (-not $r.Success) { $allSuccess = $false }
-            if ($r.Action -eq 'Set') {
-                $varsAdded += @{ Name = $var.Name; Value = $var.Value; Scope = $scope }
+
+            if ($r.Action -eq 'Replaced') {
+                Write-Log "  NOTE: $($var.Name) already existed and was replaced. Uninstall will restore the previous value." $LogFile
+            }
+
+            # Record what was actually changed, including the pre-install value,
+            # so uninstall removes only this package's contribution.
+            if ($r.Action -in @('Created', 'Appended', 'Replaced')) {
+                $varsAdded += @{
+                    Name          = $var.Name
+                    Value         = $var.Value
+                    Scope         = $scope
+                    Mode          = $mode
+                    Existed       = $r.Existed
+                    PreviousValue = $r.PreviousValue
+                }
             }
         }
     }
@@ -838,8 +1165,20 @@ function Uninstall-EnvironmentConfig {
         foreach ($var in $varsToRemove) {
             $scope = if ($var.Scope) { $var.Scope } else { 'Machine' }
             $name = if ($var.Name) { $var.Name } else { $var }
-            Write-Log "Removing environment variable: $name (Scope: $scope)" $LogFile
-            $r = Remove-EnvironmentVariable -Name $name -Scope $scope
+            $mode = if ($var.Mode) { $var.Mode } else { 'Set' }
+
+            # These come from the install-time state file, so an appended entry
+            # is un-appended and a replaced variable is restored, rather than
+            # the whole variable being deleted.
+            $value = if ($var.PSObject.Properties.Name -contains 'Value') { $var.Value } else { $null }
+            $existed = if ($var.PSObject.Properties.Name -contains 'Existed') { [bool]$var.Existed } else { $false }
+            $previous = if ($var.PSObject.Properties.Name -contains 'PreviousValue') { $var.PreviousValue } else { $null }
+
+            Write-Log "Reverting environment variable: $name (Scope: $scope, Mode: $mode, pre-existing: $existed)" $LogFile
+
+            $r = Remove-EnvironmentVariable -Name $name -Scope $scope -Mode $mode `
+                -Value $value -Existed $existed -PreviousValue $previous
+
             Write-Log "$($r.Action): $($r.Message)" $LogFile
             if (-not $r.Success) { $allSuccess = $false }
         }

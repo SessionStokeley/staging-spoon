@@ -151,7 +151,8 @@ try {
 
     $reloaded = Import-ConfigModel -Path $f3
     Test-Assert 'Variable key order is canonical' `
-        ((@($reloaded.Environment.Variables[0].Keys) -join ',') -eq 'Name,Value,Scope,Expandable,RemoveOnUninstall')
+        ((@($reloaded.Environment.Variables[0].Keys) -join ',') -eq 'Name,Value,Scope,Mode,Expandable,RemoveOnUninstall') `
+        (@($reloaded.Environment.Variables[0].Keys) -join ',')
     Test-Assert 'Association key order is canonical' `
         ((@($reloaded.WindowsIntegration.FileAssociations.Associations[0].Keys) -join ',') -eq 'Extension,ProgId,Description,OpenCommand,IconPath')
 }
@@ -331,6 +332,58 @@ Test-Assert 'Unparseable MinimumVersion is a warning' `
 
 Test-Assert 'Empty finding list summarises as valid' ((Get-ValidationSummary -Findings @()).IsValid)
 Test-Assert 'Null finding list summarises as valid' ((Get-ValidationSummary -Findings $null).IsValid)
+
+# --- Environment variable modes ---
+$m = New-ValidModel
+$m.Environment.Enabled = $true
+$m.Environment.Variables = @(
+    (New-EnvironmentVariableEntry -Name 'CLASSPATH' -Value 'C:\App\lib' -Mode 'Append')
+)
+Test-Assert 'Appending a list variable is valid' `
+    ((Get-ValidationSummary -Findings @(Test-ConfigModel -Model $m -SkipFileChecks)).IsValid)
+
+$m.Environment.Variables = @(
+    (New-EnvironmentVariableEntry -Name 'CLASSPATH' -Value 'C:\a;C:\b' -Mode 'Append')
+)
+Test-Assert 'Appending a semicolon-joined value is an error' `
+    (@(Test-ConfigModel -Model $m -SkipFileChecks | Where-Object { $_.Severity -eq 'Error' -and $_.Message -match 'semicolon' }).Count -gt 0)
+
+$m.Environment.Variables = @(
+    (New-EnvironmentVariableEntry -Name 'CLASSPATH' -Value 'C:\App\lib' -Mode 'Set')
+)
+$f = @(Test-ConfigModel -Model $m -SkipFileChecks)
+Test-Assert 'Replacing a list-style variable warns' `
+    ((Get-ValidationSummary -Findings $f).IsValid -and
+     @($f | Where-Object { $_.Severity -eq 'Warning' -and $_.Message -match 'replace' }).Count -gt 0)
+
+$m.Environment.Variables = @(
+    (New-EnvironmentVariableEntry -Name 'JAVA_HOME' -Value 'C:\Java' -Mode 'Set')
+)
+Test-Assert 'Setting a single-value variable does not warn' `
+    (@(Test-ConfigModel -Model $m -SkipFileChecks | Where-Object { $_.Severity -eq 'Warning' -and $_.Category -eq 'Environment' }).Count -eq 0)
+
+$m.Environment.Variables = @(
+    [ordered]@{ Name = 'X'; Value = 'y'; Scope = 'Machine'; Mode = 'Sideways' }
+)
+Test-Assert 'Invalid variable mode is an error' `
+    (@(Test-ConfigModel -Model $m -SkipFileChecks | Where-Object { $_.Severity -eq 'Error' -and $_.Message -match 'invalid mode' }).Count -gt 0)
+
+# Preview must make the append-vs-replace distinction visible.
+$m.Environment.Variables = @(
+    (New-EnvironmentVariableEntry -Name 'CLASSPATH' -Value 'C:\App\lib' -Mode 'Append')
+)
+$pv = Get-ConfigurationPreview -Model $m
+Test-Assert 'Preview shows an append as appending' `
+    ((@($pv['Environment Variables']) -join ' ') -match 'append to\s+CLASSPATH')
+Test-Assert 'Preview says existing entries are kept' `
+    ((@($pv['Environment Variables']) -join ' ') -match 'existing entries are kept')
+
+$m.Environment.Variables = @(
+    (New-EnvironmentVariableEntry -Name 'JAVA_HOME' -Value 'C:\Java' -Mode 'Set')
+)
+$pv = Get-ConfigurationPreview -Model $m
+Test-Assert 'Preview flags a replace as replacing' `
+    ((@($pv['Environment Variables']) -join ' ') -match 'replaces any existing value')
 
 # File-level validation
 $tmp = New-TempDir

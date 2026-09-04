@@ -113,6 +113,51 @@ Test-Assert 'Joins with semicolons' ($r -eq 'C:\A;C:\B')
 
 Write-Host ""
 
+# --- List semantics (shared by PATH and list-style variables) ---
+Write-Host "Add-ValueToList / Remove-ValueFromList" -ForegroundColor White
+
+# Appending must keep what is already there, separated by ';'.
+$r = Add-ValueToList -CurrentValue 'C:\Existing;C:\Other' -NewValue 'C:\New'
+Test-Assert 'Append keeps existing entries' ($r.Value -eq 'C:\Existing;C:\Other;C:\New')
+Test-Assert 'Append reports a change' ($r.Changed -and $r.Reason -eq 'Added')
+
+$r = Add-ValueToList -CurrentValue 'C:\Existing' -NewValue 'C:\New' -Position 'Prepend'
+Test-Assert 'Prepend puts the new entry first' ($r.Value -eq 'C:\New;C:\Existing')
+
+# Creating from nothing must not leave a leading separator.
+$r = Add-ValueToList -CurrentValue '' -NewValue 'C:\First'
+Test-Assert 'Append to empty produces a bare value' ($r.Value -eq 'C:\First')
+$r = Add-ValueToList -CurrentValue $null -NewValue 'C:\First'
+Test-Assert 'Append to null produces a bare value' ($r.Value -eq 'C:\First')
+
+# Idempotent: re-running an install must not duplicate entries.
+$r = Add-ValueToList -CurrentValue 'C:\A;C:\B' -NewValue 'C:\B'
+Test-Assert 'Append is idempotent' (-not $r.Changed -and $r.Reason -eq 'AlreadyPresent')
+Test-Assert 'Idempotent append leaves the value untouched' ($r.Value -eq 'C:\A;C:\B')
+
+$r = Add-ValueToList -CurrentValue 'C:\A;C:\B' -NewValue 'c:\b\'
+Test-Assert 'Append dedupes on case and trailing slash' (-not $r.Changed)
+
+# Removing takes out only the named entry.
+$r = Remove-ValueFromList -CurrentValue 'C:\A;C:\B;C:\C' -ValueToRemove 'C:\B'
+Test-Assert 'Remove takes out only the named entry' ($r.Value -eq 'C:\A;C:\C')
+Test-Assert 'Remove reports a change' ($r.Changed)
+
+$r = Remove-ValueFromList -CurrentValue 'C:\A;C:\C' -ValueToRemove 'C:\Missing'
+Test-Assert 'Removing an absent entry changes nothing' (-not $r.Changed -and $r.Value -eq 'C:\A;C:\C')
+
+$r = Remove-ValueFromList -CurrentValue 'C:\Only' -ValueToRemove 'C:\Only'
+Test-Assert 'Removing the last entry yields an empty list' ($r.Changed -and $r.Value -eq '')
+
+# Round trip: append then remove must restore the original text exactly.
+$original = 'C:\Windows;%SystemRoot%\System32;C:\Tools'
+$added = Add-ValueToList -CurrentValue $original -NewValue 'C:\App\bin'
+$back = Remove-ValueFromList -CurrentValue $added.Value -ValueToRemove 'C:\App\bin'
+Test-Assert 'Append then remove restores the original list' ($back.Value -eq $original)
+Test-Assert 'Append preserves %VAR% entries in the list' ($added.Value -match '%SystemRoot%')
+
+Write-Host ""
+
 # --- State Tracking (in-memory simulation) ---
 Write-Host "State Tracking" -ForegroundColor White
 
@@ -268,10 +313,81 @@ if ($isAdmin -or $isSystem) {
     $testVarName = "INTUNE_TEST_VAR_$(Get-Random)"
     $r7 = Add-EnvironmentVariable -Name $testVarName -Value 'TestValue' -Scope 'Machine'
     Test-Assert 'Add env var succeeds' $r7.Success
-    $r8 = Remove-EnvironmentVariable -Name $testVarName -Scope 'Machine'
+    Test-Assert 'New variable reports Created' ($r7.Action -eq 'Created')
+    Test-Assert 'New variable records it did not exist' (-not $r7.Existed)
+
+    $r8 = Remove-EnvironmentVariable -Name $testVarName -Scope 'Machine' -Existed $false
     Test-Assert 'Remove env var succeeds' $r8.Success
     $r9 = Remove-EnvironmentVariable -Name $testVarName -Scope 'Machine'
     Test-Assert 'Remove missing env var returns NotFound' ($r9.Action -eq 'NotFound')
+
+    # --- Appending to a variable that already exists ---
+    # This is the case that used to destroy a pre-existing value outright.
+    $listVar = "INTUNE_LIST_VAR_$(Get-Random)"
+    $preExisting = 'C:\Vendor\one;C:\Vendor\two'
+    Set-PersistentVariable -Name $listVar -Value $preExisting -Scope 'Machine'
+
+    $a1 = Add-EnvironmentVariable -Name $listVar -Value 'C:\App\bin' -Scope 'Machine' -Mode 'Append'
+    Test-Assert 'Append to existing variable succeeds' $a1.Success
+    Test-Assert 'Append reports Appended' ($a1.Action -eq 'Appended')
+    Test-Assert 'Append records the variable pre-existed' $a1.Existed
+    Test-Assert 'Append records the previous value' ($a1.PreviousValue -eq $preExisting)
+
+    $after = Get-PersistentVariable -Name $listVar -Scope 'Machine'
+    Test-Assert 'Append kept the existing entries' ($after -eq "$preExisting;C:\App\bin") "got: $after"
+    Test-Assert 'Append used a semicolon separator' (@(Split-PathString $after).Count -eq 3)
+
+    # Re-running the install must not duplicate the entry.
+    $a2 = Add-EnvironmentVariable -Name $listVar -Value 'C:\App\bin' -Scope 'Machine' -Mode 'Append'
+    Test-Assert 'Re-appending is idempotent' ($a2.Action -eq 'AlreadyPresent')
+    Test-Assert 'Re-append left the value unchanged' ((Get-PersistentVariable -Name $listVar -Scope 'Machine') -eq $after)
+
+    # Uninstall removes only our entry and leaves the rest intact.
+    $u1 = Remove-EnvironmentVariable -Name $listVar -Scope 'Machine' -Mode 'Append' `
+        -Value 'C:\App\bin' -Existed $true -PreviousValue $preExisting
+    Test-Assert 'Un-append succeeds' $u1.Success
+    Test-Assert 'Un-append reports EntryRemoved' ($u1.Action -eq 'EntryRemoved')
+    Test-Assert 'Pre-existing value survives uninstall' `
+        ((Get-PersistentVariable -Name $listVar -Scope 'Machine') -eq $preExisting) `
+        "got: $(Get-PersistentVariable -Name $listVar -Scope 'Machine')"
+
+    Remove-PersistentVariable -Name $listVar -Scope 'Machine'
+
+    # --- Set mode over an existing variable restores it on uninstall ---
+    $singleVar = "INTUNE_SINGLE_VAR_$(Get-Random)"
+    Set-PersistentVariable -Name $singleVar -Value 'C:\Old\Java' -Scope 'Machine'
+
+    $s1 = Add-EnvironmentVariable -Name $singleVar -Value 'C:\New\Java' -Scope 'Machine' -Mode 'Set'
+    Test-Assert 'Set over an existing variable reports Replaced' ($s1.Action -eq 'Replaced')
+    Test-Assert 'Set captured the previous value' ($s1.PreviousValue -eq 'C:\Old\Java')
+    Test-Assert 'Set applied the new value' ((Get-PersistentVariable -Name $singleVar -Scope 'Machine') -eq 'C:\New\Java')
+
+    $u2 = Remove-EnvironmentVariable -Name $singleVar -Scope 'Machine' -Mode 'Set' `
+        -Value 'C:\New\Java' -Existed $true -PreviousValue 'C:\Old\Java'
+    Test-Assert 'Uninstall restores the replaced value' ($u2.Action -eq 'Restored')
+    Test-Assert 'Replaced variable is back to its original value' `
+        ((Get-PersistentVariable -Name $singleVar -Scope 'Machine') -eq 'C:\Old\Java')
+
+    Remove-PersistentVariable -Name $singleVar -Scope 'Machine'
+
+    # --- Appending to a variable this package created deletes it cleanly ---
+    $newList = "INTUNE_NEWLIST_$(Get-Random)"
+    $n1 = Add-EnvironmentVariable -Name $newList -Value 'C:\Only\bin' -Scope 'Machine' -Mode 'Append'
+    Test-Assert 'Append to a missing variable creates it' ($n1.Action -eq 'Created')
+    Test-Assert 'Created list has no leading separator' `
+        ((Get-PersistentVariable -Name $newList -Scope 'Machine') -eq 'C:\Only\bin')
+
+    $u3 = Remove-EnvironmentVariable -Name $newList -Scope 'Machine' -Mode 'Append' `
+        -Value 'C:\Only\bin' -Existed $false
+    Test-Assert 'Package-created variable is deleted on uninstall' ($u3.Action -eq 'Removed')
+    Test-Assert 'Package-created variable is gone' ($null -eq (Get-PersistentVariable -Name $newList -Scope 'Machine'))
+
+    # --- %VAR% values stay expandable ---
+    $expVar = "INTUNE_EXP_VAR_$(Get-Random)"
+    Add-EnvironmentVariable -Name $expVar -Value '%SystemRoot%\Tools' -Scope 'Machine' -Mode 'Set' | Out-Null
+    Test-Assert 'Value with %VAR% is stored unexpanded' `
+        ((Get-PersistentVariable -Name $expVar -Scope 'Machine') -eq '%SystemRoot%\Tools')
+    Remove-PersistentVariable -Name $expVar -Scope 'Machine'
 }
 else {
     Test-Skip 'Add Machine PATH' 'Not elevated'

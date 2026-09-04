@@ -169,10 +169,16 @@ function New-FileAssociationEntry {
 }
 
 function New-EnvironmentVariableEntry {
+    <#
+        Mode decides how the value meets an existing variable:
+          Append / Prepend  add to its ';'-separated list, keeping what is there
+          Set               replace the whole value (single-value variables)
+    #>
     param(
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$Value,
         [ValidateSet('Machine', 'User')][string]$Scope = 'Machine',
+        [ValidateSet('Set', 'Append', 'Prepend')][string]$Mode = 'Set',
         [bool]$Expandable = $false,
         [bool]$RemoveOnUninstall = $true
     )
@@ -180,6 +186,7 @@ function New-EnvironmentVariableEntry {
         Name              = $Name
         Value             = $Value
         Scope             = $Scope
+        Mode              = $Mode
         Expandable        = $Expandable
         RemoveOnUninstall = $RemoveOnUninstall
     }
@@ -220,7 +227,7 @@ function New-ScheduledTaskEntry {
 # The leading commas are required: without them PowerShell flattens nested
 # array literals into one long list of strings.
 $script:CanonicalKeyOrders = @(
-    , @('Name', 'Value', 'Scope', 'Expandable', 'RemoveOnUninstall')        # env variable
+    , @('Name', 'Value', 'Scope', 'Mode', 'Expandable', 'RemoveOnUninstall')  # env variable
     , @('Extension', 'ProgId', 'Description', 'OpenCommand', 'IconPath')    # file association
     , @('Name', 'DisplayName', 'StartupType', 'Keep')                       # service
     , @('Name', 'Path', 'Keep')                                             # scheduled task
