@@ -4,6 +4,12 @@ param()
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
+# Load shared helpers
+$helpersDir = Join-Path $ScriptDir 'Helpers'
+if (Test-Path (Join-Path $helpersDir 'Environment.ps1')) {
+    . (Join-Path $helpersDir 'Environment.ps1')
+}
+
 # --- Helpers ---
 
 function Write-Log {
@@ -98,15 +104,24 @@ try {
     # Run detection to confirm installation
     Write-Log "Running post-install detection..." $logFile
     $detected = Invoke-Detection -Config $Config
-    if ($detected) {
-        Write-Log "Detection: Application detected. Install SUCCESS." $logFile
-        if ($exitCode -eq 3010) { exit 3010 }
-        exit 0
-    }
-    else {
+    if (-not $detected) {
         Write-Log "ERROR: Detection failed after installation. Application not detected." $logFile
         exit 1
     }
+    Write-Log "Detection: Application detected." $logFile
+
+    # Configure environment/PATH if enabled
+    if ($Config.Environment -and $Config.Environment.Enabled) {
+        Write-Log "Configuring environment..." $logFile
+        $envSuccess = Install-EnvironmentConfig -Config $Config -LogFile $logFile
+        if (-not $envSuccess) {
+            Write-Log "WARNING: Environment configuration had failures. Application is installed." $logFile
+        }
+    }
+
+    Write-Log "Install SUCCESS." $logFile
+    if ($exitCode -eq 3010) { exit 3010 }
+    exit 0
 }
 catch {
     if ($logFile) { Write-Log "ERROR: $($_.Exception.Message)" $logFile }

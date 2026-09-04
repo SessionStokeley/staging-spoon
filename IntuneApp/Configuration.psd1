@@ -29,4 +29,28 @@
         Enabled = $true
         Path    = "C:\ProgramData\Company\IntuneApps"
     }
+
+    # Environment & PATH configuration (disabled by default)
+    Environment = @{
+        Enabled = $false
+        SystemPath = @{
+            Enabled            = $false
+            Entries            = @()
+            AddIfMissing       = $true
+            RemoveOnUninstall  = $true
+        }
+        UserPath = @{
+            Enabled            = $false
+            Entries            = @()
+            AddIfMissing       = $true
+            RemoveOnUninstall  = $true
+        }
+        Variables = @(
+            # @{ Name = "JAVA_HOME"; Value = "C:\Program Files\Java\jdk-21"; Scope = "Machine"; Expandable = $false; RemoveOnUninstall = $true }
+        )
+        BroadcastChange                = $true
+        PreserveExistingPath           = $true
+        PreserveExpandableVariables    = $true
+        CaseInsensitivePathComparison  = $true
+    }
 }

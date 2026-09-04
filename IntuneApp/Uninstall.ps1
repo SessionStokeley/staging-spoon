@@ -4,6 +4,12 @@ param()
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
+# Load shared helpers
+$helpersDir = Join-Path $ScriptDir 'Helpers'
+if (Test-Path (Join-Path $helpersDir 'Environment.ps1')) {
+    . (Join-Path $helpersDir 'Environment.ps1')
+}
+
 # --- Helpers ---
 
 function Write-Log {
@@ -107,6 +113,15 @@ try {
     if ($exitCode -notin $successCodes) {
         Write-Log "ERROR: Uninstaller failed with exit code $exitCode" $logFile
         exit 1
+    }
+
+    # Clean up environment/PATH before detection check
+    if ($Config.Environment -and $Config.Environment.Enabled) {
+        Write-Log "Cleaning up environment configuration..." $logFile
+        $envSuccess = Uninstall-EnvironmentConfig -Config $Config -LogFile $logFile
+        if (-not $envSuccess) {
+            Write-Log "WARNING: Environment cleanup had failures." $logFile
+        }
     }
 
     # Verify removal via detection
