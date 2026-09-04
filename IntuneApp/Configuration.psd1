@@ -1,25 +1,26 @@
 @{
-    ApplicationName = "Autodesk Revit 2026"
-    Publisher       = "Autodesk"
-    Version         = "2026.5"
+    ApplicationName = "Example Application"
+    Publisher       = "Example Vendor"
+    Version         = "1.0.0"
 
     Installer = @{
-        Type      = "EXE"
-        File      = "Revit_2026_5.exe"
-        Arguments = "--silent"
+        Type      = "EXE"   # EXE or MSI
+        File      = "Setup.exe"
+        Arguments = "/quiet /norestart"
     }
 
     Uninstaller = @{
-        Type      = "EXE"
-        File      = "C:\Program Files\Autodesk\Revit 2026\Installer.exe"
-        Arguments = "-i uninstall --silent"
+        Type        = "EXE"   # EXE or MSI
+        File        = "uninstall.exe"
+        Arguments   = "/quiet /norestart"
+        ProductCode = $null   # For MSI: "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}"
     }
 
     Detection = @{
-        Type           = "File"
-        Path           = "C:\Program Files\Autodesk\Revit 2026"
-        FileName       = "Revit.exe"
-        MinimumVersion = $null
+        Type           = "File"   # File, Registry, MSI, or Custom
+        Path           = "C:\Program Files\Example"
+        FileName       = "Example.exe"
+        MinimumVersion = $null    # Optional: "1.0.0.0"
     }
 
     SuccessExitCodes = @(0, 3010)
