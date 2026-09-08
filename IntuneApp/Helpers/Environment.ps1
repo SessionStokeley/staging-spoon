@@ -52,6 +52,42 @@ function Get-EnvRegistryKey {
     return $hive.OpenSubKey($subKey, [bool]$Writable)
 }
 
+function Get-EntryField {
+    <#
+        .SYNOPSIS
+        Reads a named field from a record that may be a dictionary or an object.
+
+        .DESCRIPTION
+        Variable records reach uninstall from two sources: the JSON state file,
+        which ConvertFrom-Json returns as a PSCustomObject, and the .psd1
+        fallback, which Import-PowerShellDataFile returns as a Hashtable.
+
+        A Hashtable's keys are not PSObject properties - PSObject.Properties on
+        a Hashtable lists Keys, Values and Count - so a single member probe
+        cannot serve both shapes. This reads each correctly.
+
+        .PARAMETER Default
+        Returned only when the field is genuinely absent. A field holding
+        $false or an empty string is returned as-is.
+    #>
+    param(
+        [AllowNull()]$Record,
+        [Parameter(Mandatory)][string]$Field,
+        $Default = $null
+    )
+
+    if ($null -eq $Record) { return $Default }
+
+    if ($Record -is [System.Collections.IDictionary]) {
+        if ($Record.Contains($Field)) { return $Record[$Field] }
+        return $Default
+    }
+
+    $property = $Record.PSObject.Properties[$Field]
+    if ($property) { return $property.Value }
+    return $Default
+}
+
 function Normalize-PathEntry {
     param([string]$Path)
     if (-not $Path) { return $null }
@@ -630,7 +666,12 @@ function Remove-EnvironmentVariable {
         [string]$Value,
         [bool]$Existed = $false,
         [AllowEmptyString()][AllowNull()]
-        [string]$PreviousValue
+        [string]$PreviousValue,
+        # Set when no install state was recorded, so Existed and PreviousValue
+        # are unknown rather than known-false. Removal then only takes back what
+        # it can positively identify as this package's, instead of assuming
+        # ownership and deleting a variable that was already on the machine.
+        [switch]$OwnershipUnknown
     )
 
     $result = @{ Action = 'None'; Success = $true; Message = '' }
@@ -640,6 +681,53 @@ function Remove-EnvironmentVariable {
         if ($null -eq $current) {
             $result.Action = 'NotFound'
             $result.Message = "Environment variable not found: $Name (Scope: $Scope)"
+            return $result
+        }
+
+        # No ownership record: remove only what is provably this package's.
+        if ($OwnershipUnknown) {
+            if (-not $Value) {
+                $result.Action = 'Skipped'
+                $result.Message = "$Name left unchanged: no install state and no configured value to identify this package's contribution."
+                return $result
+            }
+
+            if ($Mode -in @('Append', 'Prepend')) {
+                # Safe either way: this takes out one entry and leaves the rest.
+                $listResult = Remove-ValueFromList -CurrentValue $current -ValueToRemove $Value
+                if (-not $listResult.Changed) {
+                    $result.Action = 'NotFound'
+                    $result.Message = "$Name no longer contains '$Value'. Left unchanged."
+                    return $result
+                }
+
+                if ([string]::IsNullOrWhiteSpace($listResult.Value)) {
+                    # The list is now empty, so this package's entry was the
+                    # only one; nothing pre-existing is lost by removing it.
+                    Remove-PersistentVariable -Name $Name -Scope $Scope
+                    $result.Action = 'Removed'
+                    $result.Message = "$Name removed from $Scope scope (its only entry belonged to this package)."
+                    return $result
+                }
+
+                Set-PersistentVariable -Name $Name -Value $listResult.Value -Scope $Scope
+                $result.Action = 'EntryRemoved'
+                $result.Message = "$Name in $Scope scope: removed '$Value', kept $(@(Split-PathString $listResult.Value).Count) other entry/entries."
+                return $result
+            }
+
+            # Set mode: only delete when the variable still holds exactly what
+            # this package wrote. A different value means something else owns
+            # it now, and deleting would destroy that.
+            if ($current -eq $Value) {
+                Remove-PersistentVariable -Name $Name -Scope $Scope
+                $result.Action = 'Removed'
+                $result.Message = "$Name removed from $Scope scope (still held this package's value)."
+            }
+            else {
+                $result.Action = 'Skipped'
+                $result.Message = "$Name left unchanged: its value no longer matches what this package set, so it is not safe to assume ownership."
+            }
             return $result
         }
 
@@ -1156,28 +1244,41 @@ function Uninstall-EnvironmentConfig {
 
     # Remove environment variables
     if ($envConfig.Variables) {
-        $varsToRemove = if ($state -and $state.EnvironmentVariablesAdded) {
+        # A state record carries what was actually changed at install time,
+        # including whether each variable already existed. The .psd1 fallback
+        # carries no ownership information, so removal must not assume it owns
+        # anything it finds.
+        $hasStateRecord = [bool]($state -and $state.EnvironmentVariablesAdded)
+
+        $varsToRemove = if ($hasStateRecord) {
             $state.EnvironmentVariablesAdded
         }
         else {
+            Write-Log 'No install state recorded for environment variables. Falling back to the configuration, and removing only what can be positively identified as this package.' $LogFile
             $envConfig.Variables | Where-Object { $_.RemoveOnUninstall -ne $false }
         }
         foreach ($var in $varsToRemove) {
-            $scope = if ($var.Scope) { $var.Scope } else { 'Machine' }
-            $name = if ($var.Name) { $var.Name } else { $var }
-            $mode = if ($var.Mode) { $var.Mode } else { 'Set' }
+            # Records arrive either as PSCustomObject (state file) or Hashtable
+            # (.psd1 fallback); Get-EntryField reads both shapes correctly.
+            $name = Get-EntryField -Record $var -Field 'Name'
+            if (-not $name) { $name = [string]$var }
 
-            # These come from the install-time state file, so an appended entry
-            # is un-appended and a replaced variable is restored, rather than
-            # the whole variable being deleted.
-            $value = if ($var.PSObject.Properties.Name -contains 'Value') { $var.Value } else { $null }
-            $existed = if ($var.PSObject.Properties.Name -contains 'Existed') { [bool]$var.Existed } else { $false }
-            $previous = if ($var.PSObject.Properties.Name -contains 'PreviousValue') { $var.PreviousValue } else { $null }
+            $scope = Get-EntryField -Record $var -Field 'Scope' -Default 'Machine'
+            $mode = Get-EntryField -Record $var -Field 'Mode' -Default 'Set'
+            $value = Get-EntryField -Record $var -Field 'Value'
 
-            Write-Log "Reverting environment variable: $name (Scope: $scope, Mode: $mode, pre-existing: $existed)" $LogFile
+            # Existed and PreviousValue are discovered at install time and only
+            # ever recorded in the state file. Without them the package cannot
+            # know what it owned, so removal has to stay conservative.
+            $ownershipKnown = $hasStateRecord
+            $existed = [bool](Get-EntryField -Record $var -Field 'Existed' -Default $false)
+            $previous = Get-EntryField -Record $var -Field 'PreviousValue'
+
+            Write-Log "Reverting environment variable: $name (Scope: $scope, Mode: $mode, ownership recorded: $ownershipKnown)" $LogFile
 
             $r = Remove-EnvironmentVariable -Name $name -Scope $scope -Mode $mode `
-                -Value $value -Existed $existed -PreviousValue $previous
+                -Value $value -Existed $existed -PreviousValue $previous `
+                -OwnershipUnknown:(-not $ownershipKnown)
 
             Write-Log "$($r.Action): $($r.Message)" $LogFile
             if (-not $r.Success) { $allSuccess = $false }

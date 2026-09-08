@@ -113,6 +113,41 @@ Test-Assert 'Joins with semicolons' ($r -eq 'C:\A;C:\B')
 
 Write-Host ""
 
+# --- Field resolution across both record shapes ---
+# Uninstall reads variable records from two sources: the JSON state file
+# (PSCustomObject) and the .psd1 fallback (Hashtable). A Hashtable's keys are
+# not PSObject properties, so probing with PSObject.Properties silently
+# returned nothing for every .psd1-sourced record.
+Write-Host "Get-EntryField" -ForegroundColor White
+
+$asHashtable = @{ Name = 'CLASSPATH'; Value = 'C:\App\lib'; Scope = 'Machine'; Mode = 'Append' }
+$asObject = '{"Name":"CLASSPATH","Value":"C:\\App\\lib","Scope":"Machine","Mode":"Append","Existed":true,"PreviousValue":"C:\\Old"}' | ConvertFrom-Json
+
+Test-Assert 'Reads a field from a Hashtable record' ((Get-EntryField -Record $asHashtable -Field 'Value') -eq 'C:\App\lib')
+Test-Assert 'Reads a field from a PSCustomObject record' ((Get-EntryField -Record $asObject -Field 'Value') -eq 'C:\App\lib')
+Test-Assert 'Reads Mode from a Hashtable record' ((Get-EntryField -Record $asHashtable -Field 'Mode') -eq 'Append')
+Test-Assert 'Reads Existed from a PSCustomObject record' ((Get-EntryField -Record $asObject -Field 'Existed') -eq $true)
+Test-Assert 'Reads PreviousValue from a PSCustomObject record' ((Get-EntryField -Record $asObject -Field 'PreviousValue') -eq 'C:\Old')
+
+Test-Assert 'Missing field on a Hashtable returns the default' `
+    ((Get-EntryField -Record $asHashtable -Field 'PreviousValue' -Default 'fallback') -eq 'fallback')
+Test-Assert 'Missing field on a PSCustomObject returns the default' `
+    ((Get-EntryField -Record $asObject -Field 'Nope' -Default 'fallback') -eq 'fallback')
+Test-Assert 'Null record returns the default' ((Get-EntryField -Record $null -Field 'Value' -Default 'fallback') -eq 'fallback')
+
+# An ordered dictionary is what the Studio model uses.
+$asOrdered = [ordered]@{ Name = 'X'; Value = 'y' }
+Test-Assert 'Reads a field from an ordered dictionary' ((Get-EntryField -Record $asOrdered -Field 'Value') -eq 'y')
+
+# A present-but-false value must not be mistaken for a missing field.
+$falsey = @{ Existed = $false; Value = '' }
+Test-Assert 'A $false field is returned, not the default' `
+    ((Get-EntryField -Record $falsey -Field 'Existed' -Default $true) -eq $false)
+Test-Assert 'An empty-string field is returned, not the default' `
+    ((Get-EntryField -Record $falsey -Field 'Value' -Default 'fallback') -eq '')
+
+Write-Host ""
+
 # --- List semantics (shared by PATH and list-style variables) ---
 Write-Host "Add-ValueToList / Remove-ValueFromList" -ForegroundColor White
 
@@ -381,6 +416,38 @@ if ($isAdmin -or $isSystem) {
         -Value 'C:\Only\bin' -Existed $false
     Test-Assert 'Package-created variable is deleted on uninstall' ($u3.Action -eq 'Removed')
     Test-Assert 'Package-created variable is gone' ($null -eq (Get-PersistentVariable -Name $newList -Scope 'Machine'))
+
+    # --- No install state recorded: must not assume ownership ---
+    # This is the path taken when the state file is missing. It previously
+    # deleted the whole variable, destroying entries the package never added.
+    $orphanVar = "INTUNE_ORPHAN_$(Get-Random)"
+    $orphanPre = 'C:\Vendor\keep;C:\Vendor\alsokeep'
+    Set-PersistentVariable -Name $orphanVar -Value "$orphanPre;C:\App\bin" -Scope 'Machine'
+
+    $o1 = Remove-EnvironmentVariable -Name $orphanVar -Scope 'Machine' -Mode 'Append' `
+        -Value 'C:\App\bin' -OwnershipUnknown
+    Test-Assert 'Unknown ownership removes only the configured entry' ($o1.Action -eq 'EntryRemoved')
+    Test-Assert 'Unknown ownership preserves unrelated entries' `
+        ((Get-PersistentVariable -Name $orphanVar -Scope 'Machine') -eq $orphanPre) `
+        "got: $(Get-PersistentVariable -Name $orphanVar -Scope 'Machine')"
+    Remove-PersistentVariable -Name $orphanVar -Scope 'Machine'
+
+    # Set mode with unknown ownership: delete only if the value still matches.
+    $ownedVar = "INTUNE_OWNED_$(Get-Random)"
+    Set-PersistentVariable -Name $ownedVar -Value 'C:\Ours' -Scope 'Machine'
+    $o2 = Remove-EnvironmentVariable -Name $ownedVar -Scope 'Machine' -Mode 'Set' `
+        -Value 'C:\Ours' -OwnershipUnknown
+    Test-Assert 'Unknown ownership deletes a variable still holding our value' ($o2.Action -eq 'Removed')
+    Test-Assert 'That variable is gone' ($null -eq (Get-PersistentVariable -Name $ownedVar -Scope 'Machine'))
+
+    $changedVar = "INTUNE_CHANGED_$(Get-Random)"
+    Set-PersistentVariable -Name $changedVar -Value 'C:\SomeoneElseChangedThis' -Scope 'Machine'
+    $o3 = Remove-EnvironmentVariable -Name $changedVar -Scope 'Machine' -Mode 'Set' `
+        -Value 'C:\Ours' -OwnershipUnknown
+    Test-Assert 'Unknown ownership skips a variable that no longer matches' ($o3.Action -eq 'Skipped')
+    Test-Assert 'The changed variable is left intact' `
+        ((Get-PersistentVariable -Name $changedVar -Scope 'Machine') -eq 'C:\SomeoneElseChangedThis')
+    Remove-PersistentVariable -Name $changedVar -Scope 'Machine'
 
     # --- %VAR% values stay expandable ---
     $expVar = "INTUNE_EXP_VAR_$(Get-Random)"

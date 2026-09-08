@@ -26,7 +26,8 @@ IntuneApp\
 │   └── Environment.ps1      # PATH and environment variable helpers
 ├── Tests\
 │   ├── Test-Environment.ps1 # PATH/environment tests
-│   └── Test-Studio.ps1      # Generator tests
+│   ├── Test-Studio.ps1      # Generator tests
+│   └── Test-Detection.ps1   # Intune detection contract tests
 └── Files\
     └── <installer>          # Your EXE or MSI
 ```
@@ -392,7 +393,14 @@ Test-Local.ps1 sets `$env:INTUNE_LOCAL_TEST` to suppress SYSTEM account warnings
 # Run from the IntuneApp directory
 powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Environment.ps1
 powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Studio.ps1
+powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Detection.ps1
 ```
+
+`Test-Detection.ps1` protects the Intune detection contract: exit 0 with output
+on stdout means installed, anything else means not installed. It also asserts
+that a broken configuration still exits non-zero *and* explains itself on
+stderr, so it can never be mistaken for "not installed" — which would otherwise
+put Intune in a reinstall loop with nothing to diagnose.
 
 `Test-Studio.ps1` covers the configuration generator: psd1 serialization and
 round-tripping, save-cycle stability, schema merging and backward
