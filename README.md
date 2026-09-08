@@ -28,7 +28,8 @@ IntuneApp\
 │   ├── Test-Environment.ps1 # PATH/environment tests
 │   ├── Test-Studio.ps1      # Generator tests
 │   ├── Test-Detection.ps1   # Intune detection contract tests
-│   └── Test-Lifecycle.ps1   # Install/uninstall against a fake registry
+│   ├── Test-Lifecycle.ps1   # Install/uninstall against a fake registry
+│   └── Test-Gui.ps1         # Studio GUI data layer, without WPF
 └── Files\
     └── <installer>          # Your EXE or MSI
 ```
@@ -396,7 +397,13 @@ powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Environment.ps1
 powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Studio.ps1
 powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Detection.ps1
 powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Lifecycle.ps1
+powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Gui.ps1
 ```
+
+`Test-Gui.ps1` covers the graphical Studio without WPF. Its model-to-form
+functions are nested inside `Show-PackagingStudio` and cannot be dot-sourced, so
+the test extracts them from `Studio.ps1` with the PowerShell parser and runs the
+real functions against mock controls.
 
 `Test-Lifecycle.ps1` runs the real install and uninstall orchestration against an
 in-memory stand-in for the registry. The registry-backed tests only run elevated

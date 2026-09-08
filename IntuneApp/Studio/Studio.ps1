@@ -414,9 +414,17 @@ function Show-PackagingStudio {
     }
 
     function Split-Lines {
+        <#
+            Splits a multi-line text box into its non-empty trimmed lines.
+
+            Emitted to the pipeline rather than returned as @(...): 'return @()'
+            unrolls, so an empty box yielded $null and a single line yielded a
+            bare string. Under Set-StrictMode both then failed on .Count.
+            Callers still wrap in @() so the count is reliable regardless.
+        #>
         param([string]$Text)
-        if ([string]::IsNullOrWhiteSpace($Text)) { return @() }
-        return @($Text -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ([string]::IsNullOrWhiteSpace($Text)) { return }
+        $Text -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
     }
 
     function Read-ModelFromForm {
@@ -457,21 +465,25 @@ function Show-PackagingStudio {
 
         # Environment
         $m.Environment.Enabled = [bool]$ui.ChkEnvEnabled.IsChecked
-        $entries = Split-Lines $ui.TxtPathEntries.Text
+        $entries = @(Split-Lines $ui.TxtPathEntries.Text)
         $scope = Get-SelectedRadio @{ RbPathSystem = 'System'; RbPathUser = 'User'; RbPathBoth = 'Both' }
         $remove = [bool]$ui.ChkPathRemove.IsChecked
 
+        # The @( ) around each if is required. A block whose only output is @()
+        # emits nothing, so 'X = if (...) { $a } else { @() }' assigns $null,
+        # not an empty array. Validation then reads @($null) as one blank entry
+        # and reports "A PATH entry is empty" against a perfectly good form.
         $m.Environment.SystemPath.Enabled = ($scope -in @('System', 'Both')) -and $entries.Count -gt 0
-        $m.Environment.SystemPath.Entries = if ($m.Environment.SystemPath.Enabled) { $entries } else { @() }
+        $m.Environment.SystemPath.Entries = @(if ($m.Environment.SystemPath.Enabled) { $entries } else { @() })
         $m.Environment.SystemPath.RemoveOnUninstall = $remove
 
         $m.Environment.UserPath.Enabled = ($scope -in @('User', 'Both')) -and $entries.Count -gt 0
-        $m.Environment.UserPath.Entries = if ($m.Environment.UserPath.Enabled) { $entries } else { @() }
+        $m.Environment.UserPath.Entries = @(if ($m.Environment.UserPath.Enabled) { $entries } else { @() })
         $m.Environment.UserPath.RemoveOnUninstall = $remove
 
         $varScope = Get-SelectedRadio $varMap
         $vars = @()
-        foreach ($line in (Split-Lines $ui.TxtEnvVars.Text)) {
+        foreach ($line in @(Split-Lines $ui.TxtEnvVars.Text)) {
             $idx = $line.IndexOf('=')
             if ($idx -gt 0) {
                 $vars += New-EnvironmentVariableEntry -Name $line.Substring(0, $idx).Trim() `
@@ -492,7 +504,7 @@ function Show-PackagingStudio {
 
         $wi.FileAssociations.Enabled = [bool]$ui.ChkAssoc.IsChecked
         $wi.FileAssociations.Associations = @(
-            Split-Lines $ui.TxtAssoc.Text | ForEach-Object { New-FileAssociationEntry -Extension $_ }
+            @(Split-Lines $ui.TxtAssoc.Text) | ForEach-Object { New-FileAssociationEntry -Extension $_ }
         )
         $wi.Services.Enabled  = [bool]$ui.ChkServices.IsChecked
         $wi.Services.Services = @(Split-Lines $ui.TxtServices.Text | ForEach-Object { New-ServiceEntry -Name $_ })
@@ -729,7 +741,7 @@ function Show-PackagingStudio {
             'Detect Paths', 'YesNo', 'Question')
 
         if ($answer -eq 'Yes') {
-            $existing = Split-Lines $ui.TxtPathEntries.Text
+            $existing = @(Split-Lines $ui.TxtPathEntries.Text)
             foreach ($c in $candidates) {
                 if ($c.Confidence -eq 'High' -and $existing -notcontains $c.Directory) {
                     $existing += $c.Directory

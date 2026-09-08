@@ -8,6 +8,68 @@ Severity: **Critical** (data loss / security) · **High** (feature broken) ·
 
 ---
 
+## BUG-009 — Studio GUI failed to open, and invented a blank PATH entry
+
+- **DATE:** 2026-09-08
+- **SEVERITY:** High (the GUI was entirely unusable)
+- **STATUS:** Fixed
+
+**SYMPTOM**
+`New-IntuneApp.ps1 -Mode Gui` failed with "The property 'Count' cannot be found
+on this object. Verify that the property exists." The window never appeared.
+
+**REPRODUCTION**
+Launch the GUI. The failure is on the startup path, before the window is shown,
+with every text box still empty.
+
+**ROOT CAUSE**
+Two defects, both from PowerShell collapsing empty and single-element
+collections, and both hidden because nothing had ever executed this code.
+
+1. `Split-Lines` ended with `return @(...)`. A `return` unrolls, so an empty
+   text box produced `$null` and a single line produced a bare `String`.
+   `Read-ModelFromForm` then evaluated `$entries.Count`, which throws under
+   `Set-StrictMode -Version Latest`. Startup calls `Update-Psd1Text`, so the
+   Studio could not open at all.
+
+2. `X = if (...) { $entries } else { @() }` assigns `$null`, because a block
+   whose only output is `@()` emits nothing. The inactive PATH scope was
+   therefore `$null` rather than an empty list, and `@($null)` reads as one
+   blank element — so validation reported "A PATH entry is empty" against a
+   form that was perfectly valid.
+
+**AFFECTED FILES**
+- `IntuneApp/Studio/Studio.ps1`
+- `IntuneApp/Tests/Test-Gui.ps1` (new)
+
+**FIX**
+`Split-Lines` emits to the pipeline instead of returning `@(...)`, and every
+call site wraps in `@()` so counts are reliable either way. Both `Entries`
+assignments are wrapped in `@( )` so an inactive scope stores an empty array.
+
+**TEST**
+`Test-Gui.ps1` (new, 19 assertions). The GUI's model-to-form functions are
+nested inside `Show-PackagingStudio` and cannot be dot-sourced, so the test
+extracts their definitions from `Studio.ps1` with the PowerShell parser and runs
+them against mock controls. The functions under test are the real ones; only WPF
+is absent. Reverting either fix was confirmed to fail the suite.
+
+**RESULT**
+19/19 pass. The XAML and control-binding check is still clean.
+
+**REGRESSION RISK**
+Low. `Split-Lines` returns the same values for multi-line input, which is what
+every previous run produced; only the empty and single-line cases change, and
+those were broken.
+
+**NOTE**
+This was OPEN-3 — the WPF Studio had been shipped structurally verified but
+never executed. Static checks confirmed the XAML parsed and all 77 controls
+bound, and none of that could catch a runtime type collapse. The lesson matches
+BUG-008: inspection is not verification.
+
+---
+
 ## BUG-008 — Uninstall without state deleted a replaced variable
 
 - **DATE:** 2026-09-08
@@ -305,5 +367,5 @@ Findings not yet fixed, recorded so they are not lost.
 |---|---|---|
 | OPEN-1 | Medium | **`Custom` detection may not load on Windows PowerShell 5.1.** `Import-PowerShellDataFile` evaluates the file through `SafeGetValue()`. PowerShell 7 accepts a `ScriptBlock` value; 5.1 is stricter and may reject it, which would make the whole configuration unloadable — not just custom detection. Intune runs 5.1. Verified working on 7.4.6; **not verified on 5.1**, which needs a Windows check. If it fails there, the fix is to express custom detection as a script path rather than an inline scriptblock. |
 | OPEN-2 | Medium | **`WindowsIntegration` is recorded but never executed.** Shortcuts, file associations, context-menu entries, services and scheduled tasks are captured in the configuration and surfaced as an informational validation finding, but no engine code applies them. Intentional for now; listed so the gap is not mistaken for a defect. |
-| OPEN-3 | Low | **The WPF Studio has never been executed.** Its XAML parses and all 77 named controls resolve against the code-behind, but WPF cannot run in the Linux dev container. Needs a smoke test on Windows. The console wizard is the fully exercised path. |
+| OPEN-3 | Low | **The WPF Studio's window has still not been shown.** Its data layer is now covered by `Test-Gui.ps1`, which runs the real nested functions against mock controls, and BUG-009 was found and fixed that way. What remains unexercised is WPF itself: XAML loading, event wiring, and the dialogs. A smoke test on Windows is still worthwhile. |
 | OPEN-4 | Informational | **Elevated PATH and variable tests do not run in CI here.** 7 of 58 environment assertions require Windows and administrator rights and skip on Linux, so the real registry round-trips are unverified in this environment. `Test-Lifecycle.ps1` now covers the orchestration and ownership logic on any platform via an in-memory stand-in, which narrows the gap to the registry primitives themselves (`Get-`/`Set-PersistentPath`, `Get-`/`Set-`/`Remove-PersistentVariable`). A Windows run is still needed to confirm BUG-001, BUG-002 and BUG-003 end to end. |
