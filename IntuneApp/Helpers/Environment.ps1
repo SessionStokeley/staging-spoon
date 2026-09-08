@@ -716,17 +716,21 @@ function Remove-EnvironmentVariable {
                 return $result
             }
 
-            # Set mode: only delete when the variable still holds exactly what
-            # this package wrote. A different value means something else owns
-            # it now, and deleting would destroy that.
-            if ($current -eq $Value) {
-                Remove-PersistentVariable -Name $Name -Scope $Scope
-                $result.Action = 'Removed'
-                $result.Message = "$Name removed from $Scope scope (still held this package's value)."
+            # Set mode without install state is never safe to undo.
+            #
+            # Finding the variable still holding this package's value proves
+            # only that the package WROTE it, not that it CREATED it - Set also
+            # replaces a value that was already on the machine, and the value
+            # it replaced was only ever recorded in the state file. Deleting
+            # here would silently destroy a variable such as a pre-existing
+            # JAVA_HOME. Leaving a stale value behind is recoverable; deleting
+            # someone else's variable is not.
+            $result.Action = 'Skipped'
+            $result.Message = if ($current -eq $Value) {
+                "$Name left in place in $Scope scope: no install state, so this package cannot prove it created the variable rather than replacing an existing one. Remove it by hand if it was not there before."
             }
             else {
-                $result.Action = 'Skipped'
-                $result.Message = "$Name left unchanged: its value no longer matches what this package set, so it is not safe to assume ownership."
+                "$Name left unchanged in $Scope scope: its value no longer matches what this package set, so something else owns it now."
             }
             return $result
         }

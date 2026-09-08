@@ -432,13 +432,18 @@ if ($isAdmin -or $isSystem) {
         "got: $(Get-PersistentVariable -Name $orphanVar -Scope 'Machine')"
     Remove-PersistentVariable -Name $orphanVar -Scope 'Machine'
 
-    # Set mode with unknown ownership: delete only if the value still matches.
+    # Set mode with unknown ownership must never delete. Holding this package's
+    # value proves it wrote the variable, not that it created it - Set also
+    # replaces a value that was already there, and that old value lives only in
+    # the state file. Deleting would destroy a pre-existing JAVA_HOME.
     $ownedVar = "INTUNE_OWNED_$(Get-Random)"
     Set-PersistentVariable -Name $ownedVar -Value 'C:\Ours' -Scope 'Machine'
     $o2 = Remove-EnvironmentVariable -Name $ownedVar -Scope 'Machine' -Mode 'Set' `
         -Value 'C:\Ours' -OwnershipUnknown
-    Test-Assert 'Unknown ownership deletes a variable still holding our value' ($o2.Action -eq 'Removed')
-    Test-Assert 'That variable is gone' ($null -eq (Get-PersistentVariable -Name $ownedVar -Scope 'Machine'))
+    Test-Assert 'Unknown ownership never deletes in Set mode' ($o2.Action -eq 'Skipped') "Action was $($o2.Action)"
+    Test-Assert 'The variable is left in place' ($null -ne (Get-PersistentVariable -Name $ownedVar -Scope 'Machine'))
+    Test-Assert 'The skip explains it cannot prove ownership' ($o2.Message -match 'cannot prove')
+    Remove-PersistentVariable -Name $ownedVar -Scope 'Machine'
 
     $changedVar = "INTUNE_CHANGED_$(Get-Random)"
     Set-PersistentVariable -Name $changedVar -Value 'C:\SomeoneElseChangedThis' -Scope 'Machine'

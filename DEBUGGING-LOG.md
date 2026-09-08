@@ -8,6 +8,64 @@ Severity: **Critical** (data loss / security) · **High** (feature broken) ·
 
 ---
 
+## BUG-008 — Uninstall without state deleted a replaced variable
+
+- **DATE:** 2026-09-08
+- **SEVERITY:** Critical (data loss)
+- **STATUS:** Fixed
+
+**SYMPTOM**
+Found while double-checking the BUG-006 fix, which was incomplete. With no
+install state, uninstalling deleted `JAVA_HOME` outright even though it had
+existed beforehand with a different value.
+
+**REPRODUCTION**
+Machine has `JAVA_HOME=C:\Existing\jdk`. Install a package whose configuration
+sets `JAVA_HOME=C:\App\jdk` in `Set` mode. Delete the state file. Uninstall.
+The variable is gone rather than restored.
+
+**ROOT CAUSE**
+The conservative path added by BUG-006 deleted a `Set`-mode variable when it
+still held the value the package had written. That test is wrong: holding this
+package's value proves the package *wrote* the variable, not that it *created*
+it. `Set` also replaces a value that was already on the machine, and the
+replaced value is recorded only in the state file. Without that record,
+"created" and "replaced" are indistinguishable.
+
+**AFFECTED FILES**
+- `IntuneApp/Helpers/Environment.ps1`
+- `IntuneApp/Tests/Test-Environment.ps1`
+- `IntuneApp/Tests/Test-Lifecycle.ps1` (new)
+
+**FIX**
+`Set` mode with unknown ownership now never deletes. It leaves the value in
+place and logs that the package cannot prove it created the variable, naming it
+so it can be removed by hand. Leaving a stale value is recoverable; deleting
+another product's variable is not.
+
+**TEST**
+`Test-Lifecycle.ps1` (new, 27 assertions) runs the real install and uninstall
+orchestration against an in-memory stand-in for the registry, so the ownership
+branching executes on any platform instead of only on elevated Windows. It
+asserts a pre-existing `JAVA_HOME` and `CLASSPATH` survive an uninstall with no
+state file.
+
+**RESULT**
+27/27 pass. The with-state path is unchanged and still restores the replaced
+value and deletes the package-created one.
+
+**REGRESSION RISK**
+Low, and in the safe direction: uninstall without state now leaves more behind
+than it did. That residue is logged by name.
+
+**NOTE**
+The BUG-006 fix was reported as verified on the strength of a unit test of the
+field-resolution helper. That test was passing and the underlying behavior was
+still wrong. The lifecycle harness exists so this class of gap is covered by
+execution rather than by inspection.
+
+---
+
 ## BUG-007 — Detection cannot be told apart from a broken configuration
 
 - **DATE:** 2026-09-08
@@ -101,6 +159,10 @@ ownership from *known-not-owned*: with no state record it passes
 `-OwnershipUnknown`, and removal only takes back what it can positively identify
 — un-appending its own entry from a list, and for `Set` deleting only when the
 variable still holds exactly the value the package wrote.
+
+> **Superseded by BUG-008.** That `Set` rule was still wrong: holding this
+> package's value does not prove the package created the variable. `Set` with
+> unknown ownership no longer deletes at all.
 
 **TEST**
 11 assertions for `Get-EntryField` across hashtable, `PSCustomObject`, ordered
@@ -244,4 +306,4 @@ Findings not yet fixed, recorded so they are not lost.
 | OPEN-1 | Medium | **`Custom` detection may not load on Windows PowerShell 5.1.** `Import-PowerShellDataFile` evaluates the file through `SafeGetValue()`. PowerShell 7 accepts a `ScriptBlock` value; 5.1 is stricter and may reject it, which would make the whole configuration unloadable — not just custom detection. Intune runs 5.1. Verified working on 7.4.6; **not verified on 5.1**, which needs a Windows check. If it fails there, the fix is to express custom detection as a script path rather than an inline scriptblock. |
 | OPEN-2 | Medium | **`WindowsIntegration` is recorded but never executed.** Shortcuts, file associations, context-menu entries, services and scheduled tasks are captured in the configuration and surfaced as an informational validation finding, but no engine code applies them. Intentional for now; listed so the gap is not mistaken for a defect. |
 | OPEN-3 | Low | **The WPF Studio has never been executed.** Its XAML parses and all 77 named controls resolve against the code-behind, but WPF cannot run in the Linux dev container. Needs a smoke test on Windows. The console wizard is the fully exercised path. |
-| OPEN-4 | Informational | **Elevated PATH and variable tests do not run in CI here.** 7 of 58 environment assertions require Windows and administrator rights and skip on Linux. They are the ones covering the actual registry round-trips, so a Windows run is needed before trusting BUG-001, BUG-002, BUG-003 and BUG-006 end to end. |
+| OPEN-4 | Informational | **Elevated PATH and variable tests do not run in CI here.** 7 of 58 environment assertions require Windows and administrator rights and skip on Linux, so the real registry round-trips are unverified in this environment. `Test-Lifecycle.ps1` now covers the orchestration and ownership logic on any platform via an in-memory stand-in, which narrows the gap to the registry primitives themselves (`Get-`/`Set-PersistentPath`, `Get-`/`Set-`/`Remove-PersistentVariable`). A Windows run is still needed to confirm BUG-001, BUG-002 and BUG-003 end to end. |

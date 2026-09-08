@@ -27,7 +27,8 @@ IntuneApp\
 ├── Tests\
 │   ├── Test-Environment.ps1 # PATH/environment tests
 │   ├── Test-Studio.ps1      # Generator tests
-│   └── Test-Detection.ps1   # Intune detection contract tests
+│   ├── Test-Detection.ps1   # Intune detection contract tests
+│   └── Test-Lifecycle.ps1   # Install/uninstall against a fake registry
 └── Files\
     └── <installer>          # Your EXE or MSI
 ```
@@ -394,7 +395,15 @@ Test-Local.ps1 sets `$env:INTUNE_LOCAL_TEST` to suppress SYSTEM account warnings
 powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Environment.ps1
 powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Studio.ps1
 powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Detection.ps1
+powershell.exe -ExecutionPolicy Bypass -File Tests\Test-Lifecycle.ps1
 ```
+
+`Test-Lifecycle.ps1` runs the real install and uninstall orchestration against an
+in-memory stand-in for the registry. The registry-backed tests only run elevated
+on Windows, so without this the logic deciding what uninstall removes would never
+execute anywhere else. It asserts that a pre-existing `CLASSPATH` or `JAVA_HOME`
+survives both install and uninstall, including when the install state file is
+missing.
 
 `Test-Detection.ps1` protects the Intune detection contract: exit 0 with output
 on stdout means installed, anything else means not installed. It also asserts
