@@ -15,7 +15,10 @@
 Set-StrictMode -Version Latest
 
 function Test-WpfAvailable {
-    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) { return $false }
+    # Read through Get-Variable: $IsWindows does not exist on 5.1, and this
+    # file runs under Set-StrictMode where a bare reference would throw.
+    if ($PSVersionTable.PSEdition -eq 'Core' -and
+        -not (Get-Variable -Name IsWindows -ValueOnly -ErrorAction SilentlyContinue)) { return $false }
     try {
         Add-Type -AssemblyName PresentationFramework -ErrorAction Stop
         Add-Type -AssemblyName PresentationCore -ErrorAction Stop

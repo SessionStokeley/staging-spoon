@@ -1,13 +1,37 @@
 #Requires -Version 5.1
-param()
+<#
+    Uninstall.ps1
+
+    Stages, in order:
+
+        1  Detect the application
+        2  Run the uninstaller
+        3  Remove package-owned Windows integrations
+        4  Remove package-owned PATH entries
+        5  Remove package-owned environment variables
+        6  Validate the cleanup
+        7  Report
+
+    Every removal is driven by the ownership recorded at install time. A
+    shortcut, registry key, service or task that this package did not create is
+    never removed, and a feature left in VALIDATE mode recorded nothing, so the
+    installer's own integrations survive.
+
+    -TestMode prints what would be removed and exits without changing anything.
+#>
+param(
+    # Dry run. Prints the planned removals without performing them.
+    [switch]$TestMode
+)
 
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 # Load shared helpers
 $helpersDir = Join-Path $ScriptDir 'Helpers'
-if (Test-Path (Join-Path $helpersDir 'Environment.ps1')) {
-    . (Join-Path $helpersDir 'Environment.ps1')
+foreach ($helper in @('ConfigLoader.ps1', 'Environment.ps1', 'WindowsIntegration.ps1')) {
+    $helperPath = Join-Path $helpersDir $helper
+    if (Test-Path $helperPath) { . $helperPath }
 }
 
 # --- Helpers ---
@@ -19,9 +43,22 @@ function Write-Log {
     $entry | Out-File -FilePath $LogFile -Append -Encoding utf8
 }
 
+function Write-Plan {
+    param([string]$Message, [string]$LogFile)
+    Write-Host "[DRY-RUN] $Message"
+    Write-Log "[DRY-RUN] $Message" $LogFile
+}
+
+function Get-CurrentIdentityName {
+    # Never allowed to abort the run. The identity is diagnostic, and the
+    # Windows principal API throws outright on non-Windows, which would stop a
+    # dry run before it printed anything.
+    try { return [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+    catch { return '(identity unavailable on this platform)' }
+}
+
 function Test-SystemAccount {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    return ($identity -eq 'NT AUTHORITY\SYSTEM')
+    return ((Get-CurrentIdentityName) -eq 'NT AUTHORITY\SYSTEM')
 }
 
 function Invoke-Detection {
@@ -34,7 +71,7 @@ function Invoke-Detection {
 # --- Main ---
 
 try {
-    $Config = Import-PowerShellDataFile (Join-Path $ScriptDir 'Configuration.psd1')
+    $Config = Get-PackageConfiguration -PackageRoot $ScriptDir
     $appName = $Config.ApplicationName
 
     # Logging setup
@@ -45,43 +82,59 @@ try {
         $logFile = Join-Path $logDir 'Uninstall.log'
     }
 
-    Write-Log "=== Uninstall started for $appName ===" $logFile
-    Write-Log "Running as: $([Security.Principal.WindowsIdentity]::GetCurrent().Name)" $logFile
+    $modeLabel = if ($TestMode) { ' (dry run)' } else { '' }
+    Write-Log "=== Uninstall started for $appName$modeLabel ===" $logFile
+    Write-Log "Running as: $(Get-CurrentIdentityName)" $logFile
 
     if (-not (Test-SystemAccount)) {
-        if ($env:INTUNE_LOCAL_TEST) {
-            Write-Log "Local test mode: skipping SYSTEM check." $logFile
+        if ($env:INTUNE_LOCAL_TEST -or $TestMode) {
+            Write-Log 'Local test mode: skipping SYSTEM check.' $logFile
         }
         else {
-            Write-Log "WARNING: Not running as SYSTEM. Production deployments must run as SYSTEM." $logFile
-            Write-Warning "Not running as SYSTEM. Use Test-Local.ps1 for local testing."
+            Write-Log 'WARNING: Not running as SYSTEM. Production deployments must run as SYSTEM.' $logFile
+            Write-Warning 'Not running as SYSTEM. Use Test-Local.ps1 for local testing.'
         }
     }
 
+    # ------------------------------------------------- 1. Detect application
+    $presentBefore = Invoke-Detection -Config $Config
+    Write-Log "Pre-uninstall detection: application present = $presentBefore" $logFile
+
+    if (-not $Config.Uninstaller -or -not $Config.Uninstaller.Type) {
+        throw 'Configuration.psd1 has no Uninstaller.Type.'
+    }
     $uninstallType = $Config.Uninstaller.Type.ToUpper()
 
+    if ($uninstallType -notin @('MSI', 'EXE')) {
+        Write-Log "ERROR: Unknown uninstaller type: $uninstallType" $logFile
+        Write-Error "Unknown uninstaller type: $uninstallType"
+        exit 1
+    }
+
+    # Resolve what the uninstaller will be, so a dry run can name it.
+    $uninstallCommand = ''
     if ($uninstallType -eq 'MSI') {
         $productCode = $Config.Uninstaller.ProductCode
         if (-not $productCode) {
-            Write-Log "ERROR: MSI uninstall requires ProductCode in configuration." $logFile
-            Write-Error "MSI uninstall requires ProductCode in configuration."
+            Write-Log 'ERROR: MSI uninstall requires ProductCode in configuration.' $logFile
+            Write-Error 'MSI uninstall requires ProductCode in configuration.'
             exit 1
         }
         $msiArgs = "/x $productCode /qn /norestart"
-        Write-Log "Executing: msiexec.exe $msiArgs" $logFile
-        $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow
+        $uninstallCommand = "msiexec.exe $msiArgs"
     }
-    elseif ($uninstallType -eq 'EXE') {
+    else {
         $uninstallFile = $Config.Uninstaller.File
         $uninstallArgs = $Config.Uninstaller.Arguments
 
         if (-not $uninstallFile) {
-            Write-Log "ERROR: EXE uninstall requires File in configuration." $logFile
-            Write-Error "EXE uninstall requires File in configuration."
+            Write-Log 'ERROR: EXE uninstall requires File in configuration.' $logFile
+            Write-Error 'EXE uninstall requires File in configuration.'
             exit 1
         }
 
-        # Check if it's an absolute path or relative to the package
+        # Absolute paths are supported, for uninstallers discovered in the
+        # registry rather than shipped in the package.
         if ([System.IO.Path]::IsPathRooted($uninstallFile)) {
             $uninstallPath = $uninstallFile
         }
@@ -94,14 +147,37 @@ try {
             Write-Error "Uninstaller not found: $uninstallPath"
             exit 1
         }
+        $uninstallCommand = "$uninstallPath $uninstallArgs"
+    }
 
-        Write-Log "Executing: $uninstallPath $uninstallArgs" $logFile
-        $process = Start-Process -FilePath $uninstallPath -ArgumentList $uninstallArgs -Wait -PassThru -NoNewWindow
+    # ------------------------------------------------------ Dry run stops here
+    if ($TestMode) {
+        Write-Host ''
+        Write-Host "Dry run for $appName. Nothing will be changed."
+        Write-Host ''
+        Write-Plan "Would run: $uninstallCommand" $logFile
+
+        if ($Config.WindowsIntegration -and $Config.WindowsIntegration.Enabled) {
+            Uninstall-WindowsIntegration -Config $Config -LogFile $logFile -DryRun | Out-Null
+        }
+        if ($Config.Environment -and $Config.Environment.Enabled) {
+            Uninstall-EnvironmentConfig -Config $Config -LogFile $logFile -DryRun | Out-Null
+        }
+
+        Write-Host ''
+        Write-Host 'Dry run complete. No changes were made.'
+        Write-Log 'Dry run complete. No changes were made.' $logFile
+        exit 0
+    }
+
+    # ---------------------------------------------------- 2. Run uninstaller
+    if ($uninstallType -eq 'MSI') {
+        Write-Log "Executing: msiexec.exe $msiArgs" $logFile
+        $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow
     }
     else {
-        Write-Log "ERROR: Unknown uninstaller type: $uninstallType" $logFile
-        Write-Error "Unknown uninstaller type: $uninstallType"
-        exit 1
+        Write-Log "Executing: $uninstallPath $uninstallArgs" $logFile
+        $process = Start-Process -FilePath $uninstallPath -ArgumentList $uninstallArgs -Wait -PassThru -NoNewWindow
     }
 
     $exitCode = $process.ExitCode
@@ -115,25 +191,36 @@ try {
         exit 1
     }
 
-    # Clean up environment/PATH before detection check
-    if ($Config.Environment -and $Config.Environment.Enabled) {
-        Write-Log "Cleaning up environment configuration..." $logFile
-        $envSuccess = Uninstall-EnvironmentConfig -Config $Config -LogFile $logFile
-        if (-not $envSuccess) {
-            Write-Log "WARNING: Environment cleanup had failures." $logFile
+    # --------------------------------- 3. Remove package-owned integrations
+    if ($Config.WindowsIntegration -and $Config.WindowsIntegration.Enabled) {
+        Write-Log 'Removing package-owned Windows integrations...' $logFile
+        $integration = Uninstall-WindowsIntegration -Config $Config -LogFile $logFile
+        if (-not $integration.Success) {
+            Write-Log 'WARNING: Windows integration cleanup had failures.' $logFile
         }
     }
 
-    # Verify removal via detection
-    Write-Log "Running post-uninstall detection..." $logFile
+    # ------------------------------------- 4 & 5. PATH and environment variables
+    if ($Config.Environment -and $Config.Environment.Enabled) {
+        Write-Log 'Cleaning up environment configuration...' $logFile
+        $envSuccess = Uninstall-EnvironmentConfig -Config $Config -LogFile $logFile
+        if (-not $envSuccess) {
+            Write-Log 'WARNING: Environment cleanup had failures.' $logFile
+        }
+    }
+
+    # ----------------------------------------------------- 6. Validate cleanup
+    Write-Log 'Running post-uninstall detection...' $logFile
     $detected = Invoke-Detection -Config $Config
+
+    # ------------------------------------------------------------- 7. Report
     if (-not $detected) {
-        Write-Log "Detection: Application no longer detected. Uninstall SUCCESS." $logFile
+        Write-Log 'Detection: Application no longer detected. Uninstall SUCCESS.' $logFile
         if ($exitCode -eq 3010) { exit 3010 }
         exit 0
     }
     else {
-        Write-Log "ERROR: Application still detected after uninstall." $logFile
+        Write-Log 'ERROR: Application still detected after uninstall.' $logFile
         exit 1
     }
 }

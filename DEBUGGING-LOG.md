@@ -8,6 +8,159 @@ Severity: **Critical** (data loss / security) · **High** (feature broken) ·
 
 ---
 
+## BUG-011 — A Custom detection configuration could not load on PowerShell 5.1
+
+- **DATE:** 2026-09-17
+- **SEVERITY:** High (the whole configuration failed to load, not just detection)
+- **STATUS:** Fixed
+
+**SYMPTOM**
+A `Configuration.psd1` containing `Detection.ScriptBlock = { ... }` fails to load
+under Windows PowerShell 5.1. Because the failure is in the *loader*, it takes
+the entire configuration with it: install, uninstall and detection all stop,
+not just custom detection. Intune's Management Extension runs 5.1, so this is
+exactly where it breaks.
+
+**REPRODUCTION**
+On Windows PowerShell 5.1:
+```powershell
+Import-PowerShellDataFile .\Configuration.psd1   # throws on the script block
+```
+
+**ROOT CAUSE**
+`Import-PowerShellDataFile` evaluates a `.psd1` through
+`ScriptBlockAst.SafeGetValue()`. PowerShell 7 added script-block support to that
+evaluator; 5.1 has no such case and rejects the literal outright. This was
+OPEN-1, recorded as unverified because the project had no 5.1 to test on.
+
+**AFFECTED FILES**
+- `IntuneApp/Helpers/ConfigLoader.ps1` (new)
+- `IntuneApp/Detection.ps1`, `Install.ps1`, `Uninstall.ps1`
+- `IntuneApp/Studio/ConfigModel.ps1`, `Studio/ConfigValidator.ps1`
+- `IntuneApp/Tests/Test-PS51Compat.ps1` (new)
+
+**FIX**
+Two parts.
+
+1. Custom detection now has two forms that are ordinary `.psd1` literals and
+   need no special loader support: `Detection.Script` (inline PowerShell as a
+   string) and `Detection.ScriptFile` (a `.ps1` shipped in the package).
+
+2. Existing script-block configurations keep working. When the native loader
+   refuses a file, `Import-PackageConfiguration` re-reads it from the syntax
+   tree and converts each script-block literal to its source text. The fallback
+   parses; it never executes, so a configuration still cannot run code merely by
+   being loaded.
+
+`Set-StrictMode` is deliberately **not** set in the new helper. Dot-sourcing
+applies it to the caller's scope, and an earlier draft that set it broke
+`Detection.ps1` on a legitimately absent `Detection.MinimumVersion`. The engine
+helpers all follow that rule; the Studio modules set it because their entry
+points expect it.
+
+**TEST**
+`Test-PS51Compat.ps1` (new, 21 checks). Three parts, kept separate so it is
+never ambiguous which ran:
+
+- A syntax audit that walks every shipped script's AST and fails on ternaries,
+  `??`, `??=`, `?.`, `?[]`, `&&`/`||`, Core-only automatic variables, and
+  PowerShell 7-only cmdlets. Verified to have teeth by injecting each construct
+  in turn and confirming the suite fails.
+- The 5.1 loader path executed for real via `-Strict`, including `Detection.ps1`
+  driven end to end through it.
+- A live `powershell.exe` 5.1 run, which reports `[SKIP]` off Windows.
+
+**RESULT**
+20 pass, 1 skip on Linux. The skip is the live 5.1 run and nothing else; the
+5.1 *code path* is executed in full on any platform.
+
+**REGRESSION RISK**
+Low. The native loader still runs first and is unchanged wherever it succeeds,
+so behaviour on PowerShell 7 is identical.
+
+**NOTE**
+Two bare `$IsWindows` references were removed as part of the audit. Both were
+guarded by an edition check and so were safe through short-circuiting, but the
+rule "never reference a Core-only variable directly" is one a test can enforce,
+and "safe because of evaluation order" is not.
+
+---
+
+## BUG-010 — Custom detection reported every application as installed
+
+- **DATE:** 2026-09-17
+- **SEVERITY:** Critical (silent false positive)
+- **STATUS:** Fixed
+
+**SYMPTOM**
+With `Detection.Type = 'Custom'`, `Detection.ps1` exited 0 — "installed" — no
+matter what the detection script checked, including for an application that was
+definitely not present.
+
+**REPRODUCTION**
+```powershell
+# Configuration.psd1
+@{ Detection = @{ Type = 'Custom'; ScriptBlock = { Test-Path '/definitely/not/here' } } }
+```
+```
+pwsh -File Detection.ps1
+Detected via custom check
+exit 0          # expected 1
+```
+
+**ROOT CAUSE**
+`Import-PowerShellDataFile` does not return the script block that was written.
+It returns one *wrapping* it, whose entire body is the literal text `{ ... }`.
+Invoking it therefore yields **another `ScriptBlock` object** rather than running
+the check. A `ScriptBlock` is always truthy, so `if ($result)` was always true.
+
+Detection never actually ran. It reported success because it had an object in
+its hand, and nothing ever looked at what kind of object.
+
+**CONSEQUENCE**
+Worse than the reinstall loop of BUG-007. Intune believes the application is
+installed when it is not, so the install never runs — or an uninstall is
+reported successful while the application is still on the machine. Nothing in
+the log looks wrong.
+
+**AFFECTED FILES**
+- `IntuneApp/Detection.ps1`
+- `IntuneApp/Helpers/ConfigLoader.ps1`
+
+**FIX**
+`Resolve-DetectionScript` rebuilds the script block from its unwrapped source.
+The unwrapping is done through the syntax tree, not by trimming braces:
+`'{@{Type=1}}'.Trim('{','}')` strips both closing braces and produces
+unbalanced source.
+
+The verdict is now the **last** value the script emits rather than the whole
+collection, so a script that prints progress before deciding is read correctly.
+Previously any script emitting two or more objects was truthy regardless of what
+it concluded.
+
+**TEST**
+`Test-PS51Compat.ps1` asserts that an absent application is not detected through
+*both* loaders, and `Test-Detection.ps1` covers the exit-code contract. The
+matrix — script block / `Script` / `ScriptFile`, present / absent, silent /
+chatty — was confirmed by execution, not inspection.
+
+**RESULT**
+Fixed. An absent application now exits 1 in every form.
+
+**REGRESSION RISK**
+Low in mechanism, but note that detection results **change** for anyone using
+custom detection: it starts reporting the truth. A package that appeared to
+deploy cleanly may now correctly report "not installed" and reinstall. That is
+the defect surfacing, not a new one.
+
+**NOTE**
+This had been shipped for the entire life of the feature and no test caught it,
+because no test ever ran custom detection against an application that was
+absent. Every test asserted the positive case, which is the one path where a
+wrong answer looks right.
+
+---
+
 ## BUG-009 — Studio GUI failed to open, and invented a blank PATH entry
 
 - **DATE:** 2026-09-08
@@ -365,7 +518,10 @@ Findings not yet fixed, recorded so they are not lost.
 
 | ID | Severity | Item |
 |---|---|---|
-| OPEN-1 | Medium | **`Custom` detection may not load on Windows PowerShell 5.1.** `Import-PowerShellDataFile` evaluates the file through `SafeGetValue()`. PowerShell 7 accepts a `ScriptBlock` value; 5.1 is stricter and may reject it, which would make the whole configuration unloadable — not just custom detection. Intune runs 5.1. Verified working on 7.4.6; **not verified on 5.1**, which needs a Windows check. If it fails there, the fix is to express custom detection as a script path rather than an inline scriptblock. |
-| OPEN-2 | Medium | **`WindowsIntegration` is recorded but never executed.** Shortcuts, file associations, context-menu entries, services and scheduled tasks are captured in the configuration and surfaced as an informational validation finding, but no engine code applies them. Intentional for now; listed so the gap is not mistaken for a defect. |
-| OPEN-3 | Low | **The WPF Studio's window has still not been shown.** Its data layer is now covered by `Test-Gui.ps1`, which runs the real nested functions against mock controls, and BUG-009 was found and fixed that way. What remains unexercised is WPF itself: XAML loading, event wiring, and the dialogs. A smoke test on Windows is still worthwhile. |
-| OPEN-4 | Informational | **Elevated PATH and variable tests do not run in CI here.** 7 of 58 environment assertions require Windows and administrator rights and skip on Linux, so the real registry round-trips are unverified in this environment. `Test-Lifecycle.ps1` now covers the orchestration and ownership logic on any platform via an in-memory stand-in, which narrows the gap to the registry primitives themselves (`Get-`/`Set-PersistentPath`, `Get-`/`Set-`/`Remove-PersistentVariable`). A Windows run is still needed to confirm BUG-001, BUG-002 and BUG-003 end to end. |
+| OPEN-3 | Low | **The WPF Studio's window has still not been shown by a human.** `Test-WpfSmoke.ps1` now parses the XAML, cross-checks all 77 named controls against the code three ways, and — on Windows — builds the real window, resolves every control, fires an event handler, saves and reloads a configuration, and closes cleanly. What remains is only what automation cannot reach: `ShowDialog` blocks and the file dialogs are modal, so they are constructed but never shown. The manual checklist is printed at the end of that suite. |
+| OPEN-4 | Informational | **Windows-only checks do not run in this environment.** 22 assertions across four suites skip on Linux: 9 elevated primitives (`Test-Elevated.ps1`), 7 registry round-trips (`Test-Environment.ps1`), 5 live-WPF checks (`Test-WpfSmoke.ps1`) and 1 live PowerShell 5.1 run (`Test-PS51Compat.ps1`). Every one reports `[SKIP]` with its reason and is never counted as a pass. The logic above those primitives runs on any platform through in-memory stand-ins, so the gap is now the primitives themselves — `Get-`/`Set-PersistentPath`, the persistent-variable pair, the shortcut and registry-verb primitives, and WPF. An elevated Windows run closes it. |
+
+Closed since the last revision: **OPEN-1** (see BUG-011 — custom detection is
+now 5.1-safe, with a syntax audit and an executed 5.1 loader path) and
+**OPEN-2** (`WindowsIntegration` is executed rather than merely recorded, with
+per-feature DISABLED / VALIDATE / MANAGE modes and ownership-driven removal).

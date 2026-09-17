@@ -187,6 +187,32 @@ function Test-ConfigModel {
         }
         'CUSTOM' {
             & $add 'Warning' 'Detection' 'Custom detection is in use.' 'Prefer File, Registry or MSI detection where possible - they are simpler to reason about.'
+
+            $customScript = [string](Get-ModelValue $Model 'Detection.Script')
+            $customFile   = [string](Get-ModelValue $Model 'Detection.ScriptFile')
+            $customBlock  = Get-ModelValue $Model 'Detection.ScriptBlock'
+
+            if (-not $customScript -and -not $customFile -and -not $customBlock) {
+                & $add 'Error' 'Detection' 'Custom detection has no script.' 'Set Detection.Script (inline PowerShell) or Detection.ScriptFile (a .ps1 in the package).'
+            }
+
+            if ($customBlock -and -not $customScript -and -not $customFile) {
+                # Import-PowerShellDataFile on 5.1 rejects a script-block
+                # literal and fails the whole file, not just this section.
+                # The framework falls back to reading the syntax tree, so this
+                # still works - but the string forms need no fallback.
+                & $add 'Warning' 'Detection' 'Custom detection uses a script block literal.' 'Windows PowerShell 5.1 cannot load one from a .psd1, so the framework falls back to reading the file directly. Detection.Script or Detection.ScriptFile avoids the fallback entirely.'
+            }
+
+            if ($customFile -and -not $SkipFileChecks) {
+                $resolvedCustom = $customFile
+                if (-not [System.IO.Path]::IsPathRooted($resolvedCustom) -and $PackageRoot) {
+                    $resolvedCustom = Join-Path $PackageRoot $resolvedCustom
+                }
+                if (-not (Test-Path -LiteralPath $resolvedCustom)) {
+                    & $add 'Error' 'Detection' "Detection.ScriptFile was not found: $customFile" 'The path is relative to the package root, and the file must ship inside the .intunewin.'
+                }
+            }
         }
         default {
             & $add 'Error' 'Detection' "Detection.Type '$detType' is not valid." 'Use File, Registry, MSI or Custom.'
@@ -321,13 +347,77 @@ function Test-ConfigModel {
             & $add 'Information' 'Associations' 'Registering an association does not force it to become the user default.' 'Windows requires the user to confirm a default application change.'
         }
 
-        # Be explicit about the boundary of what the engine actually performs.
-        $recordedOnly = @()
-        foreach ($section in @('StartMenuShortcut', 'DesktopShortcut', 'FileAssociations', 'ContextMenu', 'Services', 'ScheduledTasks')) {
-            if (Get-ModelValue $Model "WindowsIntegration.$section.Enabled") { $recordedOnly += $section }
+        # --- Modes ---
+        # Mirrors Resolve-IntegrationMode in Helpers/WindowsIntegration.ps1.
+        # The Studio deliberately carries no dependency on the execution
+        # engine, so the rule is stated here rather than shared.
+        $resolveMode = {
+            param($sectionName)
+            $mode = [string](Get-ModelValue $Model "WindowsIntegration.$sectionName.Mode")
+            if ($mode) { return $mode.ToUpperInvariant() }
+            if (Get-ModelValue $Model "WindowsIntegration.$sectionName.Enabled") { return 'MANAGE' }
+            return 'DISABLED'
         }
-        if ($recordedOnly.Count -gt 0) {
-            & $add 'Information' 'Windows Integration' "Recorded in the configuration but not executed by the current packaging engine: $($recordedOnly -join ', ')." 'These settings are captured for review and hand-off. The installer itself usually creates them.'
+
+        $allFeatures = @('StartMenuShortcut', 'DesktopShortcut', 'FileAssociations',
+                         'ContextMenu', 'Services', 'ScheduledTasks')
+
+        foreach ($sectionName in $allFeatures) {
+            $mode = [string](Get-ModelValue $Model "WindowsIntegration.$sectionName.Mode")
+            if ($mode -and $mode.ToUpperInvariant() -notin @('DISABLED', 'VALIDATE', 'MANAGE')) {
+                & $add 'Error' 'Windows Integration' "WindowsIntegration.$sectionName.Mode '$mode' is not valid." 'Use DISABLED, VALIDATE or MANAGE.'
+            }
+        }
+
+        $managed = @($allFeatures | Where-Object { (& $resolveMode $_) -eq 'MANAGE' })
+        $validated = @($allFeatures | Where-Object { (& $resolveMode $_) -eq 'VALIDATE' })
+
+        if ($validated.Count -gt 0) {
+            & $add 'Information' 'Windows Integration' "Checked but not created: $($validated -join ', ')." 'VALIDATE confirms the installer created these. The framework never creates or removes them.'
+        }
+        if ($managed.Count -gt 0) {
+            & $add 'Information' 'Windows Integration' "Created and owned by the framework: $($managed -join ', ')." 'These are recorded at install time and removed on uninstall. Anything that already exists is left alone.'
+        }
+
+        # --- Context menu ---
+        if ((& $resolveMode 'ContextMenu') -ne 'DISABLED') {
+            $cmEntries = @(Get-ModelValue $Model 'WindowsIntegration.ContextMenu.Entries')
+            if ($cmEntries.Count -eq 0) {
+                & $add 'Error' 'Context Menu' 'Context menu is enabled but no entries are configured.' 'Add an entry or set Mode to DISABLED.'
+            }
+            foreach ($e in $cmEntries) {
+                if ($e -isnot [System.Collections.IDictionary]) { continue }
+                $verb = if ($e.Contains('Verb')) { [string]$e['Verb'] } else { '' }
+                if ([string]::IsNullOrWhiteSpace($verb)) {
+                    & $add 'Error' 'Context Menu' 'A context menu entry has no Verb.' 'Use an application-specific verb such as Company.Application.Open, so uninstall removes only this package key.'
+                }
+                elseif ($verb -notmatch '\.') {
+                    & $add 'Warning' 'Context Menu' "Verb '$verb' is not application-specific." 'A dotted, vendor-prefixed verb is far less likely to collide with another product.'
+                }
+                $cmTarget = if ($e.Contains('Target')) { [string]$e['Target'] } else { 'FILE' }
+                if ($cmTarget.ToUpperInvariant() -notin @('FILE', 'FOLDER', 'DIRECTORY', 'ALL_FILES')) {
+                    & $add 'Error' 'Context Menu' "Context menu Target '$cmTarget' is not valid." 'Use FILE, FOLDER, DIRECTORY or ALL_FILES.'
+                }
+                $extList = if ($e.Contains('Extensions')) { @($e['Extensions']) } else { @() }
+                if ($cmTarget.ToUpperInvariant() -eq 'ALL_FILES' -or
+                    ($cmTarget.ToUpperInvariant() -eq 'FILE' -and $extList.Count -eq 0)) {
+                    & $add 'Warning' 'Context Menu' "Entry '$verb' applies to every file on the machine." 'List Extensions to narrow it to the file types this application handles.'
+                }
+            }
+        }
+
+        # --- Services and scheduled tasks ---
+        if ((& $resolveMode 'Services') -eq 'MANAGE') {
+            & $add 'Information' 'Services' 'The framework will create these services.' 'Most vendor installers create their own. If yours does, VALIDATE is the safer mode.'
+        }
+        foreach ($t in @(Get-ModelValue $Model 'WindowsIntegration.ScheduledTasks.Tasks')) {
+            if ($t -isnot [System.Collections.IDictionary]) { continue }
+            $runAs = if ($t.Contains('RunAsUser')) { [string]$t['RunAsUser'] } else { '' }
+            $runLevel = if ($t.Contains('RunLevel')) { [string]$t['RunLevel'] } else { '' }
+            if ($runAs -match '(?i)^(SYSTEM|NT AUTHORITY\\SYSTEM)$' -or $runLevel -eq 'Highest') {
+                $taskName = if ($t.Contains('Name')) { [string]$t['Name'] } else { '(unnamed)' }
+                & $add 'Warning' 'Scheduled Tasks' "Task '$taskName' runs with elevated rights." 'A task running as SYSTEM or at highest privileges is a standing privilege grant. Confirm the application genuinely needs it.'
+            }
         }
     }
 

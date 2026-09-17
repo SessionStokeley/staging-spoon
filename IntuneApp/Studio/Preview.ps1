@@ -13,6 +13,23 @@
 
 Set-StrictMode -Version Latest
 
+function Get-IntegrationSectionMode {
+    <#
+        Resolves a WindowsIntegration feature to DISABLED, VALIDATE or MANAGE.
+
+        Mirrors Resolve-IntegrationMode in Helpers/WindowsIntegration.ps1. The
+        Studio is deliberately free of any dependency on the execution engine,
+        so the rule is stated in both places rather than shared.
+    #>
+    param([Parameter(Mandatory)]$Model, [Parameter(Mandatory)][string]$Section)
+
+    if (-not (Get-ModelValue $Model 'WindowsIntegration.Enabled')) { return 'DISABLED' }
+    $mode = [string](Get-ModelValue $Model "WindowsIntegration.$Section.Mode")
+    if ($mode) { return $mode.ToUpperInvariant() }
+    if (Get-ModelValue $Model "WindowsIntegration.$Section.Enabled") { return 'MANAGE' }
+    return 'DISABLED'
+}
+
 function Get-ConfigurationPreview {
     <#
         .SYNOPSIS
@@ -116,9 +133,13 @@ function Get-ConfigurationPreview {
         @{ Key = 'StartMenuShortcut'; Label = 'Start Menu' },
         @{ Key = 'DesktopShortcut';   Label = 'Desktop' }
     )) {
-        if (& $get "WindowsIntegration.$($kind.Key).Enabled") {
-            $scLines += "$($kind.Label): $(& $get "WindowsIntegration.$($kind.Key).Name")"
+        $scMode = Get-IntegrationSectionMode -Model $Model -Section $kind.Key
+        if ($scMode -ne 'DISABLED') {
+            $scLines += "$($kind.Label) [$scMode]: $(& $get "WindowsIntegration.$($kind.Key).Name")"
             $scLines += "  -> $(& $get "WindowsIntegration.$($kind.Key).Target")"
+            if ($scMode -eq 'VALIDATE') {
+                $scLines += '  (checked only; the installer is expected to create it)'
+            }
         }
     }
     if ($scLines.Count -eq 0) { $scLines = @('No shortcuts configured.') }
@@ -126,7 +147,7 @@ function Get-ConfigurationPreview {
 
     # --------------------------------------------------- File associations
     $assocLines = @()
-    if (& $get 'WindowsIntegration.FileAssociations.Enabled') {
+    if ((Get-IntegrationSectionMode -Model $Model -Section 'FileAssociations') -ne 'DISABLED') {
         foreach ($a in @(& $get 'WindowsIntegration.FileAssociations.Associations')) {
             if ($a -isnot [System.Collections.IDictionary]) { continue }
             $desc = if ($a.Contains('Description') -and $a['Description']) { " - $($a['Description'])" } else { '' }
@@ -141,7 +162,7 @@ function Get-ConfigurationPreview {
 
     # -------------------------------------------------------- Context menu
     $cmLines = @()
-    if (& $get 'WindowsIntegration.ContextMenu.Enabled') {
+    if ((Get-IntegrationSectionMode -Model $Model -Section 'ContextMenu') -ne 'DISABLED') {
         foreach ($e in @(& $get 'WindowsIntegration.ContextMenu.Entries')) {
             $cmLines += "  $(if ($e -is [System.Collections.IDictionary]) { $e['Name'] } else { $e })"
         }
@@ -151,7 +172,7 @@ function Get-ConfigurationPreview {
 
     # ------------------------------------------------------------ Services
     $svcLines = @()
-    if (& $get 'WindowsIntegration.Services.Enabled') {
+    if ((Get-IntegrationSectionMode -Model $Model -Section 'Services') -ne 'DISABLED') {
         foreach ($s in @(& $get 'WindowsIntegration.Services.Services')) {
             if ($s -isnot [System.Collections.IDictionary]) { continue }
             $keep = if ($s.Contains('Keep') -and $s['Keep']) { 'keep' } else { 'remove' }
@@ -163,7 +184,7 @@ function Get-ConfigurationPreview {
 
     # ----------------------------------------------------- Scheduled tasks
     $taskLines = @()
-    if (& $get 'WindowsIntegration.ScheduledTasks.Enabled') {
+    if ((Get-IntegrationSectionMode -Model $Model -Section 'ScheduledTasks') -ne 'DISABLED') {
         foreach ($t in @(& $get 'WindowsIntegration.ScheduledTasks.Tasks')) {
             if ($t -isnot [System.Collections.IDictionary]) { continue }
             $keep = if ($t.Contains('Keep') -and $t['Keep']) { 'keep' } else { 'remove' }
@@ -281,20 +302,133 @@ function Get-ExecutionWarningText {
         $effects += 'Write package state under C:\ProgramData'
     }
 
+    # VALIDATE changes nothing, so it must not appear as an effect: the
+    # approval screen is a list of what will actually be done to the machine.
     foreach ($pair in @(
-        @{ P = 'WindowsIntegration.StartMenuShortcut.Enabled'; T = 'Create a Start Menu shortcut' },
-        @{ P = 'WindowsIntegration.DesktopShortcut.Enabled';   T = 'Create a Desktop shortcut' },
-        @{ P = 'WindowsIntegration.FileAssociations.Enabled';  T = 'Register file associations' },
-        @{ P = 'WindowsIntegration.ContextMenu.Enabled';       T = 'Add context menu entries' },
-        @{ P = 'WindowsIntegration.Services.Enabled';          T = 'Configure Windows services' },
-        @{ P = 'WindowsIntegration.ScheduledTasks.Enabled';    T = 'Configure scheduled tasks' }
+        @{ S = 'StartMenuShortcut'; T = 'Create a Start Menu shortcut' },
+        @{ S = 'DesktopShortcut';   T = 'Create a Desktop shortcut' },
+        @{ S = 'FileAssociations';  T = 'Register file associations' },
+        @{ S = 'ContextMenu';       T = 'Add context menu entries (writes to HKLM\SOFTWARE\Classes)' },
+        @{ S = 'Services';          T = 'Create Windows services' },
+        @{ S = 'ScheduledTasks';    T = 'Create scheduled tasks' }
     )) {
-        if (& $get $pair.P) { $effects += $pair.T }
+        $effectMode = Get-IntegrationSectionMode -Model $Model -Section $pair.S
+        if ($effectMode -eq 'MANAGE') { $effects += $pair.T }
+        elseif ($effectMode -eq 'VALIDATE') { $effects += "Check (not create) $($pair.S)" }
     }
 
     return [pscustomobject]@{
         Effects    = $effects
         ConfigPath = $ConfigPath
         Text       = ($effects | ForEach-Object { "  - $_" }) -join [Environment]::NewLine
+    }
+}
+
+function Get-DeploymentSummary {
+    <#
+        .SYNOPSIS
+        A one-screen summary of what a package deploys, for review before
+        building the .intunewin.
+
+        .DESCRIPTION
+        Deliberately terse and fixed in shape, so two packages can be compared
+        side by side and a reviewer can see at a glance which Windows
+        integrations the framework will create as opposed to merely check.
+
+        Returns @{ Text; Lines }.
+    #>
+    param(
+        [Parameter(Mandatory)]$Model,
+        [string]$ConfigPath = ''
+    )
+
+    $get = { param($p) Get-ModelValue $Model $p }
+    $lines = @()
+
+    $lines += 'APPLICATION'
+    $lines += "Name: $(& $get 'ApplicationName')"
+    $lines += "Publisher: $(& $get 'Publisher')"
+    $lines += "Version: $(& $get 'Version')"
+    $lines += "Architecture: $(& $get 'Architecture')"
+    $lines += "Installer: $(& $get 'Installer.Type')"
+    $lines += ''
+
+    $lines += 'INSTALL'
+    $lines += "Installer: $(& $get 'Installer.File')"
+    $installArgs = [string](& $get 'Installer.Arguments')
+    if (-not $installArgs) { $installArgs = '(none)' }
+    $lines += "Arguments: $installArgs"
+    $lines += "Context: $(& $get 'Installer.Context')"
+    $exitCodes = @(& $get 'SuccessExitCodes')
+    $lines += "Success exit codes: $($exitCodes -join ', ')"
+    $lines += ''
+
+    $lines += 'UNINSTALL'
+    $uninstallType = [string](& $get 'Uninstaller.Type')
+    $lines += "Type: $uninstallType"
+    if ($uninstallType -eq 'MSI') {
+        $lines += "ProductCode: $(& $get 'Uninstaller.ProductCode')"
+    }
+    else {
+        $lines += "File: $(& $get 'Uninstaller.File')"
+        $uninstallArgs = [string](& $get 'Uninstaller.Arguments')
+        if (-not $uninstallArgs) { $uninstallArgs = '(none)' }
+        $lines += "Arguments: $uninstallArgs"
+    }
+    $lines += ''
+
+    $lines += 'WINDOWS INTEGRATION'
+    foreach ($pair in @(
+        @{ S = 'DesktopShortcut';   L = 'Desktop Shortcut' },
+        @{ S = 'StartMenuShortcut'; L = 'Start Menu' },
+        @{ S = 'ContextMenu';       L = 'Context Menu' },
+        @{ S = 'FileAssociations';  L = 'File Association' },
+        @{ S = 'Services';          L = 'Services' },
+        @{ S = 'ScheduledTasks';    L = 'Scheduled Tasks' }
+    )) {
+        $lines += "$($pair.L): $(Get-IntegrationSectionMode -Model $Model -Section $pair.S)"
+    }
+
+    # PATH and environment variables are reported in the same vocabulary, so
+    # the whole section reads consistently even though they are configured
+    # under Environment rather than WindowsIntegration.
+    $pathMode = 'DISABLED'
+    if (& $get 'Environment.Enabled') {
+        if ((& $get 'Environment.SystemPath.Enabled') -or (& $get 'Environment.UserPath.Enabled')) {
+            $pathMode = 'MANAGE'
+        }
+    }
+    $lines += "PATH: $pathMode"
+
+    $varMode = 'DISABLED'
+    if ((& $get 'Environment.Enabled') -and @(& $get 'Environment.Variables').Count -gt 0) {
+        $varMode = 'MANAGE'
+    }
+    $lines += "Environment Variables: $varMode"
+    $lines += ''
+
+    $lines += 'DETECTION'
+    $detType = [string](& $get 'Detection.Type')
+    $lines += "Method: $detType"
+    switch ($detType.ToUpperInvariant()) {
+        'FILE'     { $lines += "Path: $(& $get 'Detection.Path')\$(& $get 'Detection.FileName')" }
+        'REGISTRY' { $lines += "Key: $(& $get 'Detection.RegistryPath')" }
+        'MSI'      { $lines += "ProductCode: $(& $get 'Detection.ProductCode')" }
+        'CUSTOM'   {
+            $customFile = [string](& $get 'Detection.ScriptFile')
+            if ($customFile) { $lines += "Script file: $customFile" }
+            elseif ([string](& $get 'Detection.Script')) { $lines += 'Script: inline' }
+            else { $lines += 'Script: script block (loaded through the 5.1 fallback reader)' }
+        }
+    }
+
+    if ($ConfigPath) {
+        $lines += ''
+        $lines += "Configuration: $ConfigPath"
+    }
+
+    return [pscustomobject]@{
+        Lines = $lines
+        Text  = ($lines -join [Environment]::NewLine)
     }
 }

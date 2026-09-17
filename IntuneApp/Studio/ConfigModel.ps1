@@ -23,7 +23,7 @@ Set-StrictMode -Version Latest
 $script:EngineExecutedSections = @(
     'ApplicationName', 'Publisher', 'Version', 'Architecture',
     'Installer', 'Uninstaller', 'Detection', 'SuccessExitCodes',
-    'Logging', 'Environment'
+    'Logging', 'Environment', 'WindowsIntegration'
 )
 
 function Get-EngineExecutedSections { return $script:EngineExecutedSections }
@@ -69,6 +69,12 @@ function New-ConfigModel {
             Path           = ''
             FileName       = ''
             MinimumVersion = $null
+            # Custom detection. Script is inline PowerShell; ScriptFile is a
+            # .ps1 shipped in the package. Both are plain .psd1 literals, so
+            # Windows PowerShell 5.1 loads them - a script block literal does
+            # not load there at all, and takes the whole file with it.
+            Script         = ''
+            ScriptFile     = ''
         }
 
         SuccessExitCodes = @(0, 3010)
@@ -99,44 +105,72 @@ function New-ConfigModel {
             CaseInsensitivePathComparison = $true
         }
 
-        # Recorded by the wizard for review and hand-off. See the validator's
-        # informational notes about which sections the engine acts on today.
+        # Applied by the packaging engine after the application installs.
+        # Each feature is independently DISABLED, VALIDATE or MANAGE - see
+        # Helpers/WindowsIntegration.ps1. Mode is blank by default so the
+        # older Enabled flag keeps its meaning ($true means MANAGE).
         WindowsIntegration = [ordered]@{
             Enabled = $false
             StartMenuShortcut = [ordered]@{
+                Mode              = ''       # DISABLED, VALIDATE, or MANAGE
                 Enabled           = $false
+                Required          = $false
                 Name              = ''
                 Target            = ''
                 Arguments         = ''
                 WorkingDirectory  = ''
+                Icon              = ''
+                Description       = ''
+                Folder            = ''       # Subfolder under Programs
+                Location          = 'AllUsers'      # AllUsers or CurrentUser
                 RemoveOnUninstall = $true
             }
             DesktopShortcut = [ordered]@{
+                Mode              = ''
                 Enabled           = $false
+                Required          = $false
                 Name              = ''
                 Target            = ''
                 Arguments         = ''
                 WorkingDirectory  = ''
+                Icon              = ''
+                Description       = ''
+                Location          = 'PublicDesktop' # PublicDesktop or UserDesktop
                 RemoveOnUninstall = $true
             }
             FileAssociations = [ordered]@{
+                Mode              = ''
                 Enabled           = $false
+                Required          = $false
                 Associations      = @()
+                # Registering a handler does not take the extension over.
+                # Windows makes the user confirm a default change anyway.
+                SetAsDefault      = $false
                 RemoveOnUninstall = $true
             }
             ContextMenu = [ordered]@{
+                Mode              = ''
                 Enabled           = $false
+                Required          = $false
                 Entries           = @()
                 RemoveOnUninstall = $true
             }
             Services = [ordered]@{
-                Enabled  = $false
-                Services = @()
+                Mode              = ''
+                Enabled           = $false
+                Required          = $false
+                Services          = @()
+                RemoveOnUninstall = $true
             }
             ScheduledTasks = [ordered]@{
-                Enabled = $false
-                Tasks   = @()
+                Mode              = ''
+                Enabled           = $false
+                Required          = $false
+                Tasks             = @()
+                RemoveOnUninstall = $true
             }
+            NotifyShell     = $true    # Tell Explorer that associations changed
+            RestartExplorer = $false   # Never restart Explorer unless asked
         }
 
         Intune = [ordered]@{
@@ -146,6 +180,32 @@ function New-ConfigModel {
             DetectionScript    = 'Detection.ps1'
             RestartBehavior    = 'basedOnReturnCode'
         }
+    }
+}
+
+function New-ContextMenuEntry {
+    <#
+        Target is FILE, FOLDER, DIRECTORY or ALL_FILES. Verb should be
+        application-specific (Company.Application.Open) so that uninstall
+        removes this package's key and nothing else.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Verb,
+        [ValidateSet('FILE', 'FOLDER', 'DIRECTORY', 'ALL_FILES')][string]$Target = 'FILE',
+        [string[]]$Extensions = @(),
+        [string]$Executable = '',
+        [string]$Arguments = '"%1"',
+        [string]$Icon = ''
+    )
+    return [ordered]@{
+        Name       = $Name
+        Verb       = $Verb
+        Target     = $Target
+        Extensions = @($Extensions)
+        Executable = $Executable
+        Arguments  = $Arguments
+        Icon       = $Icon
     }
 }
 
@@ -231,6 +291,12 @@ $script:CanonicalKeyOrders = @(
     , @('Extension', 'ProgId', 'Description', 'OpenCommand', 'IconPath')    # file association
     , @('Name', 'DisplayName', 'StartupType', 'Keep')                       # service
     , @('Name', 'Path', 'Keep')                                             # scheduled task
+    , @('Name', 'Verb', 'Target', 'Extensions', 'Executable', 'Arguments', 'Icon')  # context menu
+    , @('Extension', 'ProgId', 'Description', 'Executable', 'Arguments', 'Icon')    # association (split form)
+    , @('Name', 'DisplayName', 'Description', 'Executable', 'Arguments',
+        'StartupType', 'StartAfterInstall', 'RemoveOnUninstall')                    # managed service
+    , @('Name', 'Path', 'Executable', 'Arguments', 'Trigger', 'RunAsUser',
+        'RunLevel', 'RunWhetherLoggedOnOrNot', 'RemoveOnUninstall')                 # managed task
 )
 
 function Get-CanonicalKeyOrder {
@@ -366,4 +432,72 @@ function Import-ConfigModel {
 function Copy-ConfigModel {
     param([Parameter(Mandatory)]$Model)
     return ConvertTo-OrderedModel $Model
+}
+
+# --- Installation profiles -------------------------------------------------
+#
+# A starting point, not a constraint. Applying a profile turns sections on;
+# everything it does not mention is left exactly as it was, so a profile can
+# be applied to a part-built configuration without undoing anything.
+
+$script:ConfigurationProfiles = [ordered]@{
+    Minimal  = @('Installer', 'Detection')
+    Standard = @('Installer', 'Detection', 'DesktopShortcut', 'StartMenuShortcut')
+    Full     = @('Installer', 'Detection', 'DesktopShortcut', 'StartMenuShortcut',
+                 'ContextMenu', 'FileAssociations', 'Path', 'EnvironmentVariables')
+}
+
+function Get-ConfigurationProfileNames {
+    return @($script:ConfigurationProfiles.Keys)
+}
+
+function Get-ConfigurationProfileFeatures {
+    param([Parameter(Mandatory)][string]$Name)
+    $key = @($script:ConfigurationProfiles.Keys | Where-Object { $_ -eq $Name })
+    if ($key.Count -eq 0) {
+        throw "Unknown profile '$Name'. Available: $((Get-ConfigurationProfileNames) -join ', ')."
+    }
+    return @($script:ConfigurationProfiles[$key[0]])
+}
+
+function Set-ConfigurationProfile {
+    <#
+        .SYNOPSIS
+        Turns on the sections a named profile covers.
+
+        .DESCRIPTION
+        Shortcuts, context menus and associations are switched to MANAGE,
+        because a profile is an explicit request for the framework to create
+        them. Nothing is populated with invented values: the technician still
+        supplies names and targets, and validation reports whatever is missing.
+
+        Returns the same model, mutated in place.
+    #>
+    param(
+        [Parameter(Mandatory)]$Model,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $features = Get-ConfigurationProfileFeatures -Name $Name
+    $wi = $Model.WindowsIntegration
+
+    $integrationFeatures = @('DesktopShortcut', 'StartMenuShortcut', 'ContextMenu', 'FileAssociations')
+    $wantsIntegration = @($integrationFeatures | Where-Object { $features -contains $_ })
+
+    if ($wantsIntegration.Count -gt 0) {
+        $wi.Enabled = $true
+        foreach ($feature in $wantsIntegration) {
+            $wi[$feature].Mode = 'MANAGE'
+            $wi[$feature].Enabled = $true
+        }
+    }
+
+    if ($features -contains 'Path' -or $features -contains 'EnvironmentVariables') {
+        $Model.Environment.Enabled = $true
+        if ($features -contains 'Path') {
+            $Model.Environment.SystemPath.Enabled = $true
+        }
+    }
+
+    return $Model
 }

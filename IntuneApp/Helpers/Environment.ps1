@@ -34,7 +34,10 @@ function Get-EnvRegistryKey {
     )
 
     # Fail with a clear reason off-Windows instead of a null-reference error.
-    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
+    # $IsWindows exists only on PowerShell Core, so it is read through
+    # Get-Variable rather than referenced directly - a bare $IsWindows would
+    # throw on Windows PowerShell 5.1 under Set-StrictMode.
+    if ($PSVersionTable.PSEdition -eq 'Core' -and -not (Get-Variable -Name IsWindows -ValueOnly -ErrorAction SilentlyContinue)) {
         throw 'The Windows registry is not available on this platform. PATH management requires Windows.'
     }
 
@@ -1022,8 +1025,11 @@ function Find-CliDirectories {
 
 function Get-EnvironmentStatePath {
     param([string]$ApplicationName)
-    $stateDir = Join-Path 'C:\ProgramData\IntunePackagingStudio\State' $ApplicationName
-    return Join-Path $stateDir 'environment-state.json'
+    # Built as text rather than with Join-Path: Join-Path goes through the
+    # PowerShell provider and fails with "Cannot find drive" wherever C:\ does
+    # not exist, which would stop a dry run before it printed anything.
+    $root = 'C:\ProgramData\IntunePackagingStudio\State'
+    return ($root + '\' + $ApplicationName.Trim('\') + '\environment-state.json')
 }
 
 function Save-EnvironmentState {
@@ -1058,7 +1064,10 @@ function Get-EnvironmentState {
         [string]$ApplicationName
     )
     $statePath = Get-EnvironmentStatePath $ApplicationName
-    if (-not (Test-Path $statePath)) { return $null }
+    $present = $false
+    try { $present = Test-Path -LiteralPath $statePath }
+    catch { $present = $false }
+    if (-not $present) { return $null }
     return (Get-Content $statePath -Raw | ConvertFrom-Json)
 }
 
@@ -1077,16 +1086,151 @@ function Remove-EnvironmentState {
     }
 }
 
+# --- Dry run ---------------------------------------------------------------
+#
+# The plan is produced by reading the machine, never by writing to it. Each
+# line says what would change and why it would not, so a dry run answers
+# "is this entry already there?" without a real install.
+
+function Write-EnvironmentPlan {
+    param([string]$Message, [string]$LogFile)
+    Write-Host "[DRY-RUN] $Message"
+    Write-Log "[DRY-RUN] $Message" $LogFile
+}
+
+function Show-EnvironmentInstallPlan {
+    param(
+        [Parameter(Mandatory)][hashtable]$Config,
+        [string]$LogFile
+    )
+
+    $envConfig = $Config.Environment
+
+    foreach ($check in @(
+        @{ Scope = 'Machine'; Label = 'system'; Section = $envConfig.SystemPath },
+        @{ Scope = 'User';    Label = 'user';   Section = $envConfig.UserPath }
+    )) {
+        if (-not $check.Section -or -not $check.Section.Enabled) { continue }
+        foreach ($entry in @($check.Section.Entries)) {
+            $present = $false
+            try { $present = Test-PathEntry -Entry $entry -Scope $check.Scope }
+            catch { $present = $false }
+
+            if ($present) {
+                Write-EnvironmentPlan "$($check.Label) PATH already contains: $entry" $LogFile
+            }
+            else {
+                Write-EnvironmentPlan "Would add to $($check.Label) PATH: $entry" $LogFile
+            }
+        }
+    }
+
+    foreach ($var in @($envConfig.Variables)) {
+        $scope = if ($var.Scope) { $var.Scope } else { 'Machine' }
+        $mode = if ($var.Mode) { $var.Mode } else { 'Set' }
+
+        $current = $null
+        try { $current = Get-PersistentVariable -Name $var.Name -Scope $scope }
+        catch { $current = $null }
+
+        if ($mode -eq 'Set') {
+            if ($null -ne $current -and $current -ne '') {
+                Write-EnvironmentPlan "Would replace $scope variable $($var.Name): '$current' -> '$($var.Value)' (uninstall restores the old value)" $LogFile
+            }
+            else {
+                Write-EnvironmentPlan "Would create $scope variable $($var.Name) = $($var.Value)" $LogFile
+            }
+        }
+        else {
+            $already = $false
+            if ($null -ne $current) {
+                foreach ($part in @(Split-PathString $current)) {
+                    if (Test-PathEntriesEqual $part $var.Value) { $already = $true; break }
+                }
+            }
+            if ($already) {
+                Write-EnvironmentPlan "$scope variable $($var.Name) already contains: $($var.Value)" $LogFile
+            }
+            else {
+                Write-EnvironmentPlan "Would $($mode.ToLower()) to $scope variable $($var.Name): $($var.Value)" $LogFile
+            }
+        }
+    }
+
+    return $true
+}
+
+function Show-EnvironmentUninstallPlan {
+    param(
+        [Parameter(Mandatory)][hashtable]$Config,
+        [string]$LogFile
+    )
+
+    $envConfig = $Config.Environment
+    $state = Get-EnvironmentState -ApplicationName $Config.ApplicationName
+
+    foreach ($check in @(
+        @{ Scope = 'Machine'; Label = 'system'; Section = $envConfig.SystemPath; Recorded = 'MachinePathEntriesAdded' },
+        @{ Scope = 'User';    Label = 'user';   Section = $envConfig.UserPath;   Recorded = 'UserPathEntriesAdded' }
+    )) {
+        if (-not $check.Section -or -not $check.Section.Enabled) { continue }
+        if (-not $check.Section.RemoveOnUninstall) {
+            Write-EnvironmentPlan "$($check.Label) PATH entries are kept (RemoveOnUninstall is false)." $LogFile
+            continue
+        }
+
+        $entries = @($check.Section.Entries)
+        $recorded = Get-EntryField -Record $state -Field $check.Recorded
+        if ($recorded) { $entries = @($recorded) }
+
+        foreach ($entry in $entries) {
+            Write-EnvironmentPlan "Would remove from $($check.Label) PATH: $entry" $LogFile
+        }
+    }
+
+    $hasStateRecord = [bool]($state -and (Get-EntryField -Record $state -Field 'EnvironmentVariablesAdded'))
+    if (-not $hasStateRecord) {
+        Write-EnvironmentPlan 'No install state recorded. Only entries that can be positively identified as this package would be removed.' $LogFile
+    }
+
+    foreach ($var in @($envConfig.Variables)) {
+        $name = Get-EntryField -Record $var -Field 'Name'
+        $mode = Get-EntryField -Record $var -Field 'Mode' -Default 'Set'
+        $scope = Get-EntryField -Record $var -Field 'Scope' -Default 'Machine'
+
+        if ((Get-EntryField -Record $var -Field 'RemoveOnUninstall' -Default $true) -eq $false) {
+            Write-EnvironmentPlan "$scope variable $name is kept (RemoveOnUninstall is false)." $LogFile
+            continue
+        }
+
+        if ($mode -eq 'Set' -and -not $hasStateRecord) {
+            Write-EnvironmentPlan "$scope variable $name would be LEFT IN PLACE: without install state this package cannot prove it created the variable." $LogFile
+        }
+        elseif ($mode -eq 'Set') {
+            Write-EnvironmentPlan "Would restore or remove $scope variable $name, per the recorded ownership." $LogFile
+        }
+        else {
+            Write-EnvironmentPlan "Would remove this package's entry from $scope variable $name`: $(Get-EntryField -Record $var -Field 'Value')" $LogFile
+        }
+    }
+
+    return $true
+}
+
 # --- Orchestration ---
 
 function Install-EnvironmentConfig {
     param(
         [Parameter(Mandatory)]
         [hashtable]$Config,
-        [string]$LogFile
+        [string]$LogFile,
+        # Print the planned changes and touch nothing.
+        [switch]$DryRun
     )
     $envConfig = $Config.Environment
     if (-not $envConfig -or -not $envConfig.Enabled) { return $true }
+
+    if ($DryRun) { return (Show-EnvironmentInstallPlan -Config $Config -LogFile $LogFile) }
 
     $appName = $Config.ApplicationName
     $allSuccess = $true
@@ -1214,10 +1358,14 @@ function Uninstall-EnvironmentConfig {
     param(
         [Parameter(Mandatory)]
         [hashtable]$Config,
-        [string]$LogFile
+        [string]$LogFile,
+        # Print the planned removals and touch nothing.
+        [switch]$DryRun
     )
     $envConfig = $Config.Environment
     if (-not $envConfig -or -not $envConfig.Enabled) { return $true }
+
+    if ($DryRun) { return (Show-EnvironmentUninstallPlan -Config $Config -LogFile $LogFile) }
 
     $appName = $Config.ApplicationName
     $allSuccess = $true

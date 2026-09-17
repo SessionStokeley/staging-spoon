@@ -32,12 +32,26 @@
 
         # Analyze only - no questions, no file written
         .\New-IntuneApp.ps1 -Mode Analyze -InstallerPath .\Files\Setup.exe
+
+        # One-screen deployment summary, for review before building
+        .\New-IntuneApp.ps1 -Mode Summary -OpenConfig .\Configuration.psd1
+
+        # Dry run: print every change the engine would make, and make none
+        .\New-IntuneApp.ps1 -Mode DryRun -OpenConfig .\Configuration.psd1
+
+        # Start from a profile instead of answering every question
+        .\New-IntuneApp.ps1 -Profile Standard
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Wizard', 'Gui', 'Analyze', 'Validate', 'Preview', 'Run', 'Build')]
+    [ValidateSet('Wizard', 'Gui', 'Analyze', 'Validate', 'Preview', 'Summary', 'DryRun', 'Run', 'Build')]
     [string]$Mode = 'Wizard',
+
+    # Turns on a named set of features as a starting point. The wizard still
+    # asks for the details; a profile only decides which questions matter.
+    [ValidateSet('Minimal', 'Standard', 'Full')]
+    [string]$Profile = '',
 
     [string]$InstallerPath = '',
 
@@ -165,6 +179,56 @@ switch ($Mode) {
         Write-Host ''
     }
 
+    'Summary' {
+        # A fixed-shape deployment summary, so two packages can be compared
+        # side by side before either is built.
+        $configPath = Resolve-ConfigPath $OpenConfig
+        $model = Import-ConfigModel -Path $configPath
+        Write-Host ''
+        Write-Host (Get-DeploymentSummary -Model $model -ConfigPath $configPath).Text
+        Write-Host ''
+
+        $findings = @(Test-ConfigFile -Path $configPath -PackageRoot $PackageRoot)
+        $errors = @($findings | Where-Object { $_.Severity -eq 'Error' })
+        if ($errors.Count -gt 0) {
+            Write-Host "$($errors.Count) validation error(s). Run -Mode Validate for detail." -ForegroundColor Red
+            exit 1
+        }
+        Write-Host 'No validation errors.' -ForegroundColor Green
+        exit 0
+    }
+
+    'DryRun' {
+        # Hands the real engine its own -TestMode, so what is printed is what
+        # the engine would actually do rather than a second description of it.
+        $configPath = Resolve-ConfigPath $OpenConfig
+        $model = Import-ConfigModel -Path $configPath
+
+        $findings = @(Test-ConfigFile -Path $configPath -PackageRoot $PackageRoot)
+        $summary = Write-ValidationReport -Findings $findings
+        if (-not $summary.IsValid) {
+            Write-Host 'Dry run blocked: fix the errors above first.' -ForegroundColor Red
+            exit 1
+        }
+
+        $installScript = Join-Path $PackageRoot 'Install.ps1'
+        if (-not (Test-Path -LiteralPath $installScript)) {
+            Write-Host "Install.ps1 was not found in $PackageRoot." -ForegroundColor Red
+            exit 1
+        }
+
+        Write-Host ''
+        Write-Host "Dry run against $configPath" -ForegroundColor Cyan
+        $previousLocalTest = $env:INTUNE_LOCAL_TEST
+        $env:INTUNE_LOCAL_TEST = '1'
+        try { & $installScript -TestMode }
+        finally { $env:INTUNE_LOCAL_TEST = $previousLocalTest }
+
+        Write-Host ''
+        Write-Host 'Nothing was changed on this machine.' -ForegroundColor Green
+        exit 0
+    }
+
     'Run' {
         $configPath = Resolve-ConfigPath $OpenConfig
         $model = Import-ConfigModel -Path $configPath
@@ -210,7 +274,8 @@ switch ($Mode) {
             -InstallerPath $InstallerPath `
             -PackageRoot $PackageRoot `
             -ExistingConfig $OpenConfig `
-            -OutputPath $OutputPath
+            -OutputPath $OutputPath `
+            -Profile $Profile
 
         $model = $result.Model
         $configPath = $result.Path

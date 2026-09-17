@@ -65,6 +65,9 @@ function Invoke-Detection {
 
     try {
         Copy-Item $DetectionScript (Join-Path $dir 'Detection.ps1')
+        # Helpers\ ships in every package. Install.ps1 and Files\ deliberately
+        # do not, so the standalone assertion below stays meaningful.
+        Copy-Item (Join-Path $AppRoot 'Helpers') (Join-Path $dir 'Helpers') -Recurse -Force
         Set-Content -Path (Join-Path $dir 'Configuration.psd1') -Value $ConfigText -Encoding UTF8
 
         $outFile = Join-Path $dir 'out.txt'

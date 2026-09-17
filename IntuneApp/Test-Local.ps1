@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Install', 'Uninstall', 'Detection', 'Validate', 'Environment', 'DetectPaths', 'TestCommand', 'PathDiagnostics')]
+    [ValidateSet('Install', 'Uninstall', 'Detection', 'Validate', 'Environment', 'Integration', 'DryRun', 'DryRunUninstall', 'DetectPaths', 'TestCommand', 'PathDiagnostics')]
     [string]$Mode,
 
     [string]$Command,
@@ -162,6 +162,56 @@ $Config = Import-PowerShellDataFile (Join-Path $ScriptDir 'Configuration.psd1')
 switch ($Mode) {
     'Validate' {
         Test-Package
+    }
+
+    'DryRun' {
+        # The engine's own -TestMode, so what is printed is what would happen
+        # rather than a second description of it.
+        & (Join-Path $ScriptDir 'Install.ps1') -TestMode
+    }
+
+    'DryRunUninstall' {
+        & (Join-Path $ScriptDir 'Uninstall.ps1') -TestMode
+    }
+
+    'Integration' {
+        # Reports whether the configured Windows integrations are present.
+        # Read-only: it creates and removes nothing.
+        . (Join-Path $ScriptDir 'Helpers\ConfigLoader.ps1')
+        . (Join-Path $ScriptDir 'Helpers\WindowsIntegration.ps1')
+
+        $config = Get-PackageConfiguration -PackageRoot $ScriptDir
+        $plan = Get-WindowsIntegrationPlan -Config $config
+
+        Write-Host ''
+        Write-Host 'Configured Windows integrations:' -ForegroundColor Cyan
+        foreach ($feature in $plan.Keys) {
+            $colour = if ($plan[$feature] -eq 'DISABLED') { 'DarkGray' } else { 'White' }
+            Write-Host ("  {0,-20} {1}" -f $feature, $plan[$feature]) -ForegroundColor $colour
+        }
+
+        $check = Test-WindowsIntegrationState -Config $config -LogFile $null
+        Write-Host ''
+        if ($check.Success) {
+            Write-Host 'All enabled integrations are present.' -ForegroundColor Green
+        }
+        else {
+            Write-Host 'Missing or mismatched:' -ForegroundColor Yellow
+            foreach ($finding in @($check.Findings)) { Write-Host "  $finding" -ForegroundColor Yellow }
+        }
+
+        $state = Get-IntegrationState -ApplicationName $config.ApplicationName
+        Write-Host ''
+        if ($state) {
+            $owned = @($state.Resources)
+            Write-Host "This package owns $($owned.Count) resource(s):" -ForegroundColor Cyan
+            foreach ($resource in $owned) {
+                Write-Host "  $($resource.Kind)  $($resource.Path)$($resource.Name)" -ForegroundColor DarkGray
+            }
+        }
+        else {
+            Write-Host 'No integration ownership recorded, so uninstall would remove nothing.' -ForegroundColor DarkGray
+        }
     }
 
     'Install' {

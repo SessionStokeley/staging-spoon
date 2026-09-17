@@ -32,6 +32,12 @@ function Invoke-ConfigurationWizard {
         .PARAMETER OutputPath
         Where to write the generated .psd1.
 
+        .PARAMETER Profile
+        Seeds the model with a named set of features (Minimal, Standard or
+        Full) before any question is asked. A profile only decides which
+        features start switched on; every value is still asked for, and the
+        technician can turn anything back off.
+
         .OUTPUTS
         The completed configuration model.
     #>
@@ -39,7 +45,8 @@ function Invoke-ConfigurationWizard {
         [string]$InstallerPath = '',
         [string]$PackageRoot = '',
         [string]$ExistingConfig = '',
-        [string]$OutputPath = ''
+        [string]$OutputPath = '',
+        [string]$Profile = ''
     )
 
     if (-not $PackageRoot) { $PackageRoot = (Get-Location).Path }
@@ -109,6 +116,13 @@ function Invoke-ConfigurationWizard {
             -ApplicationName $analysis.ApplicationName `
             -Publisher $analysis.Publisher `
             -Version $analysis.Version
+    }
+
+    # A profile only pre-selects features. Nothing is invented: the questions
+    # below still supply every name, target and path.
+    if ($Profile) {
+        Set-ConfigurationProfile -Model $model -Name $Profile | Out-Null
+        Write-Host "Starting from the $Profile profile: $((Get-ConfigurationProfileFeatures -Name $Profile) -join ', ')." -ForegroundColor DarkGray
     }
 
     # ------------------------------------------------- Step 3: identity edits

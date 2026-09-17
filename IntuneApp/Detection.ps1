@@ -4,8 +4,19 @@ param()
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
+# Import-PowerShellDataFile cannot load a script-block literal on Windows
+# PowerShell 5.1, which is what Intune runs. ConfigLoader falls back to reading
+# the file's syntax tree so those configurations still load there.
+$configLoader = Join-Path $ScriptDir 'Helpers\ConfigLoader.ps1'
+if (Test-Path $configLoader) { . $configLoader }
+
 try {
-    $Config = Import-PowerShellDataFile (Join-Path $ScriptDir 'Configuration.psd1')
+    $Config = if (Get-Command Get-PackageConfiguration -ErrorAction SilentlyContinue) {
+        Get-PackageConfiguration -PackageRoot $ScriptDir
+    }
+    else {
+        Import-PowerShellDataFile (Join-Path $ScriptDir 'Configuration.psd1')
+    }
 
     # Name the actual problem: without these guards a missing section surfaces
     # as "you cannot call a method on a null-valued expression", which tells
@@ -97,18 +108,27 @@ try {
 
     # --- Custom Detection ---
     elseif ($detectionType -eq 'CUSTOM') {
-        if ($detection.ScriptBlock) {
-            $result = & $detection.ScriptBlock
-            if ($result) {
-                Write-Output "Detected via custom check"
-                exit 0
-            }
-            else {
-                exit 1
-            }
+        if (-not (Get-Command Resolve-DetectionScript -ErrorAction SilentlyContinue)) {
+            throw 'Custom detection needs Helpers\ConfigLoader.ps1, which is missing from the package.'
+        }
+        $customScript = Resolve-DetectionScript -Detection $detection -PackageRoot $ScriptDir
+
+        if (-not $customScript) {
+            throw 'Custom detection is configured but none of Detection.Script, Detection.ScriptFile or Detection.ScriptBlock is set.'
+        }
+
+        # A detection script may write progress before its verdict, so the
+        # verdict is the LAST value it emits. Testing the whole collection
+        # would call any script that printed two lines "installed".
+        $output = @(& $customScript)
+        $verdict = $false
+        if ($output.Count -gt 0) { $verdict = $output[$output.Count - 1] }
+
+        if ($verdict) {
+            Write-Output "Detected via custom check"
+            exit 0
         }
         else {
-            Write-Error "Custom detection is configured but Detection.ScriptBlock is missing."
             exit 1
         }
     }
