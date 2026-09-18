@@ -8,6 +8,127 @@ Severity: **Critical** (data loss / security) · **High** (feature broken) ·
 
 ---
 
+## BUG-013 — The local-test banner printed an empty command, and clobbered -Command
+
+- **DATE:** 2026-09-18
+- **SEVERITY:** Low
+- **STATUS:** Fixed (introduced and caught within the same change, before commit)
+
+**SYMPTOM**
+The argument banner added to `Test-Local.ps1 -Mode Install` printed every line
+correctly except the one that mattered:
+
+```
+Installer           : Setup.exe
+Argument source     : Configuration
+Effective arguments : /quiet /norestart
+Execution           :
+```
+
+**REPRODUCTION**
+Run `Test-Local.ps1 -Mode Install` on any package. The `Execution` line is
+blank, while the install itself succeeds.
+
+**ROOT CAUSE**
+`Test-Local.ps1` declares `[string]$Command` as a parameter. The new banner
+assigned the command-line hashtable to `$command`, which is the same variable:
+PowerShell coerced it to the string `System.Collections.Hashtable`, so
+`$command.Display` was `$null` and printed as empty.
+
+The second effect is worse than the blank line. The assignment also destroyed
+the `-Command` parameter, which `-Mode TestCommand` reads - so adding a banner
+to one mode silently broke a different one.
+
+**AFFECTED FILES**
+- `IntuneApp/Test-Local.ps1`
+- `IntuneApp/Tests/Test-InstallerArguments.ps1`
+
+**FIX**
+Renamed the local variable to `$installerCommand`, with a comment at the
+assignment naming the parameter it would otherwise collide with.
+
+**TEST**
+Six assertions in `Test-InstallerArguments.ps1` read `Test-Local.ps1` and fail
+if the command line is ever assigned to `$command` again, if the `Execution`
+line stops reading from the command object, or if `-ArgumentSource` stops being
+forwarded.
+
+**RESULT**
+The banner prints the full command, and `-Mode TestCommand` is unaffected.
+
+**REGRESSION RISK**
+None. A local variable was renamed.
+
+**NOTE**
+Found by running the thing, not by testing it. The unit tests for the argument
+model were all passing - they cover the resolver, and the resolver was correct.
+The defect was in the display code between the resolver and the screen, which
+no test reached, and which a type coercion made silent rather than loud. The
+guard added is deliberately a source check, because the banner only appears
+during a real installation and there is nothing else to assert against.
+
+---
+
+## BUG-012 — An installer with no arguments would fail on Windows PowerShell 5.1
+
+- **DATE:** 2026-09-18
+- **SEVERITY:** Medium
+- **STATUS:** Fixed
+
+**SYMPTOM**
+`Install.ps1` passed `Installer.Arguments` straight to `Start-Process`:
+
+```powershell
+$process = Start-Process -FilePath $installerPath -ArgumentList $arguments ...
+```
+
+When `Installer.Arguments` is empty - a silent-by-default installer, or the new
+`ArgumentSource = "None"` - that is `-ArgumentList ''`.
+
+**ROOT CAUSE**
+`Start-Process` on Windows PowerShell 5.1 rejects an empty `-ArgumentList`
+rather than treating it as "no arguments". PowerShell 7 accepts it, so the path
+works everywhere except on the runtime Intune's Management Extension actually
+uses.
+
+**VERIFICATION STATUS**
+PowerShell 7.6.6 was confirmed to accept `-ArgumentList ''` here, and its
+`ArgumentList` parameter carries no `ValidateNotNullOrEmpty` attribute. The 5.1
+rejection is **not verified in this environment** - there is no Windows
+PowerShell on this host, the same gap recorded as OPEN-4.
+
+The fix does not depend on which behaviour is right. Omitting a parameter that
+has nothing to pass is correct on both runtimes, so this was changed rather
+than left resting on an unverified premise.
+
+**AFFECTED FILES**
+- `IntuneApp/Install.ps1`
+- `IntuneApp/Helpers/InstallerArguments.ps1`
+
+**FIX**
+`New-InstallerCommandLine` returns `$null` rather than `''` for an EXE with no
+arguments, and `Start-InstallerProcess` omits `-ArgumentList` entirely in that
+case instead of passing an empty string.
+
+**TEST**
+`Test-InstallerArguments.ps1` asserts that an EXE with no effective arguments
+produces `$null`, not an empty string, for all the routes that reach it:
+`ArgumentSource = "None"`, and a configuration whose `Arguments` is empty. An
+MSI with no arguments still produces `/i "<path>"`, since the path is not
+optional.
+
+**REGRESSION RISK**
+Low. The only behavioural change is for an empty argument string, which is the
+case that was broken.
+
+**NOTE**
+Latent since the first version of `Install.ps1`, and invisible to every test,
+because every test fixture and the shipped `Configuration.psd1` template set
+`Arguments`. Adding `ArgumentSource = "None"` made an empty argument list a
+first-class configuration rather than an accident, which is what surfaced it.
+
+---
+
 ## BUG-011 — A Custom detection configuration could not load on PowerShell 5.1
 
 - **DATE:** 2026-09-17
