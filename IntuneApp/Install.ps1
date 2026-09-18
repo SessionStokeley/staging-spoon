@@ -158,7 +158,7 @@ try {
 
     $installerType = $Config.Installer.Type.ToUpper()
 
-    if ($installerType -notin @('MSI', 'EXE')) {
+    if ($installerType -notin @('MSI', 'EXE', 'BAT')) {
         Write-Log "ERROR: Unknown installer type: $installerType" $logFile
         Write-Error "Unknown installer type: $installerType"
         exit 1

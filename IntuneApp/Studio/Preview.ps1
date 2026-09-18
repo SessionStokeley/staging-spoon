@@ -57,11 +57,10 @@ function Get-ConfigurationPreview {
     $insFile = [string](& $get 'Installer.File')
     $insArgs = [string](& $get 'Installer.Arguments')
 
-    $command = if ($insType.ToUpperInvariant() -eq 'MSI') {
-        "msiexec.exe /i `"Files\$insFile`" $insArgs"
-    }
-    else {
-        "Files\$insFile $insArgs"
+    $command = switch ($insType.ToUpperInvariant()) {
+        'MSI'   { "msiexec.exe /i `"Files\$insFile`" $insArgs" }
+        'BAT'   { "cmd.exe /c call `"Files\$insFile`" $insArgs" }
+        default { "Files\$insFile $insArgs" }
     }
 
     $preview['Installation'] = @(
@@ -215,11 +214,10 @@ function Get-ConfigurationPreview {
 
     # --------------------------------------------------------- Uninstall
     $unType = [string](& $get 'Uninstaller.Type')
-    $unLines = if ($unType.ToUpperInvariant() -eq 'MSI') {
-        @("msiexec.exe /x $(& $get 'Uninstaller.ProductCode') /qn /norestart")
-    }
-    else {
-        @("$(& $get 'Uninstaller.File') $(& $get 'Uninstaller.Arguments')")
+    $unLines = switch ($unType.ToUpperInvariant()) {
+        'MSI'   { @("msiexec.exe /x $(& $get 'Uninstaller.ProductCode') /qn /norestart") }
+        'BAT'   { @("cmd.exe /c call `"$(& $get 'Uninstaller.File')`" $(& $get 'Uninstaller.Arguments')") }
+        default { @("$(& $get 'Uninstaller.File') $(& $get 'Uninstaller.Arguments')") }
     }
 
     $cleanup = @()

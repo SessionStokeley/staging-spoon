@@ -30,6 +30,7 @@ $AppRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Defini
 
 $script:pass = 0
 $script:fail = 0
+$script:skip = 0
 $script:failures = [System.Collections.Generic.List[string]]::new()
 
 function Test-Assert {
@@ -58,6 +59,13 @@ function Test-Throws {
         }
         else { Test-Assert $Name $true }
     }
+}
+
+function Test-Skip {
+    param([string]$Name, [string]$Reason)
+    Write-Host "  SKIP  $Name" -ForegroundColor Yellow
+    Write-Host "        $Reason" -ForegroundColor DarkYellow
+    $script:skip++
 }
 
 function Test-Group { param([string]$Name) Write-Host ''; Write-Host $Name -ForegroundColor White }
@@ -128,6 +136,53 @@ $r = Get-EffectiveCommand -Config (New-Config -Type 'MSI' -File 'app.msi' -Argum
 Test-Assert '6. MSI + no arguments still gets /i and the path' `
     ($r.Command.Arguments -eq "/i `"$msiPath`"") $r.Command.Arguments
 Test-Assert '   ...and the configured /qn is absent' ($r.Command.Arguments -notmatch '/qn') $r.Command.Arguments
+
+Test-Group 'A. BAT'
+
+$batPath = 'C:\Pkg\Files\install.bat'
+
+$r = Get-EffectiveCommand -Config (New-Config -Type 'BAT' -File 'install.bat' -Arguments '/S' -Source 'Configuration') -InstallerPath $batPath
+Test-Assert '10. BAT + Configuration arguments' `
+    ($r.Command.FilePath -eq 'cmd.exe' -and $r.Command.Arguments -eq "/c call `"$batPath`" /S") $r.Command.Arguments
+
+$r = Get-EffectiveCommand -Config (New-Config -Type 'BAT' -File 'install.bat' -Source 'Intune') -IntuneArguments '/VERYSILENT' -InstallerPath $batPath
+Test-Assert '11. BAT + Intune arguments' `
+    ($r.Command.Arguments -eq "/c call `"$batPath`" /VERYSILENT") $r.Command.Arguments
+
+$r = Get-EffectiveCommand -Config (New-Config -Type 'BAT' -File 'install.bat' -Arguments '/S' -Source 'None') -InstallerPath $batPath
+Test-Assert '12. BAT + no arguments' ($r.Command.Arguments -eq "/c call `"$batPath`"") $r.Command.Arguments
+Test-Assert '    ...and the configured /S is absent' ($r.Command.Arguments -notmatch '/S') $r.Command.Arguments
+
+Test-Group 'BAT is invoked in a way cmd.exe parses correctly'
+
+# cmd /? : when the text after /c starts with a quote, cmd strips the outer
+# pair unless there are exactly two quotes around an executable name. Adding
+# an argument that itself contains quotes breaks that exemption, so without
+# the 'call' prefix the quotes around the script path get eaten.
+$r = Get-EffectiveCommand -Config (New-Config -Type 'BAT' -File 'install.bat' -Arguments 'INSTALLDIR="C:\Program Files\App"' -Source 'Configuration') `
+    -InstallerPath 'C:\Program Files\Pkg\install.bat'
+
+Test-Assert 'The command is prefixed with call, so cmd never strips the outer quotes' `
+    ($r.Command.Arguments -match '^/c call "') $r.Command.Arguments
+Test-Assert 'A script path containing spaces stays quoted' `
+    ($r.Command.Arguments -match '"C:\\Program Files\\Pkg\\install\.bat"') $r.Command.Arguments
+Test-Assert 'Quoted arguments survive alongside the quoted path' `
+    ($r.Command.Arguments -match 'INSTALLDIR="C:\\Program Files\\App"') $r.Command.Arguments
+
+Test-Group 'Working directory'
+
+# Batch installers routinely reference files beside themselves by bare name.
+$r = Get-EffectiveCommand -Config (New-Config -Type 'BAT' -File 'install.bat' -Source 'None') -InstallerPath $batPath
+Test-Assert 'A BAT runs from its own directory' ($r.Command.WorkingDirectory -eq 'C:\Pkg\Files') $r.Command.WorkingDirectory
+
+# EXE and MSI must keep inheriting the working directory, as they always have.
+$r = Get-EffectiveCommand -Config (New-Config -Arguments '/quiet' -Source 'Configuration') -InstallerPath $exePath
+Test-Assert 'An EXE sets no working directory' ($null -eq $r.Command.WorkingDirectory)
+$r = Get-EffectiveCommand -Config (New-Config -Type 'MSI' -File 'app.msi' -Arguments '/qn' -Source 'Configuration') -InstallerPath $msiPath
+Test-Assert 'An MSI sets no working directory' ($null -eq $r.Command.WorkingDirectory)
+
+Test-Throws 'An unknown type names all three supported ones' `
+    { New-InstallerCommandLine -Type 'PS1' -InstallerPath 'x' -Arguments '' } 'EXE, MSI or BAT'
 
 # ============================================== the invariant: never combined
 Test-Group 'The arguments are never combined'
@@ -269,6 +324,8 @@ function New-TestPackage {
     Copy-Item (Join-Path $AppRoot 'Helpers') (Join-Path $Path 'Helpers') -Recurse -Force
     Set-Content -LiteralPath (Join-Path $Path 'Files\Setup.exe') -Value 'stub' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $Path 'Files\app.msi') -Value 'stub' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $Path 'Files\install.bat') `
+        -Value "@echo off`r`nexit /b 0" -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $Path 'Configuration.psd1') -Value $ConfigText -Encoding UTF8
 }
 
@@ -367,6 +424,32 @@ try {
     Test-Assert 'E2E base64 arguments arrive decoded' `
         ($r.Text -match 'INSTALLDIR="C:\\Program Files\\App"') $r.Text
 
+    # --- BAT, all three sources, through the real Install.ps1 ---
+    $batConfig = @'
+@{
+    ApplicationName = 'ArgsEndToEnd'
+    Installer   = @{ Type = 'BAT'; File = 'install.bat'; Arguments = '/CONFIGONLY'; ArgumentSource = '{0}' }
+    Uninstaller = @{ Type = 'BAT'; File = 'install.bat'; Arguments = '/uninstall' }
+    Detection   = @{ Type = 'Custom'; Script = '$false' }
+    Logging     = @{ Enabled = $false; Path = 'C:\Temp' }
+}
+'@
+
+    $r = Invoke-InstallDryRun -ConfigText ($batConfig -replace '\{0\}', 'Configuration')
+    Test-Assert 'E2E BAT + Configuration runs through cmd.exe /c call' `
+        ($r.Text -match 'cmd\.exe /c call' -and $r.Text -match '/CONFIGONLY') $r.Text
+    Test-Assert 'E2E BAT reports its type' ($r.Text -match 'Installer type\s*:\s*BAT') $r.Text
+
+    $r = Invoke-InstallDryRun -ConfigText ($batConfig -replace '\{0\}', 'Intune') `
+        -ExtraArgs @('-InstallerArguments', '/FROMINTUNE')
+    Test-Assert 'E2E BAT + Intune uses the passed arguments' ($r.Text -match '/FROMINTUNE') $r.Text
+    Test-Assert 'E2E BAT + Intune does NOT also use the configured arguments' `
+        ($r.Text -notmatch '/CONFIGONLY') $r.Text
+
+    $r = Invoke-InstallDryRun -ConfigText ($batConfig -replace '\{0\}', 'None')
+    Test-Assert 'E2E BAT + None passes no arguments' `
+        ($r.Text -match 'cmd\.exe /c call' -and $r.Text -notmatch '/CONFIGONLY') $r.Text
+
     # --- a package that predates ArgumentSource ---
     $legacyConfig = @'
 @{
@@ -384,6 +467,62 @@ try {
 }
 finally {
     Remove-Item $workDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Test-Group 'C. A BAT actually executed through cmd.exe (Windows only)'
+
+# Everything above proves what command is BUILT. Two things can only be proved
+# by running it, and both are BAT-specific:
+#   * whether cmd.exe parses the quoting the way the builder assumes
+#   * whether the script's exit code reaches the caller at all
+# cmd.exe exists only on Windows, so this group reports SKIP elsewhere.
+
+$onWindows = $false
+if ($PSVersionTable.PSEdition -ne 'Core' -or
+    (Get-Variable -Name IsWindows -ValueOnly -ErrorAction SilentlyContinue)) {
+    $onWindows = $true
+}
+
+if (-not $onWindows) {
+    $reason = 'cmd.exe exists only on Windows. The command construction above is covered in full; what is unproved here is cmd.exe parsing it and the exit code propagating.'
+    Test-Skip 'A BAT receives its arguments through cmd.exe' $reason
+    Test-Skip 'A BAT exit code reaches the caller' $reason
+    Test-Skip 'A BAT runs from its own directory' $reason
+    Test-Skip 'A quoted argument survives cmd.exe parsing' $reason
+}
+else {
+    $batDir = Join-Path ([System.IO.Path]::GetTempPath()) ("batrun_" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -Path $batDir -ItemType Directory -Force | Out-Null
+    try {
+        # Records what it received, where it ran, and exits with a known code.
+        $script = Join-Path $batDir 'probe.bat'
+        $received = Join-Path $batDir 'received.txt'
+        Set-Content -LiteralPath $script -Encoding ASCII -Value @"
+@echo off
+echo ARGS=%*> "$received"
+echo CWD=%CD%>> "$received"
+exit /b 42
+"@
+
+        $command = New-InstallerCommandLine -Type 'BAT' -InstallerPath $script `
+            -Arguments 'INSTALLDIR="C:\Program Files\App" /S'
+        $process = Start-InstallerProcess -CommandLine $command
+
+        Test-Assert 'A BAT exit code reaches the caller' ($process.ExitCode -eq 42) `
+            "got $($process.ExitCode); a batch without 'exit /b' returns whatever ran last"
+
+        $text = ''
+        if (Test-Path -LiteralPath $received) { $text = (Get-Content -LiteralPath $received -Raw) }
+
+        Test-Assert 'A BAT receives its arguments through cmd.exe' ($text -match '/S') $text
+        Test-Assert 'A quoted argument survives cmd.exe parsing' `
+            ($text -match 'INSTALLDIR="C:\\Program Files\\App"') $text
+        Test-Assert 'A BAT runs from its own directory' `
+            ($text -match [regex]::Escape($batDir)) $text
+    }
+    finally {
+        Remove-Item $batDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Test-Group 'Test-Local reports what it is about to run'
@@ -410,8 +549,8 @@ Test-Assert 'Test-Local forwards -ArgumentSource to Install.ps1' `
 
 Write-Host ''
 Write-Host '========================================' -ForegroundColor Cyan
-$total = $script:pass + $script:fail
-Write-Host "Total: $total   Pass: $($script:pass)   Fail: $($script:fail)" `
+$total = $script:pass + $script:fail + $script:skip
+Write-Host "Total: $total   Pass: $($script:pass)   Fail: $($script:fail)   Skip: $($script:skip)" `
     -ForegroundColor $(if ($script:fail -eq 0) { 'Green' } else { 'Red' })
 if ($script:fail -gt 0) {
     Write-Host ''

@@ -641,6 +641,77 @@ Test-Assert 'The Build button forwards -UtilPath' `
 Test-Assert 'The Build dialog shows the guidance' `
     ($studioUtilSource -match '\$build\.Guidance')
 
+Test-Group 'BAT installers'
+
+$batRoot = New-TempDir
+try {
+    New-Item -Path (Join-Path $batRoot 'Files') -ItemType Directory -Force | Out-Null
+    $noExit = Join-Path $batRoot 'Files\noexit.bat'
+    $withExit = Join-Path $batRoot 'Files\install.bat'
+    $cmdScript = Join-Path $batRoot 'Files\install.cmd'
+    Set-Content -LiteralPath $noExit -Value "@echo off`r`nsetup.exe /S" -Encoding UTF8
+    Set-Content -LiteralPath $withExit -Value "@echo off`r`nsetup.exe /S`r`nexit /b %ERRORLEVEL%" -Encoding UTF8
+    Set-Content -LiteralPath $cmdScript -Value "@echo off`r`nexit /b 0" -Encoding UTF8
+    New-FakeInstaller -Path (Join-Path $batRoot 'Files\Setup.exe') | Out-Null
+
+    function Get-BatFindings {
+        param([string]$Type, [string]$File)
+        $m = New-ConfigModel -ApplicationName 'BatApp'
+        $m.Installer.Type = $Type
+        $m.Installer.File = $File
+        $m.Installer.Arguments = '/S'
+        $m.Detection.Path = 'C:\App'
+        $m.Detection.FileName = 'App.exe'
+        $m.Uninstaller.File = 'uninstall.exe'
+        return @(Test-ConfigModel -Model $m -PackageRoot $batRoot)
+    }
+
+    $findings = Get-BatFindings -Type 'BAT' -File 'install.bat'
+    $errors = @($findings | Where-Object { $_.Severity -eq 'Error' })
+    Test-Assert 'A BAT installer validates without errors' ($errors.Count -eq 0) `
+        (($errors | ForEach-Object { $_.Message }) -join '; ')
+
+    Test-Assert 'A .cmd is accepted as a BAT' `
+        (@((Get-BatFindings -Type 'BAT' -File 'install.cmd') | Where-Object { $_.Severity -eq 'Error' }).Count -eq 0)
+
+    # Each type is launched differently, so a mismatch fails in a way that
+    # reads like a broken installer rather than a configuration error.
+    $mismatch = @((Get-BatFindings -Type 'EXE' -File 'install.bat') | Where-Object { $_.Severity -eq 'Error' })
+    Test-Assert 'A .bat declared as EXE is rejected' ($mismatch.Count -ge 1)
+    Test-Assert '   ...and the message names both the type and the extension' `
+        ((($mismatch | ForEach-Object { $_.Message }) -join ' ') -match 'EXE.*\.bat')
+
+    $mismatch = @((Get-BatFindings -Type 'BAT' -File 'Setup.exe') | Where-Object { $_.Severity -eq 'Error' })
+    Test-Assert 'An .exe declared as BAT is rejected' ($mismatch.Count -ge 1)
+    Test-Assert '   ...and the reason mentions cmd.exe' `
+        ((($mismatch | ForEach-Object { $_.Remedy + " " + $_.Message }) -join ' ') -match 'cmd\.exe')
+
+    # The batch hazard that silently reports a failed install as a success.
+    $warnings = @((Get-BatFindings -Type 'BAT' -File 'noexit.bat') | Where-Object { $_.Severity -eq 'Warning' })
+    Test-Assert 'A batch script with no exit is flagged' `
+        ((($warnings | ForEach-Object { $_.Message }) -join ' ') -match 'never calls exit')
+    Test-Assert '   ...and the fix is named' `
+        ((($warnings | ForEach-Object { $_.Remedy }) -join ' ') -match 'exit /b %ERRORLEVEL%')
+
+    $warnings = @((Get-BatFindings -Type 'BAT' -File 'install.bat') | Where-Object { $_.Severity -eq 'Warning' })
+    Test-Assert 'A batch script that ends with exit is not flagged' `
+        ((($warnings | ForEach-Object { $_.Message }) -join ' ') -notmatch 'never calls exit')
+
+    # The analyzer is what a technician sees first.
+    $batAnalysis = Get-InstallerAnalysis -Path $noExit
+    Test-Assert 'The analyzer reports a .bat as BAT' ($batAnalysis.InstallerType -eq 'BAT')
+    Test-Assert 'The analyzer does not invent a version for a script' `
+        ([string]::IsNullOrEmpty($batAnalysis.Version) -and [string]::IsNullOrEmpty($batAnalysis.Publisher))
+    Test-Assert 'The analyzer still hashes the script' ($batAnalysis.Sha256.Length -eq 64)
+    Test-Assert 'The analyzer warns about the missing exit' `
+        ((($batAnalysis.Notes) -join ' ') -match 'never calls exit')
+    Test-Assert 'The analyzer does not warn when the script exits properly' `
+        (((Get-InstallerAnalysis -Path $withExit).Notes -join ' ') -notmatch 'never calls exit')
+}
+finally {
+    Remove-Item $batRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # ================================================================= Summary
 Write-Host ''
 Write-Host '========================================' -ForegroundColor Cyan

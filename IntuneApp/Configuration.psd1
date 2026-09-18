@@ -4,7 +4,15 @@
     Version         = "1.0.0"
 
     Installer = @{
-        Type      = "EXE"   # EXE or MSI
+        # EXE  launched directly
+        # MSI  run as msiexec.exe /i "<file>" <arguments>
+        # BAT  run as cmd.exe /c call "<file>" <arguments>, from its own
+        #      directory. A .cmd is also accepted.
+        #
+        # A batch script reports the exit code of whatever ran last unless it
+        # ends with "exit /b %ERRORLEVEL%" - without that, a failed install can
+        # be reported to Intune as a success.
+        Type      = "EXE"
         File      = "Setup.exe"
 
         # Used for local testing, and for deployment when ArgumentSource is
@@ -31,7 +39,7 @@
     }
 
     Uninstaller = @{
-        Type        = "EXE"   # EXE or MSI
+        Type        = "EXE"   # EXE, MSI, or BAT
         File        = "uninstall.exe"
         Arguments   = "/quiet /norestart"
         ProductCode = $null   # For MSI: "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}"

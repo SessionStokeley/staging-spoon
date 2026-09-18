@@ -305,7 +305,9 @@ function New-InstallerCommandLine {
         actually runs rather than a second rendering of it - and there is only
         one place duplication could be introduced.
 
-        MSI arguments follow /i "<path>". EXE arguments are the whole tail.
+        MSI arguments follow /i "<path>". EXE arguments are the whole tail. A
+        BAT runs as cmd.exe /c call "<path>" <arguments>, from the script's own
+        directory.
 
         .OUTPUTS
         @{ FilePath; Arguments; Display }
@@ -343,9 +345,10 @@ function New-InstallerCommandLine {
         if ($displayTail) { $displayFull = "$base $displayTail" }
 
         return @{
-            FilePath  = 'msiexec.exe'
-            Arguments = $full
-            Display   = "msiexec.exe $displayFull"
+            FilePath         = 'msiexec.exe'
+            Arguments        = $full
+            Display          = "msiexec.exe $displayFull"
+            WorkingDirectory = $null
         }
     }
 
@@ -357,13 +360,54 @@ function New-InstallerCommandLine {
         if ($displayTail) { $displayFull = "$InstallerPath $displayTail" }
 
         return @{
-            FilePath  = $InstallerPath
-            Arguments = $argumentValue
-            Display   = $displayFull
+            FilePath         = $InstallerPath
+            Arguments        = $argumentValue
+            Display          = $displayFull
+            WorkingDirectory = $null
         }
     }
 
-    throw "Unknown installer type: $Type. Use EXE or MSI."
+    if ($normalizedType -eq 'BAT') {
+        # A batch file is not an executable image, so it is run through cmd.exe
+        # rather than launched directly.
+        #
+        # 'call' is not decoration. cmd /? documents that when the text after
+        # /c begins with a quote, cmd strips the outer pair unless the line has
+        # exactly two quotes around an executable name and nothing special
+        # between them. An installer argument such as INSTALLDIR="C:\X" adds a
+        # third and fourth quote, so that exemption stops applying and the
+        # outer quotes around the script path are eaten - leaving cmd with a
+        # path it cannot find. Prefixing 'call' means the text no longer starts
+        # with a quote, the stripping rule never fires, and the path survives
+        # whatever the arguments contain.
+        $inner = "call `"$InstallerPath`""
+        if ($tail) { $inner = "$inner $tail" }
+
+        $displayInner = "call `"$InstallerPath`""
+        if ($displayTail) { $displayInner = "$displayInner $displayTail" }
+
+        # Batch installers routinely reference files beside themselves with a
+        # bare relative path. Intune leaves the working directory at the
+        # package root, so those lookups would miss; running from the script's
+        # own directory is what double-clicking it does.
+        # Taken as text, not with Split-Path. Split-Path resolves through the
+        # PowerShell provider and returns the host's separator, so a Windows
+        # path handed to it on another platform comes back as C:/Pkg/Files -
+        # which is not the directory anything will find. The same reason
+        # Helpers/WindowsIntegration.ps1 joins its shell paths as strings.
+        $scriptDirectory = ''
+        $separatorIndex = $InstallerPath.LastIndexOfAny([char[]]@('\', '/'))
+        if ($separatorIndex -gt 0) { $scriptDirectory = $InstallerPath.Substring(0, $separatorIndex) }
+
+        return @{
+            FilePath         = 'cmd.exe'
+            Arguments        = "/c $inner"
+            Display          = "cmd.exe /c $displayInner"
+            WorkingDirectory = $scriptDirectory
+        }
+    }
+
+    throw "Unknown installer type: $Type. Use EXE, MSI or BAT."
 }
 
 function Start-InstallerProcess {
@@ -378,9 +422,25 @@ function Start-InstallerProcess {
     #>
     param([Parameter(Mandatory)]$CommandLine)
 
-    if ($CommandLine.Arguments) {
-        return Start-Process -FilePath $CommandLine.FilePath -ArgumentList $CommandLine.Arguments `
-            -Wait -PassThru -NoNewWindow
+    $startParameters = @{
+        FilePath    = $CommandLine.FilePath
+        Wait        = $true
+        PassThru    = $true
+        NoNewWindow = $true
     }
-    return Start-Process -FilePath $CommandLine.FilePath -Wait -PassThru -NoNewWindow
+
+    # Omitted rather than passed empty: 5.1 rejects an empty -ArgumentList.
+    if ($CommandLine.Arguments) { $startParameters['ArgumentList'] = $CommandLine.Arguments }
+
+    # Only BAT sets this, so EXE and MSI keep the working directory they have
+    # always inherited.
+    $workingDirectory = $null
+    if ($CommandLine -is [System.Collections.IDictionary]) {
+        if ($CommandLine.Contains('WorkingDirectory')) { $workingDirectory = $CommandLine['WorkingDirectory'] }
+    }
+    if ($workingDirectory -and (Test-Path -LiteralPath $workingDirectory)) {
+        $startParameters['WorkingDirectory'] = $workingDirectory
+    }
+
+    return Start-Process @startParameters
 }

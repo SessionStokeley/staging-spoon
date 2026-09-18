@@ -308,7 +308,12 @@ function Get-InstallerAnalysis {
         does not itself change anything on the machine.
 
         .PARAMETER Path
-        Path to the .exe or .msi to inspect.
+        Path to the .exe, .msi, .bat or .cmd to inspect.
+
+        A batch file is a text script with no PE header, version resource or
+        Authenticode signature, so most fields stay empty for one. That is
+        reported rather than guessed at: the technician supplies what the file
+        cannot say about itself.
     #>
     param(
         [Parameter(Mandatory)][string]$Path
@@ -321,11 +326,16 @@ function Get-InstallerAnalysis {
     $item = Get-Item -LiteralPath $Path
     $extension = $item.Extension.ToLowerInvariant()
 
-    if ($extension -notin @('.exe', '.msi')) {
-        throw "Unsupported installer type '$extension'. Expected .exe or .msi."
+    if ($extension -notin @('.exe', '.msi', '.bat', '.cmd')) {
+        throw "Unsupported installer type '$extension'. Expected .exe, .msi, .bat or .cmd."
     }
 
-    $type = if ($extension -eq '.msi') { 'MSI' } else { 'EXE' }
+    $type = switch ($extension) {
+        '.msi'  { 'MSI' }
+        '.bat'  { 'BAT' }
+        '.cmd'  { 'BAT' }
+        default { 'EXE' }
+    }
 
     $analysis = [ordered]@{
         # File
@@ -363,6 +373,28 @@ function Get-InstallerAnalysis {
         # Recommendations
         Recommendations = [ordered]@{}
         Notes           = @()
+    }
+
+    # --- Batch ---
+    if ($type -eq 'BAT') {
+        # Nothing inside a .bat describes the application, so the analysis
+        # stops at the file itself. Everything else comes from the technician.
+        $analysis.Technology = 'Batch script'
+        $analysis.TechnologyConfidence = 'High'
+        $analysis.SupportsSilent = $false
+        $analysis.Notes += 'A batch script carries no version, publisher or architecture information. Supply those in the wizard.'
+        $analysis.Notes += 'Whether it installs silently depends on what it calls. Check the script, and pass any switches it forwards through Installer.Arguments.'
+
+        # The exit code is the one thing that silently breaks a deployment, so
+        # it is checked here as well as in the validator - the analyzer is what
+        # a technician sees first.
+        $batText = ''
+        try { $batText = Get-Content -LiteralPath $item.FullName -Raw -ErrorAction Stop }
+        catch { $batText = '' }
+
+        if ($batText -and $batText -notmatch '(?im)^\s*exit\b') {
+            $analysis.Notes += 'This script never calls exit, so it reports the exit code of whatever ran last. End it with "exit /b %ERRORLEVEL%", or a failed install can be reported as a success.'
+        }
     }
 
     # --- Version resource (EXE) ---

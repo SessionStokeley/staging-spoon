@@ -1,6 +1,6 @@
 # Intune Win32 Packaging Framework
 
-Configuration-driven Microsoft Intune Win32 application packaging. Supports EXE and MSI installers with optional PATH and environment variable management.
+Configuration-driven Microsoft Intune Win32 application packaging. Supports EXE, MSI and BAT/CMD installers with optional PATH and environment variable management.
 
 ## Structure
 
@@ -99,6 +99,9 @@ write it, and the existing engine (`Install.ps1`, `Uninstall.ps1`,
 Metadata only — the installer is never launched:
 
 - Name, publisher, version, architecture (from the PE header and version resource)
+- A `.bat` or `.cmd` is recognised and hashed, but carries no version,
+  publisher or architecture of its own, so those are left for you to supply
+  rather than guessed at
 - SHA256 hash and Authenticode signature status
 - Installer technology (Inno Setup, NSIS, WiX Burn, InstallShield, Squirrel, MSI and others)
 - Suggested silent switches for that technology, with a confidence level
@@ -197,14 +200,20 @@ All application-specific settings live in one file. The scripts are generic.
 
 ```powershell
 Installer = @{
-    Type           = "EXE"         # EXE or MSI
+    Type           = "EXE"         # EXE, MSI, or BAT
     File           = "Setup.exe"   # Filename in Files\ directory
     Arguments      = "/quiet /norestart"
     ArgumentSource = "Configuration"   # Configuration, Intune, or None
 }
 ```
 
-For MSI, the framework runs `msiexec.exe /i "<file>" <arguments>`.
+Each type is launched differently:
+
+| Type | Extension | How it runs |
+|---|---|---|
+| `EXE` | `.exe` | Launched directly |
+| `MSI` | `.msi` | `msiexec.exe /i "<file>" <arguments>` |
+| `BAT` | `.bat` or `.cmd` | `cmd.exe /c call "<file>" <arguments>`, from the script's own directory |
 
 `ArgumentSource` decides where the arguments come from at install time; see
 [Where the installer's arguments go](#where-the-installers-arguments-go).
@@ -229,7 +238,56 @@ Uninstaller = @{
     Type        = "MSI"
     ProductCode = "{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}"
 }
+
+# BAT/CMD uninstaller - runs through cmd.exe exactly as a BAT installer does
+Uninstaller = @{
+    Type      = "BAT"
+    File      = "uninstall.bat"
+    Arguments = "/S"
+}
 ```
+
+`ArgumentSource` governs installation only. Uninstall arguments always come
+from `Configuration.psd1`.
+
+### BAT and CMD installers
+
+A batch script is run as:
+
+```
+cmd.exe /c call "C:\...\Files\install.bat" <arguments>
+```
+
+Two details of that command are deliberate.
+
+**`call`.** `cmd /?` documents that when the text after `/c` begins with a
+quote, cmd strips the outer pair unless the line has exactly two quotes around
+an executable name with nothing special between them. An argument that itself
+contains quotes — `INSTALLDIR="C:\Program Files\App"` — adds a third and
+fourth, so that exemption stops applying and the quotes around the script path
+are eaten, leaving cmd with a path it cannot find. Prefixing `call` means the
+text no longer starts with a quote, so the stripping rule never fires.
+
+**The working directory** is the script's own folder. Batch installers
+routinely reference files beside themselves by bare name, and Intune leaves the
+working directory at the package root, so those lookups would otherwise miss.
+This matches what double-clicking the script does.
+
+> **End your script with `exit /b %ERRORLEVEL%`.**
+>
+> A batch file reports the exit code of whatever ran last. A script that
+> finishes on a successful `echo` reports `0` even when the installer inside it
+> failed — and Intune reports the deployment as a success. Validation warns when
+> a script contains no `exit`, and the analyzer says so too.
+
+```bat
+@echo off
+"%~dp0setup.exe" /S
+exit /b %ERRORLEVEL%
+```
+
+`%~dp0` is the script's own directory, which is the robust way to reference a
+file next to it regardless of where the script is invoked from.
 
 ### Detection Methods
 
@@ -626,6 +684,7 @@ powershell.exe -ExecutionPolicy Bypass -File Tests\Run-AllTests.ps1 -PortableOnl
 | `Test-Lifecycle.ps1` | The real install/uninstall orchestration against an in-memory registry |
 | `Test-Integration.ps1` | Windows integration: mode resolution, creation, validation, ownership, and what uninstall may remove |
 | `Test-Detection.ps1` | The Intune detection contract in both directions |
+| `Test-InstallerArguments.ps1` | ArgumentSource resolution, command construction for EXE/MSI/BAT, and a BAT executed through cmd.exe on Windows |
 | `Test-PS51Compat.ps1` | PowerShell 7-only syntax audit, the 5.1 loader path executed, and a live 5.1 run |
 | `Test-Studio.ps1` | psd1 serialization, round-tripping, save stability, schema merging, validation grading, the wizard flow, and the analysis/execution safety boundary |
 | `Test-Gui.ps1` | The Studio's model-to-form functions, without WPF |
@@ -650,8 +709,13 @@ Windows session. It snapshots the machine PATH and every variable it touches,
 restores them in a `finally` block, and then asserts the PATH matches the
 snapshot byte for byte — so a restore that did not work is itself a failure.
 
-On Linux, 22 checks skip: 9 elevated primitives, 7 registry round-trips, 5
-live-WPF checks and 1 live PowerShell 5.1 run. Each says why.
+On Linux, 26 checks skip: 9 elevated primitives, 7 registry round-trips, 5
+live-WPF checks, 4 BAT-through-cmd.exe checks and 1 live PowerShell 5.1 run.
+Each says why.
+
+Command *construction* for BAT is covered everywhere. What needs Windows is
+cmd.exe actually parsing that command and the script's exit code propagating —
+the two things a builder cannot prove about itself.
 
 ### PowerShell 5.1
 

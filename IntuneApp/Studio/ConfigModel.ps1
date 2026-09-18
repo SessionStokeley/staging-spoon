@@ -49,7 +49,7 @@ function New-ConfigModel {
         Architecture    = 'x64'          # x64, x86, or ARM64
 
         Installer = [ordered]@{
-            Type          = 'EXE'        # EXE or MSI
+            Type          = 'EXE'        # EXE, MSI, or BAT
             File          = ''
             # Used for local testing, and for deployment when ArgumentSource
             # is 'Configuration'. Kept either way, so a package always has a
@@ -66,7 +66,7 @@ function New-ConfigModel {
         }
 
         Uninstaller = [ordered]@{
-            Type        = 'EXE'
+            Type        = 'EXE'        # EXE, MSI, or BAT
             File        = ''
             Arguments   = ''
             ProductCode = $null

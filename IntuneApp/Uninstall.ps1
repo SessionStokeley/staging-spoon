@@ -17,6 +17,9 @@
     never removed, and a feature left in VALIDATE mode recorded nothing, so the
     installer's own integrations survive.
 
+    The uninstaller may be EXE, MSI or BAT. A BAT runs through cmd.exe, from
+    its own directory, exactly as a BAT installer does.
+
     -TestMode prints what would be removed and exits without changing anything.
 #>
 param(
@@ -29,7 +32,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 # Load shared helpers
 $helpersDir = Join-Path $ScriptDir 'Helpers'
-foreach ($helper in @('ConfigLoader.ps1', 'Environment.ps1', 'WindowsIntegration.ps1')) {
+foreach ($helper in @('ConfigLoader.ps1', 'InstallerArguments.ps1', 'Environment.ps1', 'WindowsIntegration.ps1')) {
     $helperPath = Join-Path $helpersDir $helper
     if (Test-Path $helperPath) { . $helperPath }
 }
@@ -105,7 +108,7 @@ try {
     }
     $uninstallType = $Config.Uninstaller.Type.ToUpper()
 
-    if ($uninstallType -notin @('MSI', 'EXE')) {
+    if ($uninstallType -notin @('MSI', 'EXE', 'BAT')) {
         Write-Log "ERROR: Unknown uninstaller type: $uninstallType" $logFile
         Write-Error "Unknown uninstaller type: $uninstallType"
         exit 1
@@ -147,7 +150,12 @@ try {
             Write-Error "Uninstaller not found: $uninstallPath"
             exit 1
         }
-        $uninstallCommand = "$uninstallPath $uninstallArgs"
+
+        # The same builder the install path uses, so a BAT uninstaller is
+        # invoked through cmd.exe exactly as a BAT installer is.
+        $uninstallCommandLine = New-InstallerCommandLine -Type $uninstallType `
+            -InstallerPath $uninstallPath -Arguments $uninstallArgs
+        $uninstallCommand = $uninstallCommandLine.Display
     }
 
     # ------------------------------------------------------ Dry run stops here
@@ -176,8 +184,8 @@ try {
         $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow
     }
     else {
-        Write-Log "Executing: $uninstallPath $uninstallArgs" $logFile
-        $process = Start-Process -FilePath $uninstallPath -ArgumentList $uninstallArgs -Wait -PassThru -NoNewWindow
+        Write-Log "Executing: $($uninstallCommandLine.Display)" $logFile
+        $process = Start-InstallerProcess -CommandLine $uninstallCommandLine
     }
 
     $exitCode = $process.ExitCode

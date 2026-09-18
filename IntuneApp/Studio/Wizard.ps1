@@ -190,10 +190,11 @@ function Invoke-ConfigurationWizard {
     Write-WizardNote "Recommendation: $($recUn.Type) (confidence: $($recUn.Confidence))"
     Write-WizardNote $recUn.Reason
 
-    $unDefaultIndex = if ($recUn.Type -eq 'MSI') { 1 } else { 0 }
+    $unDefaultIndex = switch ($recUn.Type) { 'MSI' { 1 } 'BAT' { 2 } default { 0 } }
     $model.Uninstaller.Type = Read-WizardChoice -Question 'Uninstall method' -DefaultIndex $unDefaultIndex -Options @(
         @{ Label = 'EXE uninstaller'; Value = 'EXE' }
         @{ Label = 'MSI ProductCode'; Value = 'MSI' }
+        @{ Label = 'BAT / CMD script'; Value = 'BAT' }
     )
 
     if ($model.Uninstaller.Type -eq 'MSI') {
@@ -511,6 +512,7 @@ function Get-ConfigurationComments {
     #>
     return @{
         'Installer'                  = 'How the application is installed.'
+        'Installer.Type'             = 'EXE, MSI or BAT. A BAT runs through cmd.exe from its own directory.'
         'Installer.Arguments'        = 'Silent switches. Verify these against vendor documentation.'
         'Installer.ArgumentSource'   = 'Where the installer arguments come from: Configuration, Intune or None.' + [Environment]::NewLine + 'Exactly one source is used - they are never combined.'
         'Uninstaller'                = 'How the application is removed.'

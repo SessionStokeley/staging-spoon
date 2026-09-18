@@ -99,6 +99,7 @@ $script:StudioXaml = @'
           <StackPanel Orientation="Horizontal">
             <RadioButton x:Name="RbTypeExe" Content="EXE" GroupName="InsType" IsChecked="True"/>
             <RadioButton x:Name="RbTypeMsi" Content="MSI" GroupName="InsType"/>
+            <RadioButton x:Name="RbTypeBat" Content="BAT / CMD" GroupName="InsType"/>
           </StackPanel>
           <Label Content="Installer file (inside Files\)"/><TextBox x:Name="TxtInsFile"/>
           <Label Content="Installation context"/>
@@ -136,6 +137,7 @@ $script:StudioXaml = @'
           <StackPanel Orientation="Horizontal">
             <RadioButton x:Name="RbUnExe" Content="EXE uninstaller" GroupName="UnType" IsChecked="True"/>
             <RadioButton x:Name="RbUnMsi" Content="MSI ProductCode" GroupName="UnType"/>
+            <RadioButton x:Name="RbUnBat" Content="BAT / CMD" GroupName="UnType"/>
           </StackPanel>
           <Label Content="Uninstaller path or command"/><TextBox x:Name="TxtUnFile"/>
           <Label Content="Uninstall arguments"/><TextBox x:Name="TxtUnArgs" FontFamily="Consolas"/>
@@ -304,11 +306,11 @@ function Show-PackagingStudio {
         'TxtInstaller','BtnBrowse','BtnAnalyze','TxtStatus','BtnOpen','BtnGenerate','BtnSave',
         'BtnValidate','BtnPreview','BtnRun','BtnBuild','Tabs',
         'TxtAppName','TxtPublisher','TxtVersion','RbArch64','RbArch86','RbArchArm','TxtAnalysis',
-        'RbTypeExe','RbTypeMsi','TxtInsFile','RbCtxSystem','RbCtxUser',
+        'RbTypeExe','RbTypeMsi','RbTypeBat','TxtInsFile','RbCtxSystem','RbCtxUser',
         'RbUiSilent','RbUiBasic','RbUiInteractive','TxtInsArgs',
         'RbArgCfg','RbArgIntune','RbArgNone','TxtArgSrcHint',
         'RbRstSuppress','RbRstAllow','RbRstPrompt','TxtExitCodes',
-        'RbUnExe','RbUnMsi','TxtUnFile','TxtUnArgs','TxtUnCode',
+        'RbUnExe','RbUnMsi','RbUnBat','TxtUnFile','TxtUnArgs','TxtUnCode',
         'RbDetFile','RbDetReg','RbDetMsi','RbDetCustom','TxtDetPath','TxtDetFile','TxtDetVersion',
         'TxtDetRegPath','TxtDetRegValue','TxtDetCode',
         'ChkEnvEnabled','RbPathSystem','RbPathUser','RbPathBoth','TxtPathEntries',
@@ -351,12 +353,12 @@ function Show-PackagingStudio {
     }
 
     $archMap = @{ RbArch64 = 'x64'; RbArch86 = 'x86'; RbArchArm = 'ARM64' }
-    $typeMap = @{ RbTypeExe = 'EXE'; RbTypeMsi = 'MSI' }
+    $typeMap = @{ RbTypeExe = 'EXE'; RbTypeMsi = 'MSI'; RbTypeBat = 'BAT' }
     $ctxMap  = @{ RbCtxSystem = 'System'; RbCtxUser = 'User' }
     $uiMap   = @{ RbUiSilent = 'Silent'; RbUiBasic = 'BasicUI'; RbUiInteractive = 'Interactive' }
     $argMap  = @{ RbArgCfg = 'Configuration'; RbArgIntune = 'Intune'; RbArgNone = 'None' }
     $rstMap  = @{ RbRstSuppress = 'Suppress'; RbRstAllow = 'Allow'; RbRstPrompt = 'Prompt' }
-    $unMap   = @{ RbUnExe = 'EXE'; RbUnMsi = 'MSI' }
+    $unMap   = @{ RbUnExe = 'EXE'; RbUnMsi = 'MSI'; RbUnBat = 'BAT' }
     $detMap  = @{ RbDetFile = 'File'; RbDetReg = 'Registry'; RbDetMsi = 'MSI'; RbDetCustom = 'Custom' }
     $varMap  = @{ RbVarMachine = 'Machine'; RbVarUser = 'User' }
 

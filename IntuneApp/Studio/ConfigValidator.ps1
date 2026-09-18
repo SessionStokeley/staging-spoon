@@ -96,10 +96,10 @@ function Test-ConfigModel {
     $insUI   = [string](Get-ModelValue $Model 'Installer.UserInterface')
 
     if ([string]::IsNullOrWhiteSpace($insType)) {
-        & $add 'Error' 'Installer' 'Installer.Type is required.' 'Set Installer.Type to EXE or MSI.'
+        & $add 'Error' 'Installer' 'Installer.Type is required.' 'Set Installer.Type to EXE, MSI or BAT.'
     }
-    elseif ($insType.ToUpperInvariant() -notin @('EXE', 'MSI')) {
-        & $add 'Error' 'Installer' "Installer.Type '$insType' is not valid." 'Use EXE or MSI.'
+    elseif ($insType.ToUpperInvariant() -notin @('EXE', 'MSI', 'BAT')) {
+        & $add 'Error' 'Installer' "Installer.Type '$insType' is not valid." 'Use EXE, MSI or BAT.'
     }
 
     # --- Argument source -------------------------------------------------
@@ -155,8 +155,8 @@ function Test-ConfigModel {
     if ([string]::IsNullOrWhiteSpace($insFile)) {
         & $add 'Error' 'Installer' 'Installer.File is required.' 'Name the installer file inside the Files\ directory.'
     }
-    elseif ($insType -and $insFile -notmatch '\.(exe|msi)$') {
-        & $add 'Warning' 'Installer' "Installer.File '$insFile' does not end in .exe or .msi." 'Confirm the file name is correct.'
+    elseif ($insType -and $insFile -notmatch '\.(exe|msi|bat|cmd)$') {
+        & $add 'Warning' 'Installer' "Installer.File '$insFile' does not end in .exe, .msi, .bat or .cmd." 'Confirm the file name is correct.'
     }
     elseif (-not $SkipFileChecks -and $PackageRoot) {
         $installerPath = Join-Path (Join-Path $PackageRoot 'Files') $insFile
@@ -172,16 +172,45 @@ function Test-ConfigModel {
             & $add 'Error' 'Installer' "Installer file does not exist: $insFile" $hint
         }
 
-        # A .msi declared as EXE is launched directly instead of through
-        # msiexec, which fails in a way that reads like a broken installer.
-        $extension = [System.IO.Path]::GetExtension($insFile)
+        # Each type is launched a different way, so a mismatch does not fail
+        # cleanly - it fails in a way that reads like a broken installer.
+        $extension = ''
+        if ($insFile) { $extension = ([System.IO.Path]::GetExtension($insFile)).ToLowerInvariant() }
+
         if ($extension -and $insType) {
             $upperType = $insType.ToUpperInvariant()
-            if ($upperType -eq 'MSI' -and $extension.ToLowerInvariant() -ne '.msi') {
-                & $add 'Error' 'Installer' "Installer.Type is MSI but '$insFile' is not a .msi file." 'msiexec.exe /i only accepts an .msi. Set Type to EXE, or name the .msi.'
+            $expected = @{
+                'EXE' = @('.exe')
+                'MSI' = @('.msi')
+                'BAT' = @('.bat', '.cmd')
             }
-            if ($upperType -eq 'EXE' -and $extension.ToLowerInvariant() -eq '.msi') {
-                & $add 'Error' 'Installer' "Installer.Type is EXE but '$insFile' is a .msi file." 'An .msi launched directly does not accept silent switches. Set Type to MSI.'
+
+            if ($expected.ContainsKey($upperType) -and $extension -notin $expected[$upperType]) {
+                $reason = switch ($upperType) {
+                    'MSI' { 'msiexec.exe /i only accepts an .msi.' }
+                    'BAT' { 'A BAT is run through cmd.exe, which expects a .bat or .cmd script.' }
+                    default { 'An EXE is launched directly, so it has to be an executable image.' }
+                }
+                & $add 'Error' 'Installer' "Installer.Type is $upperType but '$insFile' is a $extension file." "$reason Set Type to match the file, or name the right file."
+            }
+        }
+
+        # A batch installer reports the exit code of whatever ran last unless it
+        # ends deliberately. A script finishing on a successful 'echo' therefore
+        # reports 0 even when the installer inside it failed - and Intune reports
+        # the deployment as a success.
+        if ($insType -and $insType.ToUpperInvariant() -eq 'BAT' -and
+            -not $SkipFileChecks -and $PackageRoot) {
+
+            $batPath = Join-Path (Join-Path $PackageRoot 'Files') $insFile
+            if (Test-Path -LiteralPath $batPath) {
+                $batText = ''
+                try { $batText = Get-Content -LiteralPath $batPath -Raw -ErrorAction Stop }
+                catch { $batText = '' }
+
+                if ($batText -and $batText -notmatch '(?im)^\s*exit\b') {
+                    & $add 'Warning' 'Installer' "$insFile never calls exit, so its exit code is whatever ran last." 'End the script with "exit /b %ERRORLEVEL%" so a failing installer is reported as a failure. Without it a deployment can be reported successful when it was not.'
+                }
             }
         }
     }
@@ -202,7 +231,7 @@ function Test-ConfigModel {
     # -------------------------------------------------------------- Uninstall
     $unType = [string](Get-ModelValue $Model 'Uninstaller.Type')
     if ([string]::IsNullOrWhiteSpace($unType)) {
-        & $add 'Error' 'Uninstall' 'Uninstaller.Type is required.' 'Set Uninstaller.Type to EXE or MSI.'
+        & $add 'Error' 'Uninstall' 'Uninstaller.Type is required.' 'Set Uninstaller.Type to EXE, MSI or BAT.'
     }
     elseif ($unType.ToUpperInvariant() -eq 'MSI') {
         $code = [string](Get-ModelValue $Model 'Uninstaller.ProductCode')
