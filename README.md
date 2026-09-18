@@ -59,6 +59,10 @@ Or configure by hand:
 4. Test locally as Administrator: `.\Test-Local.ps1 -Mode Install`
 5. Package with `IntuneWinAppUtil.exe -c IntuneApp -s Install.ps1 -o Output`
 
+Building needs Microsoft's `IntuneWinAppUtil.exe`, which is not shipped with this
+framework. See [Packaging](#packaging) for where to put it — that is also what
+the GUI's "IntuneWinAppUtil.exe not found" message means.
+
 ## Interactive Configuration Generator
 
 The Studio analyzes an installer, asks what it needs, and writes the
@@ -648,6 +652,74 @@ It also executes the 5.1 configuration-loading path for real on any platform —
 live `powershell.exe` run, which reports `[SKIP]` elsewhere.
 
 ## Packaging
+
+Building a `.intunewin` needs Microsoft's Win32 Content Prep Tool,
+`IntuneWinAppUtil.exe`. It is not redistributed with this framework, so you have
+to put a copy somewhere the Studio can find it.
+
+### Where to put IntuneWinAppUtil.exe
+
+Download it from Microsoft's
+[Win32 Content Prep Tool](https://github.com/microsoft/Microsoft-Win32-Content-Prep-Tool)
+releases, unblock it (right-click, Properties, Unblock), then put it in **one**
+of these. They are searched in this order, and the first hit wins:
+
+| # | Location | Notes |
+|---|---|---|
+| 1 | Anywhere on `PATH` | Found via `IntuneWinAppUtil.exe` on `PATH` |
+| 2 | `IntuneApp\Studio\IntuneWinAppUtil.exe` | **Gets packaged into your .intunewin** — see the warning below |
+| 3 | `IntuneApp\IntuneWinAppUtil.exe` | **Gets packaged into your .intunewin** — see the warning below |
+| 4 | `C:\Tools\IntuneWinAppUtil.exe` | Recommended |
+| 5 | `C:\Program Files\Microsoft\IntuneWinAppUtil.exe` | Needs administrator rights to create |
+
+**`C:\Tools\IntuneWinAppUtil.exe` is the recommended choice.** It needs no
+administrator rights, no `PATH` edit, and survives moving or re-cloning the
+repository:
+
+```powershell
+New-Item -Path C:\Tools -ItemType Directory -Force
+# Copy IntuneWinAppUtil.exe into C:\Tools, then build from the GUI as normal.
+```
+
+To use `PATH` instead, either drop the tool into a directory already on `PATH`,
+or add its directory:
+
+```powershell
+# Current user, permanent
+[Environment]::SetEnvironmentVariable(
+    'PATH',
+    [Environment]::GetEnvironmentVariable('PATH', 'User') + ';C:\Tools',
+    'User')
+```
+
+Then **restart the Studio**. A running process does not pick up a `PATH` change.
+
+> **Do not put it inside the package folder.** Locations 2 and 3 are searched
+> for convenience, but `IntuneWinAppUtil.exe -c` packages *everything* under the
+> folder it is pointed at. A copy sitting in `IntuneApp\` or `IntuneApp\Studio\`
+> therefore ends up inside the `.intunewin` itself — tens of megabytes of build
+> tool shipped to every endpoint, in every package you build.
+
+### "Build did not complete: IntuneWinAppUtil.exe not found"
+
+This dialog from the GUI's **Build** button means the tool was not in any of the
+five locations above. Check, in order:
+
+1. The file is named exactly `IntuneWinAppUtil.exe`.
+2. It is in one of the five locations — not in a subfolder of one.
+3. If you are relying on `PATH`, confirm it resolves, then restart the Studio:
+   ```powershell
+   Get-Command IntuneWinAppUtil.exe
+   ```
+4. Windows has not blocked the download (right-click the file, Properties,
+   Unblock).
+
+Everything up to this point still worked: the configuration is valid and saved.
+Only the final packaging step is missing its tool.
+
+### Building by hand
+
+The Studio only wraps this command, so you can always run it yourself:
 
 ```powershell
 IntuneWinAppUtil.exe -c C:\Build\IntuneApp -s Install.ps1 -o C:\Build\Output
