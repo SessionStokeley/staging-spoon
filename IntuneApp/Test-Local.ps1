@@ -4,6 +4,17 @@ param(
     [ValidateSet('Install', 'Uninstall', 'Detection', 'Validate', 'Environment', 'Integration', 'DryRun', 'DryRunUninstall', 'DetectPaths', 'TestCommand', 'PathDiagnostics')]
     [string]$Mode,
 
+    # Which installer arguments this local run uses. Defaults to whatever
+    # Installer.ArgumentSource says.
+    #
+    # A package deployed with ArgumentSource = 'Intune' has no arguments in the
+    # configuration path at install time, so a plain local install would refuse
+    # to run. Passing -ArgumentSource Configuration tests the real installer
+    # with the real arguments from Configuration.psd1, without editing it and
+    # without ever reaching for the production Intune arguments.
+    [ValidateSet('', 'Configuration', 'Intune', 'None')]
+    [string]$ArgumentSource = '',
+
     [string]$Command,
 
     [string]$InstallPath
@@ -167,7 +178,8 @@ switch ($Mode) {
     'DryRun' {
         # The engine's own -TestMode, so what is printed is what would happen
         # rather than a second description of it.
-        & (Join-Path $ScriptDir 'Install.ps1') -TestMode
+        if ($ArgumentSource) { & (Join-Path $ScriptDir 'Install.ps1') -TestMode -ArgumentSource $ArgumentSource }
+        else { & (Join-Path $ScriptDir 'Install.ps1') -TestMode }
     }
 
     'DryRunUninstall' {
@@ -220,8 +232,60 @@ switch ($Mode) {
         Write-Host "Mode: Install"
         Write-Host ""
 
+        # Show what will run before running it. A local test that silently used
+        # different arguments than the ones printed would be worse than none.
+        . (Join-Path $ScriptDir 'Helpers\InstallerArguments.ps1')
+
+        $effectiveSource = $ArgumentSource
+        if (-not $effectiveSource) {
+            $effectiveSource = [string]$Config.Installer.ArgumentSource
+            if (-not $effectiveSource) { $effectiveSource = 'Configuration' }
+        }
+
+        if ($effectiveSource -eq 'Intune') {
+            # Production arguments live in the Intune Program command, which
+            # this machine does not have. Refuse rather than invent them.
+            Write-Host 'This package takes its installer arguments from the Intune Program command.' -ForegroundColor Yellow
+            Write-Host 'To test the real installer locally with the arguments in Configuration.psd1:' -ForegroundColor Yellow
+            Write-Host '  .\Test-Local.ps1 -Mode Install -ArgumentSource Configuration' -ForegroundColor Yellow
+            Write-Host ''
+        }
+
+        $resolved = $null
+        try {
+            $resolved = Resolve-InstallerArguments -Config $Config -Override $ArgumentSource
+        }
+        catch {
+            Write-Host "Installer arguments: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host ''
+        }
+
+        if ($resolved) {
+            $installerFile = [string]$Config.Installer.File
+            $installerType = ([string]$Config.Installer.Type).ToUpper()
+            $resolvedPath = Join-Path (Join-Path $ScriptDir 'Files') $installerFile
+            # Not $command: Test-Local has a [string]$Command parameter, and
+            # assigning a hashtable to it coerces to a string, which silently
+            # yields an empty Execution line and clobbers -Command.
+            $installerCommand = New-InstallerCommandLine -Type $installerType -InstallerPath $resolvedPath `
+                -Arguments $resolved.Arguments -DisplayArguments $resolved.Display
+
+            Write-Host "Installer           : $installerFile"
+            Write-Host "Installer type      : $installerType"
+            Write-Host "Argument source     : $($resolved.Source)"
+            $shown = $resolved.Display
+            if (-not $shown) { $shown = '(none)' }
+            Write-Host "Effective arguments : $shown"
+            Write-Host "Execution           : $($installerCommand.Display)"
+            foreach ($warning in @($resolved.Warnings)) {
+                Write-Host "  NOTE: $warning" -ForegroundColor DarkYellow
+            }
+            Write-Host ""
+        }
+
         $script = Join-Path $ScriptDir 'Install.ps1'
-        & $script
+        if ($ArgumentSource) { & $script -ArgumentSource $ArgumentSource }
+        else { & $script }
         $installExit = $LASTEXITCODE
 
         Write-Host ""

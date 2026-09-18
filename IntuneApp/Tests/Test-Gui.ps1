@@ -93,7 +93,8 @@ Write-Host "  Extracted from Studio.ps1: $($extracted -join ', ')" -ForegroundCo
 
 # The functions the startup path depends on must all have been found.
 foreach ($required in @('Split-Lines', 'Write-FormFromModel', 'Read-ModelFromForm',
-                        'Update-Psd1Text', 'Update-Validation', 'Update-Preview')) {
+                        'Update-Psd1Text', 'Update-Validation', 'Update-Preview',
+                        'Update-ArgumentSourceHint')) {
     if ($extracted -notcontains $required) {
         throw "Studio.ps1 no longer defines $required. Update this test to match."
     }
@@ -115,6 +116,7 @@ $controlNames = @(
     'TxtAppName', 'TxtPublisher', 'TxtVersion', 'RbArch64', 'RbArch86', 'RbArchArm', 'TxtAnalysis',
     'RbTypeExe', 'RbTypeMsi', 'TxtInsFile', 'RbCtxSystem', 'RbCtxUser',
     'RbUiSilent', 'RbUiBasic', 'RbUiInteractive', 'TxtInsArgs',
+    'RbArgCfg', 'RbArgIntune', 'RbArgNone', 'TxtArgSrcHint',
     'RbRstSuppress', 'RbRstAllow', 'RbRstPrompt', 'TxtExitCodes',
     'RbUnExe', 'RbUnMsi', 'TxtUnFile', 'TxtUnArgs', 'TxtUnCode',
     'RbDetFile', 'RbDetReg', 'RbDetMsi', 'RbDetCustom',
@@ -149,6 +151,7 @@ $archMap = @{ RbArch64 = 'x64'; RbArch86 = 'x86'; RbArchArm = 'ARM64' }
 $typeMap = @{ RbTypeExe = 'EXE'; RbTypeMsi = 'MSI' }
 $ctxMap  = @{ RbCtxSystem = 'System'; RbCtxUser = 'User' }
 $uiMap   = @{ RbUiSilent = 'Silent'; RbUiBasic = 'BasicUI'; RbUiInteractive = 'Interactive' }
+$argMap  = @{ RbArgCfg = 'Configuration'; RbArgIntune = 'Intune'; RbArgNone = 'None' }
 $rstMap  = @{ RbRstSuppress = 'Suppress'; RbRstAllow = 'Allow'; RbRstPrompt = 'Prompt' }
 $unMap   = @{ RbUnExe = 'EXE'; RbUnMsi = 'MSI' }
 $detMap  = @{ RbDetFile = 'File'; RbDetReg = 'Registry'; RbDetMsi = 'MSI'; RbDetCustom = 'Custom' }

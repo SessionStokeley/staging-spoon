@@ -6,7 +6,28 @@
     Installer = @{
         Type      = "EXE"   # EXE or MSI
         File      = "Setup.exe"
+
+        # Used for local testing, and for deployment when ArgumentSource is
+        # "Configuration". Keeping it either way means the package always has
+        # a reproducible local test, even when Intune supplies the arguments
+        # in production.
         Arguments = "/quiet /norestart"
+
+        # Where the installer's arguments come from at execution time:
+        #
+        #   "Configuration"  Arguments above is authoritative. This is the
+        #                    default, and what a configuration without this
+        #                    key has always meant.
+        #   "Intune"         The Intune Program command supplies them:
+        #                      powershell.exe -ExecutionPolicy Bypass -File Install.ps1 -InstallerArguments "/quiet /norestart"
+        #                    Arguments above is then local-test material only
+        #                    and is never sent to the installer.
+        #   "None"           The installer is launched with no arguments.
+        #
+        # Exactly one source is authoritative. They are never merged, and a
+        # configuration that asks for one while supplying the other is
+        # refused rather than guessed at.
+        ArgumentSource = "Configuration"
     }
 
     Uninstaller = @{

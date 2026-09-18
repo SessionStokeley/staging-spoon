@@ -113,6 +113,13 @@ $script:StudioXaml = @'
             <RadioButton x:Name="RbUiInteractive" Content="Interactive" GroupName="Ui"/>
           </StackPanel>
           <Label Content="Install arguments"/><TextBox x:Name="TxtInsArgs" FontFamily="Consolas"/>
+          <Label Content="Argument source (which arguments the installer actually receives)"/>
+          <StackPanel Orientation="Horizontal">
+            <RadioButton x:Name="RbArgCfg" Content="Configuration" GroupName="ArgSrc" IsChecked="True"/>
+            <RadioButton x:Name="RbArgIntune" Content="Intune Program command" GroupName="ArgSrc"/>
+            <RadioButton x:Name="RbArgNone" Content="None" GroupName="ArgSrc"/>
+          </StackPanel>
+          <TextBlock x:Name="TxtArgSrcHint" TextWrapping="Wrap" Foreground="#555" Margin="0,2,0,6"/>
           <Label Content="Restart behavior"/>
           <StackPanel Orientation="Horizontal">
             <RadioButton x:Name="RbRstSuppress" Content="Suppress" GroupName="Rst" IsChecked="True"/>
@@ -299,6 +306,7 @@ function Show-PackagingStudio {
         'TxtAppName','TxtPublisher','TxtVersion','RbArch64','RbArch86','RbArchArm','TxtAnalysis',
         'RbTypeExe','RbTypeMsi','TxtInsFile','RbCtxSystem','RbCtxUser',
         'RbUiSilent','RbUiBasic','RbUiInteractive','TxtInsArgs',
+        'RbArgCfg','RbArgIntune','RbArgNone','TxtArgSrcHint',
         'RbRstSuppress','RbRstAllow','RbRstPrompt','TxtExitCodes',
         'RbUnExe','RbUnMsi','TxtUnFile','TxtUnArgs','TxtUnCode',
         'RbDetFile','RbDetReg','RbDetMsi','RbDetCustom','TxtDetPath','TxtDetFile','TxtDetVersion',
@@ -346,6 +354,7 @@ function Show-PackagingStudio {
     $typeMap = @{ RbTypeExe = 'EXE'; RbTypeMsi = 'MSI' }
     $ctxMap  = @{ RbCtxSystem = 'System'; RbCtxUser = 'User' }
     $uiMap   = @{ RbUiSilent = 'Silent'; RbUiBasic = 'BasicUI'; RbUiInteractive = 'Interactive' }
+    $argMap  = @{ RbArgCfg = 'Configuration'; RbArgIntune = 'Intune'; RbArgNone = 'None' }
     $rstMap  = @{ RbRstSuppress = 'Suppress'; RbRstAllow = 'Allow'; RbRstPrompt = 'Prompt' }
     $unMap   = @{ RbUnExe = 'EXE'; RbUnMsi = 'MSI' }
     $detMap  = @{ RbDetFile = 'File'; RbDetReg = 'Registry'; RbDetMsi = 'MSI'; RbDetCustom = 'Custom' }
@@ -365,6 +374,11 @@ function Show-PackagingStudio {
         Set-SelectedRadio $ctxMap ([string]$m.Installer.Context)
         Set-SelectedRadio $uiMap  ([string]$m.Installer.UserInterface)
         $ui.TxtInsArgs.Text = [string]$m.Installer.Arguments
+
+        $argSource = [string](Get-ModelValue $m 'Installer.ArgumentSource')
+        if (-not $argSource) { $argSource = 'Configuration' }
+        foreach ($rb in $argMap.Keys) { $ui[$rb].IsChecked = ($argMap[$rb] -eq $argSource) }
+        Update-ArgumentSourceHint
         Set-SelectedRadio $rstMap ([string]$m.Installer.Restart)
         $ui.TxtExitCodes.Text = (@($m.SuccessExitCodes) -join ', ')
 
@@ -448,6 +462,11 @@ function Show-PackagingStudio {
         $m.Installer.Context       = Get-SelectedRadio $ctxMap
         $m.Installer.UserInterface = Get-SelectedRadio $uiMap
         $m.Installer.Arguments     = $ui.TxtInsArgs.Text
+
+        $m.Installer['ArgumentSource'] = 'Configuration'
+        foreach ($rb in $argMap.Keys) {
+            if ($ui[$rb].IsChecked) { $m.Installer['ArgumentSource'] = $argMap[$rb] }
+        }
         $m.Installer.Restart       = Get-SelectedRadio $rstMap
         $m.Intune.InstallBehavior  = $m.Installer.Context
 
@@ -520,6 +539,43 @@ function Show-PackagingStudio {
         $wi.ScheduledTasks.Tasks   = @(Split-Lines $ui.TxtTasks.Text | ForEach-Object { New-ScheduledTaskEntry -Name $_ })
 
         return $m
+    }
+
+    function Update-ArgumentSourceHint {
+        <#
+            Says where the installer's arguments have to be entered for the
+            selected source, so nobody types the same switches into both
+            Configuration.psd1 and the Intune Program command.
+        #>
+        $source = 'Configuration'
+        foreach ($rb in $argMap.Keys) {
+            if ($ui[$rb].IsChecked) { $source = $argMap[$rb] }
+        }
+
+        $args = [string]$ui.TxtInsArgs.Text
+        $hint = ''
+
+        if ($source -eq 'Configuration') {
+            $hint = 'The arguments above are used at install time. Intune Program command: ' +
+                    'powershell.exe -ExecutionPolicy Bypass -File Install.ps1'
+        }
+        elseif ($source -eq 'Intune') {
+            $example = $args
+            if (-not $example) { $example = '/quiet /norestart' }
+            $hint = 'The arguments above are used for LOCAL TESTING ONLY. Enter them in the Intune ' +
+                    'Program command instead: powershell.exe -ExecutionPolicy Bypass -File Install.ps1 ' +
+                    "-InstallerArguments `"$example`""
+            if ($args -and ($args.Contains('"') -or $args.TrimEnd().EndsWith('\'))) {
+                $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($args))
+                $hint += "  --  These arguments contain a quote or a trailing backslash, which the Windows " +
+                         "command line cannot carry intact. Use: -InstallerArgumentsBase64 $encoded"
+            }
+        }
+        else {
+            $hint = 'The installer is launched with no arguments. The arguments above are kept for local testing only.'
+        }
+
+        $ui.TxtArgSrcHint.Text = $hint
     }
 
     function Update-Psd1Text {
@@ -707,6 +763,11 @@ function Show-PackagingStudio {
             [System.Windows.MessageBox]::Show($_.Exception.Message, 'Save failed', 'OK', 'Error') | Out-Null
         }
     })
+
+    foreach ($argRadio in @('RbArgCfg', 'RbArgIntune', 'RbArgNone')) {
+        $ui[$argRadio].Add_Checked({ Update-ArgumentSourceHint })
+    }
+    $ui.TxtInsArgs.Add_TextChanged({ Update-ArgumentSourceHint })
 
     $ui.BtnValidate.Add_Click({
         Update-Validation | Out-Null

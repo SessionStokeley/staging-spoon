@@ -523,7 +523,7 @@ try {
     Set-WizardAnswers -Answers @(
         '1',                                     # pick the discovered installer
         'Scripted App', 'Scripted Vendor', '3.1', '1',
-        '1', '1', '', '1',                       # context, silent, default args, suppress restart
+        '1', '1', '', '1', '1',                  # context, silent, default args, ArgumentSource=Configuration, suppress restart
         '1', 'C:\Scripted\uninstall.exe', '/S',  # EXE uninstall
         '1', 'C:\Scripted', 'Scripted.exe', 'n', # File detection, no minimum version
         'n',                                     # no environment configuration
@@ -539,12 +539,16 @@ try {
     Test-Assert 'Wizard captured the publisher' ($result.Model.Publisher -eq 'Scripted Vendor')
     Test-Assert 'Wizard captured the version' ($result.Model.Version -eq '3.1')
     Test-Assert 'Wizard used the analyzed silent switches' ($result.Model.Installer.Arguments -eq '/S')
+    Test-Assert 'Wizard recorded the argument source' `
+        ($result.Model.Installer.ArgumentSource -eq 'Configuration') $result.Model.Installer.ArgumentSource
     Test-Assert 'Wizard left Environment disabled' ($result.Model.Environment.Enabled -eq $false)
 
     $reloaded = Import-PowerShellDataFile -Path $out
     Test-Assert 'Generated file is loadable by the engine' ($reloaded.ApplicationName -eq 'Scripted App')
     Test-Assert 'Generated detection matches the answers' `
         ($reloaded.Detection.Path -eq 'C:\Scripted' -and $reloaded.Detection.FileName -eq 'Scripted.exe')
+    Test-Assert 'Generated file carries ArgumentSource' `
+        ($reloaded.Installer.ArgumentSource -eq 'Configuration')
 
     $findings = @(Test-ConfigFile -Path $out -PackageRoot $tmp)
     Test-Assert 'Generated configuration validates cleanly' `

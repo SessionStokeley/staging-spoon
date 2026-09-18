@@ -168,6 +168,15 @@ function Invoke-ConfigurationWizard {
     }
     $model.Installer.Arguments = Read-WizardText -Question 'Install arguments' -Default $suggested -AllowEmpty
 
+    # Which arguments the installer actually receives. Keeping Installer.
+    # Arguments either way means the package always has a reproducible local
+    # test; this only decides what deployment uses.
+    $model.Installer.ArgumentSource = Read-WizardChoice -Question 'Where do the installer arguments come from at install time?' -Options @(
+        @{ Label = 'Configuration.psd1 (the arguments above)'; Value = 'Configuration' }
+        @{ Label = 'The Intune Program command (arguments above are local-test only)'; Value = 'Intune' }
+        @{ Label = 'None - the installer takes no arguments'; Value = 'None' }
+    )
+
     $model.Installer.Restart = Read-WizardChoice -Question 'Restart behavior' -Options @(
         @{ Label = 'Suppress restart'; Value = 'Suppress' }
         @{ Label = 'Allow restart';    Value = 'Allow' }
@@ -503,6 +512,7 @@ function Get-ConfigurationComments {
     return @{
         'Installer'                  = 'How the application is installed.'
         'Installer.Arguments'        = 'Silent switches. Verify these against vendor documentation.'
+        'Installer.ArgumentSource'   = 'Where the installer arguments come from: Configuration, Intune or None.' + [Environment]::NewLine + 'Exactly one source is used - they are never combined.'
         'Uninstaller'                = 'How the application is removed.'
         'Detection'                  = 'What Intune checks to decide the app is installed. Describe the application itself - never PATH or shortcuts.'
         'SuccessExitCodes'           = 'Exit codes treated as success. 3010 means success with a pending reboot.'

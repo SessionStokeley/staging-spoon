@@ -183,9 +183,11 @@ whether each change is actually needed — without writing anything.
 | Install behavior | System |
 | Detection | Custom script: `Detection.ps1` |
 
-See [Uploading to Intune](#uploading-to-intune) for the full portal walkthrough,
-and in particular for **why the installer's own switches do not belong in the
-install command**.
+The install command above is complete for the default `ArgumentSource` of
+`Configuration`, where the installer's switches live in `Configuration.psd1`.
+See [Uploading to Intune](#uploading-to-intune) for the full portal
+walkthrough, and [Where the installer's arguments go](#where-the-installers-arguments-go)
+for when the Intune Program command supplies them instead.
 
 ## Configuration.psd1
 
@@ -195,13 +197,22 @@ All application-specific settings live in one file. The scripts are generic.
 
 ```powershell
 Installer = @{
-    Type      = "EXE"         # EXE or MSI
-    File      = "Setup.exe"   # Filename in Files\ directory
-    Arguments = "/quiet /norestart"
+    Type           = "EXE"         # EXE or MSI
+    File           = "Setup.exe"   # Filename in Files\ directory
+    Arguments      = "/quiet /norestart"
+    ArgumentSource = "Configuration"   # Configuration, Intune, or None
 }
 ```
 
-For MSI, the framework runs `msiexec.exe /i <file> <arguments>`.
+For MSI, the framework runs `msiexec.exe /i "<file>" <arguments>`.
+
+`ArgumentSource` decides where the arguments come from at install time; see
+[Where the installer's arguments go](#where-the-installers-arguments-go).
+`Arguments` is kept in all three modes, because it is what local testing runs.
+
+The type has to match the file. A `.msi` declared as `EXE` is launched directly
+instead of through `msiexec`, which fails in a way that reads like a broken
+installer, so validation rejects the mismatch.
 
 ### Uninstaller
 
@@ -568,6 +579,7 @@ Test-Local.ps1 supports these modes:
 | `Environment` | Validate PATH entries, env vars, duplicates, and state tracking |
 | `Integration` | Report the mode of each Windows integration, whether it is present, and what the package owns |
 | `DryRun` | Run `Install.ps1 -TestMode`: print every planned change, make none |
+| `-ArgumentSource` | Available on `Install` and `DryRun`. Overrides `Installer.ArgumentSource` for this run, so an Intune-configured package can still be tested against its configured arguments |
 | `DryRunUninstall` | Run `Uninstall.ps1 -TestMode` |
 | `DetectPaths` | Scan install directory for CLI executable candidates |
 | `TestCommand` | Resolve and run a command through PATH |
@@ -733,40 +745,133 @@ Upload the resulting `.intunewin` file to Intune.
 
 ## Uploading to Intune
 
-### The one thing people get wrong
+### Where the installer's arguments go
 
-**The install command does not take the installer's switches.**
+The Intune command line launches `Install.ps1`. Whether your installer's own
+switches belong beside it depends on one setting, `Installer.ArgumentSource`:
 
-The Intune command line launches `Install.ps1`. Nothing else. The silent
-switches for your actual installer — `/S`, `/qn`, `/norestart`, `INSTALLDIR=`
-and so on — belong in `Configuration.psd1`, where `Install.ps1` reads them:
+| ArgumentSource | Installer switches go in | Intune Program install command |
+|---|---|---|
+| `Configuration` (default) | `Configuration.psd1` | `powershell.exe -ExecutionPolicy Bypass -File Install.ps1` |
+| `Intune` | the Intune Program command | `powershell.exe -ExecutionPolicy Bypass -File Install.ps1 -InstallerArguments "/quiet /norestart"` |
+| `None` | nowhere | `powershell.exe -ExecutionPolicy Bypass -File Install.ps1` |
+
+**Exactly one source is used.** They are never merged, never appended, and
+never quietly fall back to each other. A package configured for one source that
+is handed the other is refused with a message naming both — because silently
+picking one produces an installer command nobody wrote, and
+`/quiet /norestart /quiet /norestart` is not something an installer forgives.
+
+So the mistake that used to cost a deployment:
+
+```
+# WRONG on a Configuration package - Install.ps1 does not take these,
+# they never reach the installer, and the run is refused.
+powershell.exe -ExecutionPolicy Bypass -File Install.ps1 /qn /norestart
+```
+
+is now caught rather than silently ignored.
+
+### Which source to use
+
+**`Configuration` unless you have a reason.** The package is self-contained:
+what you tested locally is exactly what deploys, and the Intune command is the
+same for every app you ever publish.
 
 ```powershell
-# Configuration.psd1 - this is where the installer's switches go
 Installer = @{
-    Type      = "MSI"
-    File      = "jdk-21.msi"
-    Arguments = '/qn /norestart INSTALLDIR="C:\Program Files\Java\jdk-21"'
+    Type           = "MSI"
+    File           = "jdk-21.msi"
+    Arguments      = '/qn /norestart INSTALLDIR="C:\Program Files\Java\jdk-21"'
+    ArgumentSource = "Configuration"
 }
 ```
 
-| | |
-|---|---|
-| Correct | `powershell.exe -ExecutionPolicy Bypass -File Install.ps1` |
-| Wrong | `powershell.exe -ExecutionPolicy Bypass -File Install.ps1 /qn /norestart` |
-| Wrong | `msiexec /i jdk-21.msi /qn` |
+**`Intune` when the arguments have to differ per deployment** — a licence key
+that differs by site, an install directory that differs by department, or a
+package you do not want to rebuild to change a switch. `Installer.Arguments`
+stays in the configuration and is still what local testing uses; it is simply
+not what deployment uses.
 
-Anything after `-File Install.ps1` is passed to `Install.ps1`, which takes only
-`-TestMode`. Extra arguments are either ignored or make the command fail — and
-either way the switches never reach your installer, so it runs interactively
-under SYSTEM where no one can see it, and the deployment hangs until it times
-out.
+```powershell
+Installer = @{
+    Type           = "EXE"
+    File           = "Setup.exe"
+    Arguments      = "/quiet /norestart"   # local testing only
+    ArgumentSource = "Intune"
+}
+```
 
-The same applies to uninstall: `Uninstaller.Arguments` and
-`Uninstaller.ProductCode` live in `Configuration.psd1`.
+The cost is that the package is no longer self-contained: the arguments live in
+the portal, and a package moved to another tenant arrives without them.
 
-`.\New-IntuneApp.ps1 -Mode DryRun` prints the exact command line your
-configuration produces, so you can confirm the switches before uploading.
+**`None`** for an installer that is silent by default and takes no switches.
+
+### Arguments the Windows command line cannot carry
+
+Windows splits a command line with `CommandLineToArgvW`, where a run of
+backslashes before a quote is halved and `\"` is a literal quote. Two things
+therefore do not survive being typed into the Program command as a quoted
+value:
+
+- a **double quote**, which re-delimits the argument
+- a **trailing backslash**, which escapes the closing quote and swallows the
+  rest of the line
+
+```
+# Breaks: the \" ends the argument early
+-InstallerArguments "INSTALLDIR=C:\Program Files\App\"
+```
+
+This is a property of the Windows command line, not of this framework, and no
+amount of care inside PowerShell repairs it. Use the encoded form instead,
+which contains no quotes, spaces or backslashes:
+
+```
+powershell.exe -ExecutionPolicy Bypass -File Install.ps1 -InstallerArgumentsBase64 SU5TVEFMTERJUj0iQzpcUHJvZ3JhbSBGaWxlc1xBcHAi
+```
+
+`.\New-IntuneApp.ps1 -Mode Summary` prints the correct command for your
+configuration, and chooses the encoded form automatically when the raw one
+would not survive. Validation warns when it would not. Passing both forms is
+refused as ambiguous.
+
+### Testing the real installer locally
+
+Local testing runs the **real** EXE or MSI with real arguments — it is not a
+syntax check.
+
+```powershell
+.\Test-Local.ps1 -Mode Install
+```
+
+prints what it is about to run before running it:
+
+```
+Installer           : Setup.exe
+Installer type      : EXE
+Argument source     : Configuration
+Effective arguments : /quiet /norestart
+Execution           : C:\Build\IntuneApp\Files\Setup.exe /quiet /norestart
+```
+
+A package with `ArgumentSource = "Intune"` has no arguments on this machine —
+they live in the portal. Rather than invent them, the local install refuses and
+tells you how to test with the configured ones:
+
+```powershell
+.\Test-Local.ps1 -Mode Install -ArgumentSource Configuration
+```
+
+That runs the real installer with `Installer.Arguments`, without editing the
+configuration and without ever reaching for production arguments. This is why
+`Installer.Arguments` is kept even when deployment does not use it: it is the
+package's reproducible local test.
+
+Anything that looks like a credential — `PASSWORD=`, `LICENSEKEY=`, `TOKEN=`
+and similar — has its **value** redacted in the log and on screen, keeping the
+argument name so the log still records that it was supplied. The installer
+receives the real value; only the display form is redacted.
 
 ### Portal walkthrough
 
@@ -782,10 +887,14 @@ the portal easier to reconcile with the package.
 
 | Field | Value |
 |---|---|
-| Install command | `powershell.exe -ExecutionPolicy Bypass -File Install.ps1` |
+| Install command | `powershell.exe -ExecutionPolicy Bypass -File Install.ps1` — plus `-InstallerArguments "..."` only when `ArgumentSource` is `Intune` |
 | Uninstall command | `powershell.exe -ExecutionPolicy Bypass -File Uninstall.ps1` |
 | Install behavior | **System** |
 | Device restart behavior | **Determine behavior based on return codes** |
+
+Uninstall arguments always come from `Configuration.psd1`
+(`Uninstaller.Arguments`, or `Uninstaller.ProductCode` for MSI). `ArgumentSource`
+governs installation only, so the uninstall command never takes switches.
 
 `-File Install.ps1` works because the Intune Management Extension sets the
 working directory to the extracted package. `-File .\Install.ps1` is equivalent.
@@ -887,7 +996,10 @@ C:\ProgramData\Company\IntuneApps\<ApplicationName>\Install.log
 |---|---|
 | Install reports success, app never appears | Detection is wrong. It is the only thing Intune trusts |
 | Install reported as failed, app is installed | Same — detection said no afterwards |
-| Deployment hangs, then times out | Silent switches are missing from `Installer.Arguments`, so the installer is waiting for a UI nobody can see |
+| Deployment hangs, then times out | The installer got no silent switches and is waiting for a UI nobody can see. Check `Argument source` in the install log against where you actually entered them |
+| "no installer arguments were passed" | `ArgumentSource` is `Intune` but the Program command has no `-InstallerArguments` |
+| "they are never combined" | `ArgumentSource` is `Configuration` but the Program command also passes arguments. Pick one place |
+| Arguments arrive truncated | A quote or trailing backslash did not survive the command line. Use `-InstallerArgumentsBase64` |
 | "Detection failed after installation" in `Install.log` | The installer succeeded but `Detection` points at the wrong path, key or ProductCode |
 | Exit code not in `SuccessExitCodes` | A code your installer treats as success is missing from `Configuration.psd1` |
 
@@ -905,6 +1017,9 @@ as an administrator rather than as SYSTEM:
 
 Existing configurations continue to work unchanged:
 
+- A configuration with no `Installer.ArgumentSource` behaves exactly as it
+  always has: `Installer.Arguments` is used at install time. The default is
+  `Configuration` precisely so existing packages are unaffected.
 - A configuration with no `Environment` or `WindowsIntegration` section is
   inert. Both features are disabled by default.
 - `WindowsIntegration.<Feature>.Enabled = $true` still means `MANAGE`, which is

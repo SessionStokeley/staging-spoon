@@ -355,10 +355,44 @@ function Get-DeploymentSummary {
 
     $lines += 'INSTALL'
     $lines += "Installer: $(& $get 'Installer.File')"
+
+    $argSource = [string](& $get 'Installer.ArgumentSource')
+    if (-not $argSource) { $argSource = 'Configuration' }
     $installArgs = [string](& $get 'Installer.Arguments')
-    if (-not $installArgs) { $installArgs = '(none)' }
-    $lines += "Arguments: $installArgs"
+
+    $lines += "Argument source: $argSource"
+    if ($argSource -eq 'Configuration') {
+        $shown = $installArgs
+        if (-not $shown) { $shown = '(none)' }
+        $lines += "Arguments: $shown"
+    }
+    elseif ($argSource -eq 'Intune') {
+        $shown = $installArgs
+        if (-not $shown) { $shown = '(none)' }
+        $lines += "Arguments (local testing only): $shown"
+    }
+    else {
+        $lines += 'Arguments: (none - the installer is launched without any)'
+    }
     $lines += "Context: $(& $get 'Installer.Context')"
+
+    $intuneCommand = 'powershell.exe -ExecutionPolicy Bypass -File Install.ps1'
+    if ($argSource -eq 'Intune') {
+        $commandArgs = $installArgs
+        if (-not $commandArgs) { $commandArgs = '/quiet /norestart' }
+        # A quote or a trailing backslash does not survive the Windows command
+        # line, so print the encoded form rather than something that looks
+        # right and silently truncates.
+        if ($commandArgs.Contains('"') -or $commandArgs.TrimEnd().EndsWith('\')) {
+            $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($commandArgs))
+            $intuneCommand += " -InstallerArgumentsBase64 $encoded"
+        }
+        else {
+            $intuneCommand += " -InstallerArguments `"$commandArgs`""
+        }
+    }
+    $lines += "Intune install command: $intuneCommand"
+    $lines += "Intune uninstall command: powershell.exe -ExecutionPolicy Bypass -File Uninstall.ps1"
     $exitCodes = @(& $get 'SuccessExitCodes')
     $lines += "Success exit codes: $($exitCodes -join ', ')"
     $lines += ''

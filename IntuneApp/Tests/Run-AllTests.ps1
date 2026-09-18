@@ -27,6 +27,7 @@ $suites = @(
     @{ Name = 'Lifecycle';    File = 'Test-Lifecycle.ps1';    Covers = 'install/uninstall orchestration' },
     @{ Name = 'Integration';  File = 'Test-Integration.ps1';  Covers = 'Windows integration modes and ownership' },
     @{ Name = 'Detection';    File = 'Test-Detection.ps1';    Covers = 'the Intune detection contract' },
+    @{ Name = 'InstallArgs';  File = 'Test-InstallerArguments.ps1'; Covers = 'the deployment argument model and command construction' },
     @{ Name = 'PS51Compat';   File = 'Test-PS51Compat.ps1';   Covers = 'Windows PowerShell 5.1 compatibility' },
     @{ Name = 'Studio';       File = 'Test-Studio.ps1';       Covers = 'the configuration generator' },
     @{ Name = 'Gui';          File = 'Test-Gui.ps1';          Covers = 'the Studio data layer' },

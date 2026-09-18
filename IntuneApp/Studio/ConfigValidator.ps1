@@ -102,8 +102,61 @@ function Test-ConfigModel {
         & $add 'Error' 'Installer' "Installer.Type '$insType' is not valid." 'Use EXE or MSI.'
     }
 
+    # --- Argument source -------------------------------------------------
+    # Mirrors Resolve-InstallerArguments in Helpers/InstallerArguments.ps1.
+    # The Studio deliberately carries no dependency on the execution engine.
+    $argSource = [string](Get-ModelValue $Model 'Installer.ArgumentSource')
+    if (-not $argSource) { $argSource = 'Configuration' }
+
+    if ($argSource -notin @('Configuration', 'Intune', 'None')) {
+        & $add 'Error' 'Installer' "Installer.ArgumentSource '$argSource' is not valid." 'Use Configuration, Intune or None.'
+    }
+    else {
+        switch ($argSource) {
+            'Configuration' {
+                if ([string]::IsNullOrWhiteSpace($insArgs)) {
+                    & $add 'Warning' 'Installer' 'ArgumentSource is Configuration but Installer.Arguments is empty.' 'A silent installer with no switches waits for a UI that nobody can see under SYSTEM. Set the arguments, or use ArgumentSource = None to say the installer needs none.'
+                }
+                & $add 'Information' 'Installer' 'Installer arguments come from Configuration.psd1.' 'Intune Program command: powershell.exe -ExecutionPolicy Bypass -File Install.ps1'
+            }
+            'Intune' {
+                # The arguments live in the Program command, so the package is
+                # not self-contained. Say exactly what has to be entered there.
+                $exampleArgs = if ($insArgs) { $insArgs } else { '/quiet /norestart' }
+                & $add 'Information' 'Installer' 'Installer arguments come from the Intune Program command.' "Intune Program command: powershell.exe -ExecutionPolicy Bypass -File Install.ps1 -InstallerArguments `"$exampleArgs`""
+
+                if ([string]::IsNullOrWhiteSpace($insArgs)) {
+                    & $add 'Warning' 'Installer' 'ArgumentSource is Intune and Installer.Arguments is empty.' 'Installer.Arguments is still used for local testing. Populating it gives the package a reproducible local test without affecting deployment.'
+                }
+                else {
+                    # Only flag the quoting hazard where it actually bites -
+                    # when the string has to survive the Intune command line.
+                    $risk = @()
+                    if ($insArgs.Contains('"')) {
+                        $risk += 'it contains a double quote, which re-delimits the argument'
+                    }
+                    if ($insArgs.TrimEnd().EndsWith('\')) {
+                        $risk += 'it ends with a backslash, which escapes the closing quote'
+                    }
+                    if ($risk.Count -gt 0) {
+                        & $add 'Warning' 'Installer' "These arguments do not survive the Windows command line intact: $($risk -join ', ')." 'Use -InstallerArgumentsBase64 in the Program command instead. .\New-IntuneApp.ps1 -Mode Summary prints the encoded form.'
+                    }
+                }
+            }
+            'None' {
+                if (-not [string]::IsNullOrWhiteSpace($insArgs)) {
+                    & $add 'Warning' 'Installer' 'ArgumentSource is None, so Installer.Arguments is not used at install time.' 'It is still used by Test-Local.ps1 -Mode Install -ArgumentSource Configuration. Change ArgumentSource if you meant these to run.'
+                }
+                & $add 'Information' 'Installer' 'The installer is launched with no arguments.' 'Confirm it is silent by default, or it will wait for a UI under SYSTEM.'
+            }
+        }
+    }
+
     if ([string]::IsNullOrWhiteSpace($insFile)) {
         & $add 'Error' 'Installer' 'Installer.File is required.' 'Name the installer file inside the Files\ directory.'
+    }
+    elseif ($insType -and $insFile -notmatch '\.(exe|msi)$') {
+        & $add 'Warning' 'Installer' "Installer.File '$insFile' does not end in .exe or .msi." 'Confirm the file name is correct.'
     }
     elseif (-not $SkipFileChecks -and $PackageRoot) {
         $installerPath = Join-Path (Join-Path $PackageRoot 'Files') $insFile
@@ -117,6 +170,19 @@ function Test-ConfigModel {
             $hint = if ($present.Count -gt 0) { "Files\ contains: $($present -join ', ')" }
                     else { 'The Files\ directory is empty.' }
             & $add 'Error' 'Installer' "Installer file does not exist: $insFile" $hint
+        }
+
+        # A .msi declared as EXE is launched directly instead of through
+        # msiexec, which fails in a way that reads like a broken installer.
+        $extension = [System.IO.Path]::GetExtension($insFile)
+        if ($extension -and $insType) {
+            $upperType = $insType.ToUpperInvariant()
+            if ($upperType -eq 'MSI' -and $extension.ToLowerInvariant() -ne '.msi') {
+                & $add 'Error' 'Installer' "Installer.Type is MSI but '$insFile' is not a .msi file." 'msiexec.exe /i only accepts an .msi. Set Type to EXE, or name the .msi.'
+            }
+            if ($upperType -eq 'EXE' -and $extension.ToLowerInvariant() -eq '.msi') {
+                & $add 'Error' 'Installer' "Installer.Type is EXE but '$insFile' is a .msi file." 'An .msi launched directly does not accept silent switches. Set Type to MSI.'
+            }
         }
     }
 

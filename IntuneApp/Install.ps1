@@ -23,10 +23,38 @@
 
     -TestMode performs stages 1 to 3, prints every change the remaining stages
     would make, and exits without touching the machine.
+
+    Installer arguments
+    -------------------
+    Installer.ArgumentSource in Configuration.psd1 decides where the installer's
+    arguments come from: 'Configuration' (the default, and what every older
+    package means), 'Intune' (passed in here from the Program command), or
+    'None'. Exactly one source is authoritative and they are never combined -
+    see Helpers/InstallerArguments.ps1.
+
+    Intune Program command, for ArgumentSource = 'Intune':
+
+        powershell.exe -ExecutionPolicy Bypass -File Install.ps1 ^
+            -InstallerArguments "/quiet /norestart"
+
+    Use -InstallerArgumentsBase64 instead when the arguments contain quotes or
+    end in a backslash, which the Windows command line cannot carry intact.
 #>
 param(
     # Dry run. Validates, resolves paths, and prints the planned changes.
-    [switch]$TestMode
+    [switch]$TestMode,
+
+    # Installer arguments supplied by the caller, for ArgumentSource = 'Intune'.
+    [string]$InstallerArguments = '',
+
+    # The same string, base64-encoded, for arguments the Windows command line
+    # cannot carry as a quoted parameter.
+    [string]$InstallerArgumentsBase64 = '',
+
+    # Overrides Installer.ArgumentSource for this run. Test-Local.ps1 uses it
+    # so a package configured for Intune can still be tested locally.
+    [ValidateSet('', 'Configuration', 'Intune', 'None')]
+    [string]$ArgumentSource = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,7 +62,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 # Load shared helpers
 $helpersDir = Join-Path $ScriptDir 'Helpers'
-foreach ($helper in @('ConfigLoader.ps1', 'Environment.ps1', 'WindowsIntegration.ps1')) {
+foreach ($helper in @('ConfigLoader.ps1', 'InstallerArguments.ps1', 'Environment.ps1', 'WindowsIntegration.ps1')) {
     $helperPath = Join-Path $helpersDir $helper
     if (Test-Path $helperPath) { . $helperPath }
 }
@@ -129,7 +157,6 @@ try {
     Write-Log "Pre-install detection: application present = $alreadyInstalled" $logFile
 
     $installerType = $Config.Installer.Type.ToUpper()
-    $arguments = $Config.Installer.Arguments
 
     if ($installerType -notin @('MSI', 'EXE')) {
         Write-Log "ERROR: Unknown installer type: $installerType" $logFile
@@ -137,14 +164,39 @@ try {
         exit 1
     }
 
+    # Exactly one argument source wins, and a disagreement between the
+    # configuration and what was passed is refused rather than guessed at.
+    $argumentResult = Resolve-InstallerArguments -Config $Config `
+        -Override $ArgumentSource `
+        -IntuneArguments $InstallerArguments `
+        -IntuneArgumentsBase64 $InstallerArgumentsBase64 `
+        -IntuneArgumentsProvided ($PSBoundParameters.ContainsKey('InstallerArguments') -or
+                                  $PSBoundParameters.ContainsKey('InstallerArgumentsBase64'))
+
+    foreach ($warning in @($argumentResult.Warnings)) {
+        Write-Log "NOTE: $warning" $logFile
+    }
+
+    # Everything downstream uses this one command line, so a dry run prints
+    # what will actually run rather than a second rendering of it.
+    $commandLine = New-InstallerCommandLine -Type $installerType `
+        -InstallerPath $installerPath `
+        -Arguments $argumentResult.Arguments `
+        -DisplayArguments $argumentResult.Display
+
+    Write-Log "Installer type   : $installerType" $logFile
+    Write-Log "Installer path   : $installerPath" $logFile
+    Write-Log "Argument source  : $($argumentResult.Source)" $logFile
+    Write-Log "Effective args   : $($argumentResult.Display)" $logFile
+
     # ------------------------------------------------------ Dry run stops here
     if ($TestMode) {
-        if ($installerType -eq 'MSI') {
-            Write-Plan "Would run: msiexec.exe /i `"$installerPath`" $arguments" $logFile
-        }
-        else {
-            Write-Plan "Would run: $installerPath $arguments" $logFile
-        }
+        Write-Host "Installer type   : $installerType"
+        Write-Host "Installer path   : $installerPath"
+        Write-Host "Argument source  : $($argumentResult.Source)"
+        Write-Host "Effective args   : $($argumentResult.Display)"
+        Write-Host ''
+        Write-Plan "Would run: $($commandLine.Display)" $logFile
 
         if ($Config.Environment -and $Config.Environment.Enabled) {
             Install-EnvironmentConfig -Config $Config -LogFile $logFile -DryRun | Out-Null
@@ -167,15 +219,8 @@ try {
     }
 
     # ------------------------------------------------------ 4. Run the installer
-    if ($installerType -eq 'MSI') {
-        $msiArgs = "/i `"$installerPath`" $arguments"
-        Write-Log "Executing: msiexec.exe $msiArgs" $logFile
-        $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow
-    }
-    else {
-        Write-Log "Executing: $installerPath $arguments" $logFile
-        $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait -PassThru -NoNewWindow
-    }
+    Write-Log "Executing: $($commandLine.Display)" $logFile
+    $process = Start-InstallerProcess -CommandLine $commandLine
 
     # ----------------------------------------------------- 5. Check exit code
     $exitCode = $process.ExitCode
@@ -196,7 +241,7 @@ try {
         Write-Log 'ERROR: Detection failed after installation. Application not detected.' $logFile
         exit 1
     }
-    Write-Log 'Detection: Application detected.' $logFile
+    Write-Log 'Detection result : Application detected.' $logFile
 
     # ----------------------------------------- 7 & 8. Environment and PATH
     if ($Config.Environment -and $Config.Environment.Enabled) {

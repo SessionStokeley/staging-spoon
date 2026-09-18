@@ -51,7 +51,15 @@ function New-ConfigModel {
         Installer = [ordered]@{
             Type          = 'EXE'        # EXE or MSI
             File          = ''
+            # Used for local testing, and for deployment when ArgumentSource
+            # is 'Configuration'. Kept either way, so a package always has a
+            # reproducible local test.
             Arguments     = ''
+            # Configuration - Arguments above is authoritative (the default)
+            # Intune        - the Intune Program command supplies them
+            # None          - the installer is launched with no arguments
+            # They are never combined. See Helpers/InstallerArguments.ps1.
+            ArgumentSource = 'Configuration'
             Context       = 'System'     # System or User
             UserInterface = 'Silent'     # Silent, BasicUI, or Interactive
             Restart       = 'Suppress'   # Suppress, Allow, or Prompt
