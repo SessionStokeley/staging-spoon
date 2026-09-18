@@ -574,6 +574,69 @@ try { Read-WizardInput -Prompt 'test' | Out-Null } catch { $threw = $true }
 Clear-WizardAnswers
 Test-Assert 'Exhausted answer queue throws instead of blocking' $threw
 
+Test-Group 'Packaging: a missing IntuneWinAppUtil.exe says where to put it'
+
+# The GUI's Build button shows a dialog and nothing else. Build-IntunePackage
+# writing its guidance to the console is no help there, so the guidance has to
+# travel on the result object. This is the defect that made the dialog a dead
+# end: "IntuneWinAppUtil.exe not found" and no way to act on it.
+
+$searchPaths = @(Get-IntuneWinAppUtilSearchPath)
+Test-Assert 'The search paths are exposed' ($searchPaths.Count -eq 4)
+Test-Assert 'C:\Tools is among them' `
+    (@($searchPaths | Where-Object { $_ -eq 'C:\Tools\IntuneWinAppUtil.exe' }).Count -eq 1)
+
+$guidance = Get-IntuneWinAppUtilGuidance
+Test-Assert 'The guidance names every search path' `
+    (@($searchPaths | Where-Object { $guidance -like "*$_*" }).Count -eq $searchPaths.Count)
+Test-Assert 'The guidance links the download' `
+    ($guidance -match 'Microsoft-Win32-Content-Prep-Tool')
+Test-Assert 'The guidance warns about packaging the tool into the .intunewin' `
+    ($guidance -match 'inside every .intunewin')
+Test-Assert 'The guidance says to restart after a PATH change' `
+    ($guidance -match 'restart the Studio')
+
+# Point it at a path that certainly holds no IntuneWinAppUtil.exe.
+$emptyRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("nowin_" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -Path $emptyRoot -ItemType Directory -Force | Out-Null
+try {
+    $build = Build-IntunePackage -PackageRoot $emptyRoot -OutputPath (Join-Path $emptyRoot 'Output') 6>$null
+
+    Test-Assert 'A missing tool is reported as a failure, not an exception' (-not $build.Success)
+    Test-Assert 'The reason stays short enough for a status line' `
+        ($build.Reason -eq 'IntuneWinAppUtil.exe not found') $build.Reason
+    Test-Assert 'The guidance travels on the result, for the GUI dialog' `
+        ([bool]$build.Guidance -and $build.Guidance -match 'C:\\Tools')
+    Test-Assert 'The result carries the manual command as a fallback' `
+        ($build.Guidance -match 'IntuneWinAppUtil\.exe -c')
+
+    # Studio.ps1 runs under Set-StrictMode, where reading a property that is
+    # not there throws. Every result shape must therefore carry Guidance.
+    $properties = @($build.PSObject.Properties.Name)
+    foreach ($required in @('Success', 'Path', 'Reason', 'Guidance')) {
+        Test-Assert "The build result always carries $required" ($properties -contains $required)
+    }
+}
+finally {
+    Remove-Item $emptyRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# -UtilPath has to be reachable from the entry point, or it may as well not
+# exist: it was a parameter on Build-IntunePackage that nothing could pass.
+$entryUtilSource = Get-Content (Join-Path $AppRoot 'New-IntuneApp.ps1') -Raw
+Test-Assert 'New-IntuneApp.ps1 accepts -UtilPath' ($entryUtilSource -match '\[string\]\$UtilPath')
+Test-Assert 'Build mode forwards -UtilPath' `
+    ($entryUtilSource -match 'Build-IntunePackage[^\r\n]*-UtilPath \$UtilPath')
+Test-Assert 'Gui mode forwards -UtilPath' `
+    ($entryUtilSource -match '(?s)Show-PackagingStudio.{0,120}-UtilPath \$UtilPath')
+
+$studioUtilSource = Get-Content (Join-Path $StudioDir 'Studio.ps1') -Raw
+Test-Assert 'The Studio accepts -UtilPath' ($studioUtilSource -match '\[string\]\$UtilPath')
+Test-Assert 'The Build button forwards -UtilPath' `
+    ($studioUtilSource -match 'Build-IntunePackage[^\r\n]*-UtilPath \$UtilPath')
+Test-Assert 'The Build dialog shows the guidance' `
+    ($studioUtilSource -match '\$build\.Guidance')
+
 # ================================================================= Summary
 Write-Host ''
 Write-Host '========================================' -ForegroundColor Cyan

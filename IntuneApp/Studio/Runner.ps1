@@ -173,6 +173,50 @@ function Test-PackageWorkflow {
     }
 }
 
+function Get-IntuneWinAppUtilSearchPath {
+    <#
+        The fixed locations searched for IntuneWinAppUtil.exe, in order.
+
+        Exposed so the failure message can list exactly where the tool was
+        looked for. Reporting only "not found" leaves the technician with
+        nowhere to go, which is the whole problem this solves.
+    #>
+    return @(
+        (Join-Path $PSScriptRoot 'IntuneWinAppUtil.exe'),
+        (Join-Path (Split-Path -Parent $PSScriptRoot) 'IntuneWinAppUtil.exe'),
+        'C:\Tools\IntuneWinAppUtil.exe',
+        'C:\Program Files\Microsoft\IntuneWinAppUtil.exe'
+    )
+}
+
+function Get-IntuneWinAppUtilGuidance {
+    <#
+        Where to put the tool, as text both the console and the GUI can show.
+    #>
+    $lines = @(
+        'This is the Microsoft Win32 Content Prep Tool. It is not shipped with',
+        'this framework, so a copy has to be somewhere Build can find it.',
+        '',
+        'Download it from:',
+        '  https://github.com/microsoft/Microsoft-Win32-Content-Prep-Tool',
+        '',
+        'Then put it in ONE of these, or anywhere on PATH:'
+    )
+    foreach ($candidate in Get-IntuneWinAppUtilSearchPath) {
+        $lines += "  $candidate"
+    }
+    $lines += ''
+    $lines += 'C:\Tools is the usual choice: no administrator rights, no PATH edit.'
+    $lines += 'Avoid the two package locations above - the tool packages every file'
+    $lines += 'under the folder it is pointed at, so a copy left there is shipped'
+    $lines += 'inside every .intunewin you build.'
+    $lines += ''
+    $lines += 'After changing PATH, restart the Studio: a running process does not'
+    $lines += 'pick up the new value.'
+
+    return ($lines -join [Environment]::NewLine)
+}
+
 function Find-IntuneWinAppUtil {
     <#
         Locates IntuneWinAppUtil.exe on PATH or in common locations.
@@ -187,12 +231,7 @@ function Find-IntuneWinAppUtil {
     $onPath = Get-Command 'IntuneWinAppUtil.exe' -ErrorAction SilentlyContinue
     if ($onPath) { return $onPath.Source }
 
-    foreach ($candidate in @(
-        (Join-Path $PSScriptRoot 'IntuneWinAppUtil.exe'),
-        (Join-Path (Split-Path -Parent $PSScriptRoot) 'IntuneWinAppUtil.exe'),
-        'C:\Tools\IntuneWinAppUtil.exe',
-        'C:\Program Files\Microsoft\IntuneWinAppUtil.exe'
-    )) {
+    foreach ($candidate in Get-IntuneWinAppUtilSearchPath) {
         if (Test-Path -LiteralPath $candidate) { return $candidate }
     }
 
@@ -221,14 +260,28 @@ function Build-IntunePackage {
 
     $util = Find-IntuneWinAppUtil -ExplicitPath $UtilPath
     if (-not $util) {
+        # Guidance travels on the result as well as going to the console: the
+        # GUI's Build button shows a dialog, and a console message it cannot
+        # see is no help at all.
+        $guidance = Get-IntuneWinAppUtilGuidance
+        $manual = "IntuneWinAppUtil.exe -c `"$PackageRoot`" -s $SetupFile -o `"$OutputPath`""
+
         Write-Host ''
-        Write-Host 'IntuneWinAppUtil.exe was not found.' -ForegroundColor Red
-        Write-Host 'Download it from the Microsoft Win32 Content Prep Tool repository,' -ForegroundColor Yellow
-        Write-Host 'then place it on PATH or pass -UtilPath.' -ForegroundColor Yellow
+        Write-Host $guidance -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host 'Or pass the path directly:' -ForegroundColor DarkGray
+        Write-Host '  .\New-IntuneApp.ps1 -Mode Build -UtilPath C:\Tools\IntuneWinAppUtil.exe' -ForegroundColor DarkGray
         Write-Host ''
         Write-Host 'The equivalent manual command is:' -ForegroundColor DarkGray
-        Write-Host "  IntuneWinAppUtil.exe -c `"$PackageRoot`" -s $SetupFile -o `"$OutputPath`"" -ForegroundColor DarkGray
-        return [pscustomobject]@{ Success = $false; Path = $null; Reason = 'IntuneWinAppUtil.exe not found' }
+        Write-Host "  $manual" -ForegroundColor DarkGray
+
+        return [pscustomobject]@{
+            Success  = $false
+            Path     = $null
+            Reason   = 'IntuneWinAppUtil.exe not found'
+            Guidance = $guidance + [Environment]::NewLine + [Environment]::NewLine +
+                       'Or run it by hand:' + [Environment]::NewLine + '  ' + $manual
+        }
     }
 
     if (-not (Test-Path -LiteralPath $OutputPath)) {
@@ -247,7 +300,12 @@ function Build-IntunePackage {
 
     if ($proc.ExitCode -ne 0) {
         Write-Host "IntuneWinAppUtil.exe failed with exit code $($proc.ExitCode)." -ForegroundColor Red
-        return [pscustomobject]@{ Success = $false; Path = $null; Reason = "Exit code $($proc.ExitCode)" }
+        return [pscustomobject]@{
+            Success  = $false
+            Path     = $null
+            Reason   = "IntuneWinAppUtil.exe failed with exit code $($proc.ExitCode)"
+            Guidance = ''
+        }
     }
 
     $built = Get-ChildItem -LiteralPath $OutputPath -Filter '*.intunewin' -ErrorAction SilentlyContinue |
@@ -255,10 +313,15 @@ function Build-IntunePackage {
 
     if ($built) {
         Write-Host "Package built: $($built.FullName)" -ForegroundColor Green
-        return [pscustomobject]@{ Success = $true; Path = $built.FullName; Reason = '' }
+        return [pscustomobject]@{ Success = $true; Path = $built.FullName; Reason = ''; Guidance = '' }
     }
 
-    return [pscustomobject]@{ Success = $false; Path = $null; Reason = 'No .intunewin produced' }
+    return [pscustomobject]@{
+        Success  = $false
+        Path     = $null
+        Reason   = "IntuneWinAppUtil.exe reported success but no .intunewin appeared in $OutputPath"
+        Guidance = ''
+    }
 }
 
 function Show-IntunePortalSettings {

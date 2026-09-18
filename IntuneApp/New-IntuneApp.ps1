@@ -41,6 +41,9 @@
 
         # Start from a profile instead of answering every question
         .\New-IntuneApp.ps1 -Profile Standard
+
+        # Build with IntuneWinAppUtil.exe from a location Build does not search
+        .\New-IntuneApp.ps1 -Mode Build -UtilPath C:\Tools\IntuneWinAppUtil.exe
 #>
 
 [CmdletBinding()]
@@ -60,6 +63,10 @@ param(
     [string]$PackageRoot = '',
 
     [string]$OutputPath = '',
+
+    # Explicit path to IntuneWinAppUtil.exe. Only needed for a copy that is not
+    # on PATH and not in one of the locations Build already searches.
+    [string]$UtilPath = '',
 
     # Skips the interactive approval prompt. Only for automation that has
     # already obtained approval.
@@ -118,7 +125,8 @@ switch ($Mode) {
             exit 1
         }
 
-        Show-PackagingStudio -PackageRoot $PackageRoot -InstallerPath $InstallerPath -ConfigPath $OpenConfig
+        Show-PackagingStudio -PackageRoot $PackageRoot -InstallerPath $InstallerPath `
+            -ConfigPath $OpenConfig -UtilPath $UtilPath
     }
 
     'Analyze' {
@@ -263,7 +271,7 @@ switch ($Mode) {
             exit 1
         }
 
-        $build = Build-IntunePackage -PackageRoot $PackageRoot -OutputPath $OutputPath
+        $build = Build-IntunePackage -PackageRoot $PackageRoot -OutputPath $OutputPath -UtilPath $UtilPath
         if ($build.Success) { Show-IntunePortalSettings -Model $model }
         if (-not $build.Success) { exit 1 }
         exit 0

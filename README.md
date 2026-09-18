@@ -183,6 +183,10 @@ whether each change is actually needed — without writing anything.
 | Install behavior | System |
 | Detection | Custom script: `Detection.ps1` |
 
+See [Uploading to Intune](#uploading-to-intune) for the full portal walkthrough,
+and in particular for **why the installer's own switches do not belong in the
+install command**.
+
 ## Configuration.psd1
 
 All application-specific settings live in one file. The scripts are generic.
@@ -726,6 +730,176 @@ IntuneWinAppUtil.exe -c C:\Build\IntuneApp -s Install.ps1 -o C:\Build\Output
 ```
 
 Upload the resulting `.intunewin` file to Intune.
+
+## Uploading to Intune
+
+### The one thing people get wrong
+
+**The install command does not take the installer's switches.**
+
+The Intune command line launches `Install.ps1`. Nothing else. The silent
+switches for your actual installer — `/S`, `/qn`, `/norestart`, `INSTALLDIR=`
+and so on — belong in `Configuration.psd1`, where `Install.ps1` reads them:
+
+```powershell
+# Configuration.psd1 - this is where the installer's switches go
+Installer = @{
+    Type      = "MSI"
+    File      = "jdk-21.msi"
+    Arguments = '/qn /norestart INSTALLDIR="C:\Program Files\Java\jdk-21"'
+}
+```
+
+| | |
+|---|---|
+| Correct | `powershell.exe -ExecutionPolicy Bypass -File Install.ps1` |
+| Wrong | `powershell.exe -ExecutionPolicy Bypass -File Install.ps1 /qn /norestart` |
+| Wrong | `msiexec /i jdk-21.msi /qn` |
+
+Anything after `-File Install.ps1` is passed to `Install.ps1`, which takes only
+`-TestMode`. Extra arguments are either ignored or make the command fail — and
+either way the switches never reach your installer, so it runs interactively
+under SYSTEM where no one can see it, and the deployment hangs until it times
+out.
+
+The same applies to uninstall: `Uninstaller.Arguments` and
+`Uninstaller.ProductCode` live in `Configuration.psd1`.
+
+`.\New-IntuneApp.ps1 -Mode DryRun` prints the exact command line your
+configuration produces, so you can confirm the switches before uploading.
+
+### Portal walkthrough
+
+**Apps → Windows → Add → Windows app (Win32)**
+
+**1. App package file** — select the `.intunewin` from your `Output` folder.
+
+**2. App information** — Name, Description, Publisher. These are cosmetic and
+do not have to match `Configuration.psd1`, though keeping them the same makes
+the portal easier to reconcile with the package.
+
+**3. Program**
+
+| Field | Value |
+|---|---|
+| Install command | `powershell.exe -ExecutionPolicy Bypass -File Install.ps1` |
+| Uninstall command | `powershell.exe -ExecutionPolicy Bypass -File Uninstall.ps1` |
+| Install behavior | **System** |
+| Device restart behavior | **Determine behavior based on return codes** |
+
+`-File Install.ps1` works because the Intune Management Extension sets the
+working directory to the extracted package. `-File .\Install.ps1` is equivalent.
+
+Adding `-NoProfile` is worth doing on a fleet where machines may have a
+PowerShell profile that writes to the output stream — a profile can otherwise
+interfere with what detection reads:
+
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File Install.ps1
+```
+
+**Install behavior must be System.** It has to match `Installer.Context` in the
+configuration, and the framework's PATH and machine-scope environment changes
+need SYSTEM to write `HKLM`. `Install.ps1` warns in its log when it is not
+running as SYSTEM.
+
+**4. Return codes** — leave the portal defaults alone; they already suit this
+framework. The ones that matter:
+
+| Code | Meaning | Why |
+|---|---|---|
+| `0` | Success | |
+| `3010` | Soft reboot | `Install.ps1` passes `3010` through rather than flattening it to `0`, so Intune can honour the reboot |
+| `1641` | Hard reboot | Emitted by some MSIs |
+| `1618` | Retry | Another installation is already running |
+
+Add any extra success codes your installer uses to **both** the Intune return
+code table and `SuccessExitCodes` in `Configuration.psd1`. The framework checks
+its own list first, so a code missing there fails the install before Intune ever
+sees it.
+
+**5. Requirements** — set Operating system architecture and Minimum operating
+system. These are Intune's own gates and have no equivalent in
+`Configuration.psd1`.
+
+**6. Detection rules** — choose **Use a custom detection script** and upload
+`Detection.ps1` from your package folder.
+
+| Option | Setting | Why |
+|---|---|---|
+| Run script as 32-bit process on 64-bit clients | **No** | A 32-bit detection script has its `HKLM\SOFTWARE` reads redirected to `WOW6432Node`, so registry and MSI detection silently miss a 64-bit application |
+| Enforce script signature check | **No**, unless you sign it | |
+
+Do not add a file or registry detection rule as well. `Detection.ps1` already
+implements whatever `Configuration.psd1` specifies, and a second rule only gives
+you a way to disagree with it.
+
+Upload the script file itself — the portal takes a copy, so re-uploading is
+required whenever `Detection.ps1` or its `Detection` configuration changes.
+
+**7. Dependencies and Supersedence** — optional, and unrelated to this
+framework.
+
+**8. Assignments** — assign to a test group first. Detection is what decides
+whether Intune reports success, so a detection mistake looks like a failed
+install even when the application is on the machine.
+
+### Getting the values out of the package
+
+Both of these print what to type into the portal:
+
+```powershell
+.\New-IntuneApp.ps1 -Mode Summary   # deployment summary, including detection
+.\New-IntuneApp.ps1 -Mode Build     # prints the portal settings after building
+```
+
+The commands themselves come from the `Intune` section of `Configuration.psd1`,
+so if you change them there, change them in the portal too:
+
+```powershell
+Intune = @{
+    InstallBehavior  = "System"
+    InstallCommand   = "powershell.exe -ExecutionPolicy Bypass -File Install.ps1"
+    UninstallCommand = "powershell.exe -ExecutionPolicy Bypass -File Uninstall.ps1"
+    DetectionScript  = "Detection.ps1"
+    RestartBehavior  = "basedOnReturnCode"
+}
+```
+
+### When a deployment fails
+
+The Intune Management Extension log is at:
+
+```
+C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\IntuneManagementExtension.log
+```
+
+This framework writes its own log alongside it, which is usually the more useful
+one because it records each stage by name:
+
+```
+C:\ProgramData\Company\IntuneApps\<ApplicationName>\Install.log
+```
+
+(`Logging.Path` in `Configuration.psd1` sets the parent directory.)
+
+| Symptom | Usual cause |
+|---|---|
+| Install reports success, app never appears | Detection is wrong. It is the only thing Intune trusts |
+| Install reported as failed, app is installed | Same — detection said no afterwards |
+| Deployment hangs, then times out | Silent switches are missing from `Installer.Arguments`, so the installer is waiting for a UI nobody can see |
+| "Detection failed after installation" in `Install.log` | The installer succeeded but `Detection` points at the wrong path, key or ProductCode |
+| Exit code not in `SuccessExitCodes` | A code your installer treats as success is missing from `Configuration.psd1` |
+
+Reproduce locally before re-uploading — this runs the same scripts Intune runs,
+as an administrator rather than as SYSTEM:
+
+```powershell
+.\Test-Local.ps1 -Mode DryRun      # print the planned changes, change nothing
+.\Test-Local.ps1 -Mode Install
+.\Test-Local.ps1 -Mode Detection   # exit 0 means Intune would report installed
+.\Test-Local.ps1 -Mode Uninstall
+```
 
 ## Backward Compatibility
 

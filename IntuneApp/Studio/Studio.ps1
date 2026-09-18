@@ -269,9 +269,14 @@ function Show-PackagingStudio {
 
         .PARAMETER ConfigPath
         Optional existing configuration to open.
+
+        .PARAMETER UtilPath
+        Explicit path to IntuneWinAppUtil.exe, for a copy that is not on PATH
+        and not in one of the locations Build searches.
     #>
     param(
         [string]$PackageRoot = (Get-Location).Path,
+        [string]$UtilPath = '',
         [string]$InstallerPath = '',
         [string]$ConfigPath = ''
     )
@@ -832,13 +837,19 @@ function Show-PackagingStudio {
             return
         }
         try {
-            $build = Build-IntunePackage -PackageRoot $state.PackageRoot
+            $build = Build-IntunePackage -PackageRoot $state.PackageRoot -UtilPath $UtilPath
             if ($build.Success) {
                 [System.Windows.MessageBox]::Show("Package built:`n$($build.Path)", 'Build', 'OK', 'Information') | Out-Null
                 Set-Status "Built $($build.Path)" '#0A0'
             }
             else {
-                [System.Windows.MessageBox]::Show("Build did not complete: $($build.Reason)", 'Build', 'OK', 'Warning') | Out-Null
+                # Build-IntunePackage also writes its guidance to the console,
+                # which nobody using the GUI is looking at. Show it here or the
+                # dialog is a dead end.
+                $message = $build.Reason
+                if ($build.Guidance) { $message = "$($build.Reason)`n`n$($build.Guidance)" }
+                [System.Windows.MessageBox]::Show($message, 'Build did not complete', 'OK', 'Warning') | Out-Null
+                Set-Status $build.Reason '#A60'
             }
         }
         catch {
