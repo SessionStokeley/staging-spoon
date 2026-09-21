@@ -63,183 +63,302 @@ runs on the endpoint.
 
 ---
 
+## Using `New-IntunePackage.ps1`
+
+One command does everything. It keeps track of what stage you are at and offers
+the next step.
+
+```powershell
+cd C:\Packages
+C:\path\to\IntunePackageBuilder\New-IntunePackage.ps1
+```
+
+With no arguments, it shows where you are and what to do next. The argument to
+`-Mode` picks the operation:
+
+| Mode | What it does |
+|---|---|
+| `Where` (default) | Show the current package state and the next command |
+| `New` | Create a new package folder with a starter configuration |
+| `Build` | Generate PackageSource from the configuration |
+| `Test` | Install as SYSTEM, check, and uninstall (needs elevated Windows) |
+| `Status` | Say whether a test result still applies |
+| `Intune` | Print exactly what to enter in the Intune portal |
+| `Pack` | Run Microsoft's `IntuneWinAppUtil.exe` to produce the `.intunewin` |
+
+### Walkthrough
+
+#### 1. Create the package folder
+
+```powershell
+C:\IntunePackageBuilder\New-IntunePackage.ps1 -Mode New `
+    -Path C:\Packages\ExampleTool `
+    -ApplicationName 'Example Tool' `
+    -Publisher 'Example Corp' `
+    -Version 2.1.0
+```
+
+This creates:
+
+```
+C:\Packages\ExampleTool\
+├── Configuration.psd1              you edit this
+└── Installer\                       put the vendor's installer here
+```
+
+#### 2. Add the installer and edit the configuration
+
+Copy the vendor's EXE/MSI/BAT to `Installer\`.
+
+Edit `Configuration.psd1`:
+
+- **`InstallerFile`** — the name the installer will have in the package (e.g.
+  `setup.exe` if the vendor called it `ExampleToolSetup.exe`). The file `Installer\`
+  holds must have this name.
+- **`InstallArguments`** — the vendor's real silent switches, e.g. `/S` or
+  `/quiet /norestart`. These are _never_ guessed or modified; you read the
+  vendor's documentation.
+- **`Detection.Path`** — a file that exists only once the application is
+  installed, e.g. `C:\Program Files\Example Tool\example.exe`. This is what
+  Intune checks to decide the application is already deployed.
+- If `InstallerType` is `MSI`, also set **`ProductCode`** (from `msiexec /i
+  installer.msi /qb` and reading the registry, or from the vendor).
+
+Sanity checks appear when you run `-Mode Where` again:
+
+```powershell
+C:\IntunePackageBuilder\New-IntunePackage.ps1 -Path C:\Packages\ExampleTool
+```
+
+#### 3. Build the package
+
+```powershell
+C:\IntunePackageBuilder\New-IntunePackage.ps1 -Mode Build -Path C:\Packages\ExampleTool
+```
+
+This creates `PackageSource\` with all five files (Install.ps1, Uninstall.ps1,
+Detection.ps1, Configuration.psd1, and your installer). Nothing else goes in
+there — stray files would be archived into the `.intunewin` and deployed to
+every endpoint.
+
+#### 4. Test locally (on an elevated Windows machine you can afford to change)
+
+```powershell
+C:\IntunePackageBuilder\New-IntunePackage.ps1 -Mode Test -Path C:\Packages\ExampleTool
+```
+
+This **installs real software on the machine it runs on**, as `NT AUTHORITY\SYSTEM`.
+It registers a scheduled task, runs Install.ps1, runs the package's own
+Detection.ps1 to verify, runs Uninstall.ps1, re-checks Detection.ps1, and
+removes the task. You must type `test` to confirm — there is no silent mode,
+because silently installing software is a security mistake.
+
+If everything passes:
+
+- The result is recorded against a fingerprint of the configuration and the scripts.
+- Any edits to either will invalidate that result, so you must re-test before packaging.
+
+If a feature stage fails (e.g. "Desktop Shortcut FAIL"), the output goes to
+`LastTest-Install.log` and `LastTest-Uninstall.log` so you can read what went wrong.
+
+#### 5. Print the Intune commands
+
+```powershell
+C:\IntunePackageBuilder\New-IntunePackage.ps1 -Mode Intune -Path C:\Packages\ExampleTool
+```
+
+This shows exactly what to enter in the Intune portal:
+
+- **Install command** — `powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File .\Install.ps1`
+- **Uninstall command** — `powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File .\Uninstall.ps1`
+- **Detection rule** — upload the `Detection.ps1` from PackageSource as a
+  custom detection script
+- **Return codes** — 0 and 3010 (soft reboot)
+
+The install and uninstall commands take **no arguments on purpose.** The
+arguments live inside the package in `Configuration.psd1`. That is what was
+tested locally, so what runs on the endpoint is the same thing — byte for byte.
+
+#### 6. Package for Intune
+
+Get `IntuneWinAppUtil.exe` from
+[github.com/microsoft/Microsoft-Win32-Content-Prep-Tool](https://github.com/microsoft/Microsoft-Win32-Content-Prep-Tool).
+Do NOT put it in the package folder — `IntuneWinAppUtil -c` archives everything
+it finds there, so a copy sitting inside would ship to every managed machine.
+
+```powershell
+C:\IntunePackageBuilder\New-IntunePackage.ps1 -Mode Pack -Path C:\Packages\ExampleTool
+```
+
+This looks for `IntuneWinAppUtil.exe` in:
+
+1. The same directory as `New-IntunePackage.ps1`
+2. The package folder itself (a warning if found — you should move it)
+3. `C:\Tools\`
+
+Or pass `-UtilPath` to specify exactly:
+
+```powershell
+... -Mode Pack -UtilPath 'C:\Downloads\IntuneWinAppUtil.exe'
+```
+
+The result is `PackageSource.intunewin` in an `Output\` folder inside the
+package folder.
+
+---
+
 ## Layout
 
 ```
 IntunePackageBuilder\
+├── New-IntunePackage.ps1          # the one command, covers all modes
 ├── Builder\
-│   ├── Psd1.ps1               # .psd1 reading and writing, 5.1-safe
-│   ├── PackageConfig.ps1      # the flat schema, defaults, entry constructors
-│   ├── Generator.ps1          # splices the runtime, writes the package source
-│   ├── LocalTest.ps1          # SYSTEM-context test and test-state currency
+│   ├── Psd1.ps1                   # .psd1 reading and writing, 5.1-safe
+│   ├── PackageConfig.ps1          # the flat schema, defaults, entry constructors
+│   ├── Generator.ps1              # splices the runtime, writes the package source
+│   ├── LocalTest.ps1              # SYSTEM-context test and test-state currency
 │   └── Templates\
-│       ├── _Runtime.ps1       # the shared runtime spliced into all three
-│       ├── Install.ps1        # template, carries a #<RUNTIME> marker
-│       ├── Uninstall.ps1      # template
-│       └── Detection.ps1      # template
+│       ├── _Runtime.ps1           # the shared runtime spliced into all three
+│       ├── Install.ps1            # template, carries a #<RUNTIME> marker
+│       ├── Uninstall.ps1          # template
+│       └── Detection.ps1          # template
 └── Tests\
-    └── Test-LocalTest.ps1     # fingerprint, invalidation, wrapper, SYSTEM run
+    └── Test-LocalTest.ps1         # fingerprint, invalidation, wrapper, SYSTEM run
 ```
 
 ---
 
-## Building a package
-
-```powershell
-. .\Builder\Psd1.ps1
-. .\Builder\PackageConfig.ps1
-. .\Builder\Generator.ps1
-
-$config = New-PackageConfig
-$config.ApplicationName = 'Example Tool'
-$config.Publisher       = 'Example Corp'
-$config.Version         = '2.1.0'
-$config.InstallerType   = 'EXE'          # EXE, MSI or BAT
-$config.InstallerFile   = 'setup.exe'
-$config.InstallArguments = '/S /norestart'
-$config.Detection = @{
-    Type = 'File'
-    Path = 'C:\Program Files\Example\example.exe'
-    Version = '2.1.0'
-    VersionComparison = 'GreaterThanOrEqual'
-}
-
-New-PackageSource -Config $config `
-                  -InstallerPath 'C:\Downloads\ExampleSetup.exe' `
-                  -OutputPath 'C:\Build\PackageSource'
-
-Test-GeneratedScripts -PackagePath 'C:\Build\PackageSource'
-```
-
-`New-PackageSource` clears the files it previously generated, copies the
-installer in under the name the configuration refers to, and reports anything
-else left in the directory — because `IntuneWinAppUtil` would otherwise archive
-that stray file into every endpoint's package.
-
----
-
-## Configuration
+## Configuration schema
 
 One flat file. No nested `Installer.Arguments` or
 `Environment.SystemPath.Entries`; the previous framework's schema does not load
 here and is not meant to.
 
+### Required fields
+
+| Field | Use |
+|---|---|
+| `ApplicationName` | Name that appears in Intune, logs, and shortcuts |
+| `Publisher` | Your organization's name |
+| `Version` | Application version |
+| `InstallerType` | `EXE`, `MSI`, or `BAT` |
+| `InstallerFile` | The name the installer has in the package |
+| `InstallArguments` | The vendor's silent switches, e.g. `/S` or `/quiet /norestart` |
+| `Detection` | How Intune tells if the app is installed |
+
+If `InstallerType` is `MSI`, also set `ProductCode` (used for uninstall).
+
+### Optional fields
+
+| Field | Default | Purpose |
+|---|---|---|
+| `UninstallArguments` | — | For EXE/BAT uninstallers. MSI uses ProductCode. |
+| `InstallPath` | — | Where the app lands. Used as the default for detection and for shortcut targets. |
+| `SuccessExitCodes` | `@(0, 3010)` | Exit codes that mean success. 3010 means reboot pending. |
+| `RebootBehavior` | `Suppress` | How Intune handles reboots: `Suppress`, `Allow`, or `Force` |
+| `Path` | disabled | Machine or User PATH entry to add |
+| `FileAssociations` | `@()` | File types the app handles, e.g. `.json` |
+| `ContextMenus` | `@()` | Context menu entries, e.g. "Open with Example Tool" |
+| `Shortcuts` | `@()` | Desktop or Start Menu shortcuts |
+| `Logging` | enabled, `C:\ProgramData\IntunePackageBuilder\Logs` | Where the scripts write logs |
+| `Architecture` | `x64` | `x64` or `x86`. Informational for Intune. |
+| `Description` | — | Optional description for the portal |
+
+### Building entries
+
+Use the builder functions from the command line or in your own scripts:
+
 ```powershell
-@{
-    ApplicationName  = 'Example Tool'
-    Publisher        = 'Example Corp'
-    Version          = '2.1.0'
-    Description      = ''
-    Architecture     = 'x64'
+. .\Builder\PackageConfig.ps1
 
-    InstallerType    = 'EXE'                  # EXE | MSI | BAT
-    InstallerFile    = 'setup.exe'
-    InstallArguments = '/S'
-    UninstallArguments = ''
-    ProductCode      = ''                     # required for MSI
-    InstallPath      = 'C:\Program Files\Example'
-    SuccessExitCodes = @(0, 3010)
-    RebootBehavior   = 'Suppress'
+$config = New-PackageConfig
 
-    Path = @{ Enabled = $true; Scope = 'Machine'; Value = 'C:\Program Files\Example' }
+# Add a PATH entry
+$config.Path = @{ Enabled = $true; Scope = 'Machine'; Value = 'C:\Program Files\Example' }
 
-    FileAssociations = @()
-    ContextMenus     = @()
-    Shortcuts        = @()
+# Add shortcuts
+$config.Shortcuts = @(
+    (New-Shortcut -Name 'Example Tool' -Target 'C:\Program Files\Example\example.exe' -Location Desktop),
+    (New-Shortcut -Name 'Example Tool' -Target 'C:\Program Files\Example\example.exe' -Location StartMenu)
+)
 
-    Detection = @{ Type = 'File'; Path = 'C:\Program Files\Example\example.exe'
-                   Version = ''; VersionComparison = 'GreaterThanOrEqual' }
+# Add file associations
+$config.FileAssociations = @(
+    (New-FileAssociation -Extension .json -Executable 'C:\Program Files\Example\example.exe' -SetAsDefault $true)
+)
 
-    Logging = @{ Enabled = $true; Path = 'C:\ProgramData\IntunePackageBuilder\Logs' }
-}
+# Add context menus
+$config.ContextMenus = @(
+    (New-ContextMenu -Name 'Edit with Example' -Command 'C:\Program Files\Example\example.exe "%1"' -Extensions @('.json', '.txt'))
+)
+
+Export-PackageConfig -Config $config -Path 'Configuration.psd1'
 ```
-
-`New-FileAssociation`, `New-ContextMenu` and `New-Shortcut` build the entries for
-the three list fields.
 
 ### Installer types
 
 | Type | How it runs |
 |---|---|
-| `EXE` | started directly, arguments passed as given |
-| `MSI` | `msiexec.exe /i <file>`, uninstalled by `ProductCode` |
-| `BAT` | through `cmd.exe /c call`, so `cmd`'s quote-stripping rule does not eat the path |
+| `EXE` | Started directly, arguments passed as given |
+| `MSI` | `msiexec.exe /i "<file>"`, uninstalled by `ProductCode` |
+| `BAT` | Through `cmd.exe /c call`, so `cmd`'s quote-stripping rule does not eat the path |
 
 ### Detection
 
-`Detection.Type` is `File`, `Folder`, `Registry` or `MSI`. The verdict Intune
-sees comes from that rule and nothing else — never from PATH, shortcuts,
-associations or context menus. Those are configuration the package applies, not
-evidence the application is present, and making the verdict depend on them turns
-a missing shortcut into a reinstall loop.
+`Detection.Type` can be:
 
-A configuration that cannot be read exits non-zero **and** explains itself on
-stderr. Exiting silently would be byte-for-byte what "not installed" looks like.
+| Type | Field | What Intune checks |
+|---|---|---|
+| `File` | `Path` | File exists and (optionally) has a minimum version |
+| `Folder` | `Path` | Folder exists |
+| `Registry` | `Path` | Registry key exists |
+| `MSI` | `ProductCode` | Installer is registered in the Add/Remove Programs list |
+
+The verdict Intune sees comes from the detection rule **and nothing else** — never
+from PATH, shortcuts, associations or context menus. Those are configuration the
+package applies, not evidence the application is present, and making the verdict
+depend on them turns a missing shortcut into a reinstall loop.
 
 ---
 
-## Local testing
+## Script endpoints
+
+For automation or integration with other tools:
 
 ```powershell
 . .\Builder\Psd1.ps1
 . .\Builder\PackageConfig.ps1
+. .\Builder\Generator.ps1
 . .\Builder\LocalTest.ps1
 
-$result = Invoke-LocalPackageTest -PackagePath 'C:\Build\PackageSource'
+# Load and merge a configuration
+$config = Import-PackageConfig -Path 'Configuration.psd1'
+
+# Build the package source directory
+New-PackageSource -Config $config -InstallerPath 'path/to/installer.exe' -OutputPath 'PackageSource'
+
+# Check that the generated scripts are sound
+$check = Test-GeneratedScripts -PackagePath 'PackageSource'
+if (-not $check.Valid) { $check.Errors }
+
+# Run the local test
+$result = Invoke-LocalPackageTest -PackagePath 'PackageSource' -Force
 Write-LocalTestReport -Result $result
-Save-TestResult -PackagePath 'C:\Build\PackageSource' -Result $result
+
+# Record the test result
+Save-TestResult -PackagePath 'PackageSource' -Result $result
+
+# Check if a result is still current
+$state = Test-PackageTestCurrent -PackagePath 'PackageSource'
+if ($state.Current) { "OK to package" }
 ```
-
-This **installs real software on the machine it runs on**. It needs
-administrator rights, and it refuses to run until you type `test` — pass
-`-Force` only from automation that already has approval.
-
-It registers a scheduled task under `\IntunePackageBuilder` whose principal is
-`NT AUTHORITY\SYSTEM`, runs the package, reads the result and unregisters the
-task in a `finally` block whatever happens. Task Scheduler rather than PsExec,
-because it needs nothing installed; the wrapper writes its own exit code to a
-file, because `LastTaskResult` reports the task host's result and is `0` for a
-task that started successfully even when the script inside it failed.
-
-Stages: installer present → install → detection → PATH, associations, context
-menus, shortcuts → uninstall → detection again. Every line comes from the
-package's own `Detection.ps1 -Report`, so the test and the package cannot
-disagree about what "installed" means.
-
-`-SkipUninstall` leaves the application on the machine, which is useful while
-investigating a failure and means the machine is left changed.
-
-### Has this package been tested?
-
-```powershell
-$state = Test-PackageTestCurrent -PackagePath 'C:\Build\PackageSource'
-if (-not $state.Current) { Write-Warning $state.Reason }
-```
-
-`$state.Current` is `$false` when the package was never tested, when the last
-result was not a pass, or when anything changed since that pass.
-
----
-
-## Tests
-
-```powershell
-pwsh -File Tests\Test-LocalTest.ps1
-powershell.exe -ExecutionPolicy Bypass -File Tests\Test-LocalTest.ps1
-```
-
-Assertions needing a capability the host does not have report `SKIP` with the
-reason, and are counted separately from passes — a suite that skipped everything
-has proved nothing.
-
-Off Windows, the SYSTEM execution assertions skip; the fingerprint, invalidation,
-refusal, report-parsing and wrapper-construction assertions all run.
 
 ---
 
 ## What is not here yet
 
-Validation, `.intunewin` packaging, the Intune deployment preview, Installation
-Capture, the UI and package history. Services and scheduled tasks are
-deliberately out of scope — the previous framework managed both, and that
-capability is being dropped rather than carried forward.
+Validation (§25), `.intunewin` packaging (§23), the Intune deployment preview
+(§24), Installation Capture (§13-20), the UI (§31) and package history (§32).
+Services and scheduled tasks are deliberately out of scope — the previous
+framework managed both, and that capability is being dropped rather than
+carried forward.
