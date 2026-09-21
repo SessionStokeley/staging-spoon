@@ -98,114 +98,119 @@ The package is copied to a random directory under `%SystemRoot%\Temp` before
 execution, so any dependency on its build location fails here rather than on a
 device.
 
-## Driving the build from Python
+## Step-by-step usage
 
-Everything the build produces is JSON, so a pipeline can write the config, run
-the build and act on the result. This is the usual approach when packaging many
-applications from one source of truth, or when the build runs in CI.
+### Phase 1: Prepare your source folder
 
-```python
-#!/usr/bin/env python3
-"""Build an Intune package and report the result."""
+Copy the templates from `templates/` into a new folder called `source/`:
 
-import json
-import shutil
-import subprocess
-import sys
-from pathlib import Path
+```
+source/
+  Setup.exe          ← your vendor installer (rename to match SourceInstaller)
+  Install.ps1        ← copy from templates/, edit the variables at the top
+  Uninstall.ps1      ← copy from templates/, edit the variables at the top
+  Detection.ps1      ← copy from templates/, edit the variables at the top
+```
 
-REPO = Path(__file__).resolve().parent
-BUILD = REPO / "build"
+Edit each script to set the application-specific variables:
+- **Install.ps1**: Set `$InstallerName` to the name of your vendor installer and `$InstallerArguments` to the flags it needs.
+- **Uninstall.ps1**: Set `$DisplayName` or `$ProductCode` to match what the installer registers.
+- **Detection.ps1**: Set `$DisplayName` and `$ExpectedVersion` to identify your installed application.
 
-CONFIG = {
-    "ApplicationName": "Contoso Reader",
-    "ApplicationVersion": "4.2.1",
-    "PackageVersion": "1.0.0",
-    "InstallerType": "EXE",
-    "SourceInstaller": "Setup.exe",
-    "InstallCommand": 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\\Install.ps1"',
-    "UninstallCommand": 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\\Uninstall.ps1"',
-    "DetectionMethod": "Script",
-    "DetectionScript": "Detection.ps1",
-    "InstallBehavior": "System",
-    "Architecture": "x64",
-    "ExpectedExitCodes": [0, 1641, 3010],
-    "RebootBehavior": "BasedOnReturnCode",
+### Phase 2: Write your config
+
+Copy `examples/package.example.json` to `package.json` at the root of your repo and edit it:
+
+```json
+{
+  "ApplicationName": "Your App",
+  "ApplicationVersion": "1.0.0",
+  "PackageVersion": "1.0.0",
+  "InstallerType": "EXE",
+  "SourceInstaller": "Setup.exe",
+  "InstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \".\\Install.ps1\"",
+  "UninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \".\\Uninstall.ps1\"",
+  "DetectionMethod": "Script",
+  "DetectionScript": "Detection.ps1",
+  "InstallBehavior": "System",
+  "Architecture": "x64",
+  "ExpectedExitCodes": [0, 1641, 3010],
+  "RebootBehavior": "BasedOnReturnCode",
+  "PostInstallExpectation": {
+    "File": ["C:\\Program Files\\YourVendor\\App\\App.exe"],
+    "UninstallDisplayName": ["Your App*"],
+    "RegistryKey": ["HKLM:\\SOFTWARE\\YourVendor\\App"]
+  }
 }
-
-
-def read_json(path):
-    # PowerShell writes a BOM, so decode with utf-8-sig.
-    if not path.is_file():
-        return None
-    return json.loads(path.read_text(encoding="utf-8-sig"))
-
-
-def build(source, config):
-    powershell = shutil.which("pwsh") or shutil.which("powershell")
-    if powershell is None:
-        sys.exit("PowerShell not found.")
-
-    config_path = REPO / "package.json"
-    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-
-    completed = subprocess.run([
-        powershell, "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", str(REPO / "src" / "Build" / "Build-IntunePackage.ps1"),
-        "-SourcePath", str(source),
-        "-ConfigPath", str(config_path),
-        "-OutputPath", str(BUILD),
-        "-SystemContext",
-    ], cwd=REPO)
-
-    return (
-        completed.returncode,
-        read_json(BUILD / "TestResults" / "ValidationResult.json"),
-        read_json(BUILD / "IntuneConfiguration.json"),
-    )
-
-
-exit_code, validation, intune = build(REPO / "source", CONFIG)
-
-if validation:
-    for stage in validation["Stages"]:
-        print(f"  {stage['Result']:<10} {stage['Name']}")
-
-if exit_code == 0 and intune:
-    program = intune["ProgramInformation"]
-    print("\nPRODUCTION READY - enter these values in Intune:")
-    print(f"  Install command   : {program['InstallCommand']}")
-    print(f"  Uninstall command : {program['UninstallCommand']}")
-    print(f"  Install behavior  : {program['InstallBehavior']}")
-    print(f"  Restart behavior  : {program['DeviceRestartBehavior']}")
-    print(f"  SHA256            : {intune['Package']['PackageHash']}")
-else:
-    print("\nNOT PRODUCTION READY")
-    if validation and validation.get("Classification"):
-        print(f"  {validation['Classification']['Classification']}")
-        print(f"  {validation['Classification']['Reason']}")
-
-sys.exit(exit_code)
 ```
 
-Output on success:
+The **InstallCommand** and **UninstallCommand** you enter here are the exact strings that will be tested and later pasted into Intune. They are not generated — write them once, test them once, use them everywhere.
 
-```
-  PASS       Install
-  PASS       Detection after install
-  PASS       Uninstall
-  PASS       Detection after uninstall
+### Phase 3: Run the build
 
-PRODUCTION READY - enter these values in Intune:
-  Install command   : powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Install.ps1"
-  Uninstall command : powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Uninstall.ps1"
-  Install behavior  : System
-  Restart behavior  : basedOnReturnCode
-  SHA256            : 9F2C1AD4E7B8
+Run this PowerShell command from the repository root:
+
+```powershell
+.\src\Build\Build-IntunePackage.ps1 `
+    -SourcePath .\source `
+    -ConfigPath .\package.json `
+    -IntuneWinAppUtilPath .\tools\IntuneWinAppUtil.exe `
+    -SystemContext
 ```
 
-A fuller version, including failure-report handling, is in
-`examples/build_package.py`.
+Requirements:
+- **Run elevated** (as Administrator). The `-SystemContext` switch executes every stage as `NT AUTHORITY\SYSTEM`, which is how Intune runs a System-context app. Running as Administrator is not sufficient.
+- **IntuneWinAppUtil.exe** must be available. Download it from Microsoft's Intune app packaging toolkit.
+- **Windows with PowerShell 5.1 or later** (or PowerShell 7+).
+
+The script will:
+1. Validate your package configuration and scripts
+2. Run the 10-stage deployment validation
+3. Create the `.intunewin` file only if all stages pass
+4. Generate configuration and report files in `build/`
+
+Exit code: **0** means PRODUCTION READY, **1** means validation failed.
+
+### Phase 4: Review the output
+
+Check `build/IntuneConfiguration.md`:
+
+```
+ApplicationName       : Contoso Reader
+ApplicationVersion    : 4.2.1
+PackageVersion        : 1.0.0
+InstallCommand        : powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Install.ps1"
+UninstallCommand      : powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Uninstall.ps1"
+DetectionScript       : Detection.ps1
+InstallBehavior       : System
+Restart Behavior      : basedOnReturnCode
+PackageHash (SHA256)  : 9F2C1AD4E7B8
+Result                : PRODUCTION READY
+```
+
+If the result is anything other than **PRODUCTION READY**, do not ship the package. Open `build/FailureReport.md` for details on what failed.
+
+### Phase 5: Enter values in Intune
+
+Copy the exact values from `IntuneConfiguration.md` into your Intune admin console:
+- **Install command**: Copy from InstallCommand
+- **Uninstall command**: Copy from UninstallCommand
+- **Install behavior**: Copy from InstallBehavior
+- **Restart behavior**: Copy from Restart Behavior
+- **Detection script**: Copy the content of the Detection.ps1 script
+- **Run as 32-bit**: Set based on your application's requirements
+
+The `.intunewin` file is in `build/` ready to upload.
+
+### Integrating with CI/CD
+
+Everything the build produces is JSON (`build/IntuneConfiguration.json`, `build/TestResults/ValidationResult.json`), so your CI/CD pipeline can:
+1. Write `package.json` from your application inventory
+2. Invoke the PowerShell build script
+3. Parse the JSON output to report results
+4. Upload the `.intunewin` to your package repository
+
+Example: write your config, invoke the build with `subprocess` or shell, then read `build/TestResults/ValidationResult.json` to check `IsProductionReady` (boolean) before proceeding.
 
 ## Detection contract
 
