@@ -628,6 +628,31 @@ Reproduce first, fix second, rebuild third.
 
 ## Common problems
 
+### Install fails with exit 1 and nothing obvious in the summary
+
+Exit 1 from the wrapper usually means the wrapper itself stopped before the
+vendor installer ever started. Open the `## Output` section of
+`build\TestResults\FailureReport.md` — the wrapper logs every step, so the last
+line before the failure names the cause. The same lines are in
+`%ProgramData%\IntuneDeployment\Logs`.
+
+The most common cause is `$InstallerName` in `Install.ps1` still holding the
+template default `Setup.exe` while the package ships something else, such as
+`ideaIU-262.9437.185.exe`. The wrapper cannot find it and stops. Pre-build
+validation now checks this against the manifest and blocks the build, so the
+message to look for is:
+
+```
+[FAIL] Install.ps1 targets the packaged installer
+       Install.ps1 sets $InstallerName = 'Setup.exe' but the package ships '<your installer>'
+```
+
+The second most common cause is `$InstallerArguments`. The template ships
+`@('/S', '/v/qn')`, which is a placeholder, not a universal switch set — `/S`
+is NSIS and `/v/qn` is InstallShield. Replace it with the switches your
+vendor documents. Exit 1 from a vendor installer given switches it does not
+understand is common.
+
 ### The installer works manually but fails through Intune
 
 Almost always context. Re-run validation with `-SystemContext`; if it fails

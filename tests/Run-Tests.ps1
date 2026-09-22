@@ -208,6 +208,26 @@ Test-Case 'clean package can build' $cleanResult.CanBuild ($cleanResult.Errors -
 $cleanWarnings = @($cleanResult.Checks | Where-Object { -not $_.Passed } | ForEach-Object { $_.Name })
 Test-Case 'clean package warns about nothing' ($cleanWarnings.Count -eq 0) ($cleanWarnings -join ', ')
 
+# An install wrapper left pointing at a different file throws before the vendor
+# installer starts, and reports only a bare exit 1 after a full cycle has run.
+Test-Case 'wrapper installer name read' (
+    (Get-WrapperInstallerReference -ScriptPath (Join-Path $clean 'Install.ps1')).InstallerName -eq 'Setup.exe'
+)
+Test-Case 'computed installer name not guessed' (
+    -not (Get-WrapperInstallerReference -ScriptPath (Join-Path $clean 'Detection.ps1')).Declared
+)
+
+$mismatchManifest = $manifest.PSObject.Copy()
+$mismatchManifest.SourceInstaller = 'ideaIU-262.9437.185.exe'
+'binary' | Set-Content -LiteralPath (Join-Path $clean 'ideaIU-262.9437.185.exe')
+
+$mismatchResult = Invoke-PreBuildValidation -SourcePath $clean -Manifest $mismatchManifest
+$mismatchCheck = @($mismatchResult.Checks | Where-Object { $_.Name -eq 'Install.ps1 targets the packaged installer' })
+Test-Case 'installer name mismatch blocks build' (-not $mismatchCheck[0].Passed) $mismatchCheck[0].Detail
+Test-Case 'mismatch stops the build'             (-not $mismatchResult.CanBuild)
+
+Remove-Item -LiteralPath (Join-Path $clean 'ideaIU-262.9437.185.exe') -Force
+
 '$DisplayName = "Contoso"; exit 0' | Set-Content -LiteralPath (Join-Path $clean 'Detection.ps1')
 $detectionOnly = Invoke-PreBuildValidation -SourcePath $clean -Manifest $manifest
 $scriptRootCheck = @($detectionOnly.Checks | Where-Object { $_.Name -eq 'Scripts resolve content from $PSScriptRoot' })
