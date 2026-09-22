@@ -35,7 +35,7 @@ function Format-InformationValue {
         "$Value"
     }
 
-    if ($text.Length -gt $MaximumLength) { return $text.Substring(0, $MaximumLength - 1) + '…' }
+    if ($text.Length -gt $MaximumLength) { return $text.Substring(0, $MaximumLength - 1) + '...' }
     $text
 }
 
@@ -277,7 +277,7 @@ function Show-InformationReview {
     param([Parameter(Mandatory)][PSCustomObject]$Review)
 
     Write-Host ''
-    Write-Host '════ Deployment review ════' -ForegroundColor Cyan
+    Write-Host '==== Deployment review ====' -ForegroundColor Cyan
 
     foreach ($entry in $Review.Summary.GetEnumerator()) {
         Write-Host ("  {0,-26} {1}" -f $entry.Key, (Format-InformationValue -Value $entry.Value.Value))
@@ -349,7 +349,7 @@ function Show-InformationInventory {
     $rows = @(Get-InformationInventory -Project $Project -IncludeUnknown:$IncludeUnknown)
 
     Write-Host ''
-    Write-Host '════ Project information ════' -ForegroundColor Cyan
+    Write-Host '==== Project information ====' -ForegroundColor Cyan
     Write-Host ("  {0,-26} {1,-34} {2,-19} {3}" -f 'Field', 'Value', 'Source', 'Status')
 
     foreach ($row in $rows) {

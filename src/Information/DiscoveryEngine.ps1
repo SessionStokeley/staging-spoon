@@ -162,7 +162,7 @@ function Get-InstallerFamily {
 
         # Installer toolkits leave ASCII markers; scanning as Latin-1 keeps
         # byte offsets aligned and avoids UTF-8 decode failures on binaries.
-        $text = [System.Text.Encoding]::Latin1.GetString($buffer, 0, $read)
+        $text = (Get-Latin1Encoding).GetString($buffer, 0, $read)
 
         foreach ($marker in $script:InstallerFamilyMarkers.Keys) {
             if ($text.Contains($marker)) { return $script:InstallerFamilyMarkers[$marker] }
@@ -207,7 +207,7 @@ function Get-MsiProperty {
 
     $properties = @{}
 
-    if (-not $IsWindows) { return $properties }
+    if (-not (Test-WindowsPlatform)) { return $properties }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $properties }
 
     $installer = $null
@@ -253,7 +253,7 @@ function Find-InstalledApplication {
     [CmdletBinding()]
     param([string]$NameLike = '*')
 
-    if (-not $IsWindows) { return @() }
+    if (-not (Test-WindowsPlatform)) { return @() }
 
     $roots = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'

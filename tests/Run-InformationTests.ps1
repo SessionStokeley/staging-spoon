@@ -50,7 +50,7 @@ function New-FakeInstaller {
     }
 
     $content = 'MZ' + ('.' * 128) + $Marker + ('.' * 128)
-    [System.IO.File]::WriteAllBytes($Path, [System.Text.Encoding]::Latin1.GetBytes($content))
+    [System.IO.File]::WriteAllBytes($Path, (Get-Latin1Encoding).GetBytes($content))
     $Path
 }
 

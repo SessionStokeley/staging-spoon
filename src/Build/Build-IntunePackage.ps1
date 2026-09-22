@@ -42,6 +42,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+. (Join-Path $repoRoot 'src\Core\Platform.ps1')
 . (Join-Path $repoRoot 'src\Core\PackageManifest.ps1')
 . (Join-Path $repoRoot 'src\Core\PreBuildValidator.ps1')
 . (Join-Path $repoRoot 'src\Core\CommandParser.ps1')
@@ -161,7 +162,7 @@ if ($SkipValidation) {
 } else {
     Write-Phase 'DEPLOYMENT VALIDATION'
 
-    if (-not $IsWindows -and $PSVersionTable.PSVersion.Major -ge 6) {
+    if (-not (Test-WindowsPlatform)) {
         Stop-Build 'Deployment validation requires Windows. Use -SkipValidation only to produce an unvalidated package.'
     }
 

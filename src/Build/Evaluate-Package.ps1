@@ -26,7 +26,7 @@ $script:warnings = @()
 
 function Write-Check {
     param([string]$Name, [bool]$Passed, [string]$Detail = '')
-    $icon = if ($Passed) { '✓' } else { '✗' }
+    $icon = if ($Passed) { '[ok]' } else { '[!!]' }
     $color = if ($Passed) { 'Green' } else { 'Red' }
     Write-Host "  $icon $Name" -ForegroundColor $color
     if ($Detail) { Write-Host "    $Detail" -ForegroundColor Gray }
@@ -35,13 +35,13 @@ function Write-Check {
 function Add-Error {
     param([string]$Message)
     $script:errors += $Message
-    Write-Host "  ✗ ERROR: $Message" -ForegroundColor Red
+    Write-Host "  [!!] ERROR: $Message" -ForegroundColor Red
 }
 
 function Add-Warning {
     param([string]$Message)
     $script:warnings += $Message
-    Write-Host "  ⚠ WARNING: $Message" -ForegroundColor Yellow
+    Write-Host "  [ ! ] WARNING: $Message" -ForegroundColor Yellow
 }
 
 Write-Host "`n=== Intune Package Evaluator ===" -ForegroundColor Cyan
@@ -197,7 +197,7 @@ if ($hasExpectation) {
         if ($invalidFiles.Count -gt 0) {
             Add-Error "File paths must be absolute (start with C:\): $($invalidFiles -join ', ')"
         } else {
-            Write-Check "  File paths are absolute" $true ($config.PostInstallExpectation.File.Count + " files")
+            Write-Check "  File paths are absolute" $true "$($config.PostInstallExpectation.File.Count) files"
         }
     }
 
@@ -207,13 +207,13 @@ if ($hasExpectation) {
         if ($invalidReg.Count -gt 0) {
             Add-Error "Registry paths must start with HKLM:\ or HKCU:\: $($invalidReg -join ', ')"
         } else {
-            Write-Check "  Registry keys are valid" $true ($config.PostInstallExpectation.RegistryKey.Count + " keys")
+            Write-Check "  Registry keys are valid" $true "$($config.PostInstallExpectation.RegistryKey.Count) keys"
         }
     }
 
     # UninstallDisplayName
     if ($config.PostInstallExpectation.UninstallDisplayName.Count -gt 0) {
-        Write-Check "  Uninstall display name patterns" $true ($config.PostInstallExpectation.UninstallDisplayName.Count + " patterns")
+        Write-Check "  Uninstall display name patterns" $true "$($config.PostInstallExpectation.UninstallDisplayName.Count) patterns"
     }
 } else {
     Add-Warning "PostInstallExpectation is empty or missing - installation won't be validated for completeness"
@@ -223,7 +223,7 @@ if ($hasExpectation) {
 Write-Host "`n=== Summary ===" -ForegroundColor Cyan
 
 if ($script:errors.Count -eq 0) {
-    Write-Host "✓ Configuration is ready for build" -ForegroundColor Green
+    Write-Host "Configuration is ready for build" -ForegroundColor Green
     Write-Host "`nNext steps:"
     Write-Host "  1. Verify all source scripts have been edited with app-specific values"
     Write-Host "  2. Test installation manually: .\source\Install.ps1"
@@ -231,12 +231,12 @@ if ($script:errors.Count -eq 0) {
     Write-Host "     .\src\Build\Build-IntunePackage.ps1 -SourcePath .\source -ConfigPath .\package.json -IntuneWinAppUtilPath .\tools\IntuneWinAppUtil.exe -SystemContext"
 
     if ($script:warnings.Count -gt 0) {
-        Write-Host "`n⚠ Address warnings before production deployment" -ForegroundColor Yellow
+        Write-Host "`nAddress warnings before production deployment" -ForegroundColor Yellow
     }
 
     exit 0
 } else {
-    Write-Host "✗ Configuration has errors" -ForegroundColor Red
+    Write-Host "Configuration has errors" -ForegroundColor Red
     Write-Host "`nFix the above errors and run again."
     exit 1
 }

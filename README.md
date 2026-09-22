@@ -789,11 +789,19 @@ scope:
 - Elevation for `-SystemContext`
 - `IntuneWinAppUtil.exe` to produce the `.intunewin`
 
-Reading the MSI property table and the uninstall registry needs Windows;
-everything else, including the whole information layer, runs anywhere. Both
-suites run on Linux for CI:
+Everything runs on Windows PowerShell 5.1, which is what a packaging
+workstation normally has. Reading the MSI property table and the uninstall
+registry needs Windows; everything else, including the whole information layer,
+runs anywhere. All three suites run on Linux for CI:
 
 ```
-pwsh -NoProfile -File ./tests/Run-Tests.ps1             # validation modules
-pwsh -NoProfile -File ./tests/Run-InformationTests.ps1  # information layer
+pwsh -NoProfile -File ./tests/Run-Tests.ps1               # validation modules
+pwsh -NoProfile -File ./tests/Run-InformationTests.ps1    # information layer
+pwsh -NoProfile -File ./tests/Run-CompatibilityTests.ps1  # 5.1 compatibility
 ```
+
+The compatibility suite scans the source for constructs that work in
+PowerShell 7 but break on 5.1 — `$IsWindows`, `[System.Text.Encoding]::Latin1`,
+`??`, `&&`, non-ASCII console output — because a test run here cannot exercise
+5.1 directly. Use `Test-WindowsPlatform` and `Get-Latin1Encoding` from
+`src/Core/Platform.ps1` instead of the PowerShell 7 equivalents.

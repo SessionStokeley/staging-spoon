@@ -13,6 +13,11 @@
 
 Set-StrictMode -Version Latest
 
+# Platform probing lives in Core because the build orchestrator needs it too.
+# Loading it twice is harmless; leaving it out breaks discovery on Windows
+# PowerShell 5.1, where $IsWindows does not exist.
+. (Join-Path (Split-Path $PSScriptRoot -Parent) 'Core/Platform.ps1')
+
 foreach ($informationModule in @(
     'FieldModel'
     'PathResolver'
