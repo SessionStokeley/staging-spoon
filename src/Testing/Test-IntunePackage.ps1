@@ -54,7 +54,10 @@ function Write-Stage {
         'Skip' { 'Yellow' }
         default { 'Cyan' }
     }
-    Write-Host $Message -ForegroundColor $color
+
+    # Every line is timestamped so that a run which stops making progress
+    # identifies the operation it stopped on, rather than only the stage.
+    Write-Host ('[{0}] {1}' -f (Get-Date -Format 'HH:mm:ss'), $Message) -ForegroundColor $color
 }
 
 function Test-DetectionContract {
@@ -128,7 +131,7 @@ $stages = [System.Collections.Generic.List[PSCustomObject]]::new()
 function Add-Stage {
     param(
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][ValidateSet('PASS', 'FAIL', 'NOT TESTED')][string]$Result,
+        [Parameter(Mandatory)][ValidateSet('PASS', 'FAIL', 'TIMED OUT', 'NOT TESTED')][string]$Result,
         [string]$Command = '',
         [Nullable[int]]$ExitCode = $null,
         [string]$Output = '',
@@ -177,10 +180,17 @@ try {
     Write-Stage "[3/9] Executing install command"
     Write-Stage "      $($manifest.InstallCommand)"
 
+    # The budget is stated before the call and the elapsed time after it, so a
+    # run that stops making progress shows whether it is inside the installer
+    # and how long it has left, rather than only that it stopped.
+    Write-Stage "      Waiting for the installer (timeout ${TimeoutSeconds}s)"
+
     $installResult = Invoke-InContext -CommandLine $manifest.InstallCommand `
                                       -WorkingDirectory $testRoot `
                                       -Context $context `
                                       -TimeoutSeconds $TimeoutSeconds
+
+    Write-Stage ("      Installer returned after {0:n1}s" -f $installResult.Duration.TotalSeconds)
 
     $exitCodeResult = Resolve-InstallerExitCode -VendorExitCode $installResult.ExitCode `
                                                 -SuccessExitCodes @($manifest.ExpectedExitCodes | Where-Object { $_ -notin @(1641, 3010) }) `
@@ -194,10 +204,20 @@ try {
                   -Detail $exitCodeResult.Interpretation -Duration $installResult.Duration
         Write-Stage "      Exit code $($installResult.ExitCode) - $($exitCodeResult.Interpretation)" 'Pass'
     } else {
-        Add-Stage -Name 'Install' -Result 'FAIL' -Command $manifest.InstallCommand `
+        # A stage that ran out of time is reported as such. Recording it as an
+        # ordinary failure loses the one detail that says the package never
+        # finished rather than finished badly.
+        $installStageResult = if ($installResult.TimedOut) { 'TIMED OUT' } else { 'FAIL' }
+        $installDetail = if ($installResult.TimedOut) {
+            "No exit after $TimeoutSeconds seconds; the process was terminated"
+        } else {
+            $exitCodeResult.Interpretation
+        }
+
+        Add-Stage -Name 'Install' -Result $installStageResult -Command $manifest.InstallCommand `
                   -ExitCode $installResult.ExitCode -Output $installOutput `
-                  -Detail $exitCodeResult.Interpretation -Duration $installResult.Duration
-        Write-Stage "      Exit code $($installResult.ExitCode) - $($exitCodeResult.Interpretation)" 'Fail'
+                  -Detail $installDetail -Duration $installResult.Duration
+        Write-Stage "      Exit code $($installResult.ExitCode) - $installDetail" 'Fail'
 
         $failureClassification = Get-FailureClassification -Stage 'Install' `
                                                            -ExitCode $installResult.ExitCode `
@@ -212,7 +232,13 @@ try {
     Start-Sleep -Seconds $DetectionSettleSeconds
 
     Write-Stage "[5/9] Running detection (expecting TRUE)"
-    $detectionCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `".\$($manifest.DetectionScript)`""
+    # Built the same way the packaged commands are: -NonInteractive because
+    # there is no desktop to prompt on, and the path quoted only when it
+    # contains whitespace, since quotes it does not need are stripped unevenly
+    # by anything that re-parses the command line.
+    $detectionRelativePath = "./$($manifest.DetectionScript)"
+    $detectionTarget = if ($detectionRelativePath -match '\s') { "`"$detectionRelativePath`"" } else { $detectionRelativePath }
+    $detectionCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File $detectionTarget"
 
     $detectionResult = Invoke-InContext -CommandLine $detectionCommand `
                                         -WorkingDirectory $testRoot `
@@ -342,7 +368,9 @@ try {
 
 # --- Result ------------------------------------------------------------------
 $allStages = $stages.ToArray()
-$failed    = @($allStages | Where-Object { $_.Result -eq 'FAIL' })
+# A stage that ran out of time did not pass, so it counts as failed for the
+# purpose of blocking the build, while keeping its own result for the report.
+$failed    = @($allStages | Where-Object { $_.Result -in @('FAIL', 'TIMED OUT') })
 $notTested = @($allStages | Where-Object { $_.Result -eq 'NOT TESTED' })
 
 # The golden rule: every stage of the cycle must pass, with none untested.

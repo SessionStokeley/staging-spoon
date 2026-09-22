@@ -75,19 +75,44 @@ New-Item -Path $WorkPath -ItemType Directory -Force | Out-Null
 # --- Path resolution ---------------------------------------------------------
 Write-Host "`nPath resolution"
 
-Test-Case 'forward slashes normalized'   ((ConvertTo-CanonicalPath -Path 'C:/Build/App') -eq 'C:\Build\App')
-Test-Case 'trailing separator stripped'  ((ConvertTo-CanonicalPath -Path 'C:\Build\App\') -eq 'C:\Build\App')
-Test-Case 'dot segments collapsed'       ((ConvertTo-CanonicalPath -Path 'C:\Build\.\A\..\B') -eq 'C:\Build\B')
-Test-Case 'drive root keeps separator'   ((ConvertTo-CanonicalPath -Path 'C:\') -eq 'C:\')
-Test-Case 'UNC prefix preserved'         ((ConvertTo-CanonicalPath -Path '\\srv\share\a.msi') -eq '\\srv\share\a.msi')
-Test-Case 'relative prefix dropped'      ((ConvertTo-CanonicalPath -Path '.\Source\App') -eq 'Source\App')
+# The canonical separator is "/" on every platform, so a path reads the same in
+# the project file, the report and the console, and never acquires the doubled
+# backslashes a Windows path picks up as soon as it is serialised to JSON.
+Test-Case 'backslashes normalized'       ((ConvertTo-CanonicalPath -Path 'C:\Build\App') -eq 'C:/Build/App')
+Test-Case 'forward slashes preserved'    ((ConvertTo-CanonicalPath -Path 'C:/Build/App') -eq 'C:/Build/App')
+Test-Case 'mixed separators normalized'  ((ConvertTo-CanonicalPath -Path 'C:\Build/App\Sub') -eq 'C:/Build/App/Sub')
+Test-Case 'trailing separator stripped'  ((ConvertTo-CanonicalPath -Path 'C:\Build\App\') -eq 'C:/Build/App')
+Test-Case 'dot segments collapsed'       ((ConvertTo-CanonicalPath -Path 'C:\Build\.\A\..\B') -eq 'C:/Build/B')
+Test-Case 'drive root keeps separator'   ((ConvertTo-CanonicalPath -Path 'C:\') -eq 'C:/')
+Test-Case 'UNC prefix preserved'         ((ConvertTo-CanonicalPath -Path '\\srv\share\a.msi') -eq '//srv/share/a.msi')
+Test-Case 'relative prefix dropped'      ((ConvertTo-CanonicalPath -Path '.\Source\App') -eq 'Source/App')
+Test-Case 'forward relative prefix'      ((ConvertTo-CanonicalPath -Path './source/App.exe') -eq 'source/App.exe')
+Test-Case 'spaces preserved in path'     ((ConvertTo-CanonicalPath -Path 'C:\Temp\Test Folder\App.exe') -eq 'C:/Temp/Test Folder/App.exe')
+
+# A value that reached the platform still carrying its serialisation escaping
+# must resolve to the same path, not to one with empty segments in it.
+Test-Case 'escaped separators collapse'  ((ConvertTo-CanonicalPath -Path 'C:\\Users\\Example\\App') -eq 'C:/Users/Example/App')
+Test-Case 'duplicate separators collapse' ((ConvertTo-CanonicalPath -Path 'C://Users//Example') -eq 'C:/Users/Example')
+
+# Every spelling of one location must reach a single canonical value.
+$equivalentPaths = @('C:\Users\Example\App', 'C:\\Users\\Example\\App', 'C:/Users/Example/App', 'C:\Users/Example\App')
+Test-Case 'all spellings agree' (
+    (@($equivalentPaths | ForEach-Object { ConvertTo-CanonicalPath -Path $_ } | Select-Object -Unique)).Count -eq 1
+)
+
+# The execution boundary hands back the host's own spelling.
+$nativeSample = ConvertTo-NativePath -Path 'C:/Users/Example/App'
+Test-Case 'native form matches the host' (
+    $nativeSample -eq $(if (Test-WindowsPlatform) { 'C:\Users\Example\App' } else { 'C:/Users/Example/App' })
+) $nativeSample
+Test-Case 'native round trips to canonical' ((ConvertTo-CanonicalPath -Path $nativeSample) -eq 'C:/Users/Example/App')
 
 # System.IO.Path only honours the running platform's separator, so canonical
 # Windows paths have to be split here or they come back empty off Windows.
-Test-Case 'parent of a nested path'      ((Split-CanonicalPath -Path 'C:\A\B\c.exe') -eq 'C:\A\B')
-Test-Case 'parent at the drive root'     ((Split-CanonicalPath -Path 'C:\c.exe') -eq 'C:\')
+Test-Case 'parent of a nested path'      ((Split-CanonicalPath -Path 'C:\A\B\c.exe') -eq 'C:/A/B')
+Test-Case 'parent at the drive root'     ((Split-CanonicalPath -Path 'C:\c.exe') -eq 'C:/')
 Test-Case 'bare name has no parent'      ((Split-CanonicalPath -Path 'c.exe') -eq '')
-Test-Case 'parent of a UNC path'         ((Split-CanonicalPath -Path '\\srv\share\dir\a.msi') -eq '\\srv\share\dir')
+Test-Case 'parent of a UNC path'         ((Split-CanonicalPath -Path '\\srv\share\dir\a.msi') -eq '//srv/share/dir')
 Test-Case 'UNC share has no parent'      ((Split-CanonicalPath -Path '\\srv\share') -eq '')
 Test-Case 'leaf of a windows path'       ((Get-CanonicalLeaf -Path 'C:\A\B\c.exe') -eq 'c.exe')
 Test-Case 'extension of a windows path'  ((Get-CanonicalExtension -Path 'C:\A\B\c.exe') -eq '.exe')
@@ -97,11 +122,11 @@ Test-Case 'base name drops extension'    ((Get-CanonicalBaseName -Path 'C:\A\B\c
 Test-Case 'absolute path detected'       (Test-AbsolutePath -Path 'C:\Build')
 Test-Case 'relative path detected'       (-not (Test-AbsolutePath -Path 'Source\App'))
 
-Test-Case 'inside project becomes relative' ((ConvertTo-RelativePath -Path 'C:\P\Source\a.exe' -BasePath 'C:\P') -eq 'Source\a.exe')
+Test-Case 'inside project becomes relative' ((ConvertTo-RelativePath -Path 'C:\P\Source\a.exe' -BasePath 'C:\P') -eq 'Source/a.exe')
 Test-Case 'outside project stays absolute'  ((ConvertTo-RelativePath -Path 'D:\X\a.exe' -BasePath 'C:\P') -eq '')
 
 $storable = ConvertTo-StorablePath -Path 'C:\P\Source\a.exe' -ProjectRoot 'C:\P'
-Test-Case 'storable path is relative'    ($storable.StoredPath -eq 'Source\a.exe' -and -not $storable.IsExternal)
+Test-Case 'storable path is relative'    ($storable.StoredPath -eq 'Source/a.exe' -and -not $storable.IsExternal)
 
 $external = ConvertTo-StorablePath -Path 'D:\Shared\a.exe' -ProjectRoot 'C:\P'
 Test-Case 'external path marked'         ($external.IsExternal)
@@ -193,7 +218,8 @@ $resourceRoot = Join-Path $WorkPath 'resources'
 $installerPath = New-FakeInstaller -Path (Join-Path $resourceRoot 'source/Setup.exe')
 
 $reference = New-ResourceReference -Id 'installer.primary' -Path $installerPath -ProjectRoot $resourceRoot
-Test-Case 'reference stores relative path' ($reference.StoredPath -eq 'source\Setup.exe')
+Test-Case 'reference stores relative path' ($reference.StoredPath -eq 'source/Setup.exe')
+Test-Case 'stored path has no backslash'   ($reference.StoredPath -notmatch '\\')
 Test-Case 'reference classifies type'      ($reference.Type -eq 'installer')
 Test-Case 'reference records a hash'       ($reference.SHA256.Length -eq 64)
 
@@ -245,11 +271,19 @@ $rendered = ConvertTo-CommandString -Command $scriptCommand
 # A path without whitespace is rendered unquoted. Quotes it does not need
 # survive into every layer that later re-parses the command line, and cmd.exe
 # strips the outermost pair of a /c string, which leaves the rest unbalanced.
-Test-Case 'script command renders'       ($rendered -eq 'powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File .\Install.ps1') $rendered
+Test-Case 'script command renders'       ($rendered -eq 'powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File ./Install.ps1') $rendered
 Test-Case 'unneeded quotes not emitted'  ($rendered -notmatch '"')
+# The stored command carries no backslash, so it survives JSON, a log and a
+# report without turning into the doubled form that makes a config unreadable.
+Test-Case 'command carries no backslash' ($rendered -notmatch '\\')
 
 $spacedCommand = New-PowerShellScriptCommand -ScriptName 'Install Contoso.ps1'
-Test-Case 'path with spaces is quoted'   ((ConvertTo-CommandString -Command $spacedCommand) -match '-File "\.\\Install Contoso\.ps1"')
+Test-Case 'path with spaces is quoted'   ((ConvertTo-CommandString -Command $spacedCommand) -match '-File "\./Install Contoso\.ps1"')
+
+# A command written before the separator changed still renders canonically.
+Test-Case 'legacy relative prefix converted' (
+    (ConvertTo-CommandString -Command (New-PowerShellScriptCommand -ScriptName '.\Install.ps1')) -eq $rendered
+)
 Test-Case 'generated command is valid'   (Test-StructuredCommand -Command $scriptCommand).IsValid
 
 $roundTrip = ConvertFrom-CommandString -CommandLine $rendered
@@ -272,7 +306,7 @@ Write-Host "`nCapture integration"
 Test-Case 'common directory derived' ((Get-CommonDirectory -Path @(
     'C:\Program Files\Contoso\Reader\Reader.exe'
     'C:\Program Files\Contoso\Reader\lib\core.dll'
-)) -eq 'C:\Program Files\Contoso\Reader')
+)) -eq 'C:/Program Files/Contoso/Reader')
 
 Test-Case 'unrelated files give no root' ((Get-CommonDirectory -Path @('C:\A\x.txt', 'D:\B\y.txt')) -eq '')
 
@@ -280,7 +314,7 @@ Test-Case 'primary executable preferred' ((Select-PrimaryExecutable -Path @(
     'C:\Program Files\Contoso\Reader\unins000.exe'
     'C:\Program Files\Contoso\Reader\Reader.exe'
     'C:\Program Files\Contoso\Reader\bin\helper.exe'
-) -ApplicationName 'Contoso Reader' -InstallLocation 'C:\Program Files\Contoso\Reader') -eq 'C:\Program Files\Contoso\Reader\Reader.exe')
+) -ApplicationName 'Contoso Reader' -InstallLocation 'C:\Program Files\Contoso\Reader') -eq 'C:/Program Files/Contoso/Reader/Reader.exe')
 
 Test-Case 'uninstaller never chosen' ((Select-PrimaryExecutable -Path @(
     'C:\Program Files\App\unins000.exe'
@@ -353,8 +387,8 @@ $delta = New-FakeDelta -Files @(
 
 $capture = Import-CaptureResult -Project $project -Delta $delta
 
-Test-Case 'install location captured' ((Get-ProjectFieldValue -Project $project -Path 'installation.installLocation') -eq 'C:\Program Files\Contoso\Reader')
-Test-Case 'executable captured'       ((Get-ProjectFieldValue -Project $project -Path 'installation.executable') -eq 'C:\Program Files\Contoso\Reader\Reader.exe')
+Test-Case 'install location captured' ((Get-ProjectFieldValue -Project $project -Path 'installation.installLocation') -eq 'C:/Program Files/Contoso/Reader')
+Test-Case 'executable captured'       ((Get-ProjectFieldValue -Project $project -Path 'installation.executable') -eq 'C:/Program Files/Contoso/Reader/Reader.exe')
 Test-Case 'uninstall name captured'   ((Get-ProjectFieldValue -Project $project -Path 'installation.uninstallDisplayName') -eq 'Contoso Reader')
 Test-Case 'product code captured'     ((Get-ProjectFieldValue -Project $project -Path 'installer.productCode') -match '^\{1{8}')
 Test-Case 'PATH change captured'      (@(Get-ProjectFieldValue -Project $project -Path 'installation.machinePath').Count -eq 1)
@@ -433,6 +467,35 @@ Save-ProjectState -Project $project | Out-Null
 $reopened = Initialize-InformationProject -Root $projectRoot
 
 Test-Case 'reopened project keeps fields' ($reopened.Fields.Count -eq $project.Fields.Count)
+
+# A project written before the canonical separator changed must repair itself
+# on load, and must touch only values the catalog declares to be paths.
+$legacyRoot = Join-Path $WorkPath 'legacy'
+New-FakeInstaller -Path (Join-Path $legacyRoot 'source/Setup.exe') | Out-Null
+
+$legacyProject = New-ProjectState -Root $legacyRoot
+Set-ProjectField -Project $legacyProject -Path 'installer.path' -Value 'source\Setup.exe' -Source 'USER_SELECTED' | Out-Null
+Set-ProjectField -Project $legacyProject -Path 'installation.installLocation' -Value 'C:\Program Files\Contoso' -Source 'CAPTURED' | Out-Null
+Set-ProjectField -Project $legacyProject -Path 'installation.registryKeys' -Value @('HKLM:\SOFTWARE\Contoso') -Source 'CAPTURED' | Out-Null
+Set-ProjectField -Project $legacyProject -Path 'deployment.installCommand' -Value 'powershell.exe -File .\Install.ps1' -Source 'PREVIOUS_BUILD' | Out-Null
+$legacyProject.Resources['installer.primary'] = [PSCustomObject]@{ StoredPath = 'source\Setup.exe' }
+
+$rewrittenPaths = @(Update-ProjectPathFormat -Project $legacyProject)
+
+Test-Case 'legacy path field normalized'   ((Get-ProjectFieldValue -Project $legacyProject -Path 'installer.path') -eq 'source/Setup.exe')
+Test-Case 'legacy directory normalized'    ((Get-ProjectFieldValue -Project $legacyProject -Path 'installation.installLocation') -eq 'C:/Program Files/Contoso')
+Test-Case 'legacy resource normalized'     ($legacyProject.Resources['installer.primary'].StoredPath -eq 'source/Setup.exe')
+Test-Case 'migration reports what changed' ($rewrittenPaths.Count -eq 3) ($rewrittenPaths -join ', ')
+
+# Backslashes are legitimate in these, and rewriting them would corrupt the
+# value. Neither is declared a Path or a Directory, so neither is touched.
+Test-Case 'registry key left alone' (
+    @(Get-ProjectFieldValue -Project $legacyProject -Path 'installation.registryKeys')[0] -eq 'HKLM:\SOFTWARE\Contoso'
+)
+Test-Case 'command left alone' (
+    (Get-ProjectFieldValue -Project $legacyProject -Path 'deployment.installCommand') -eq 'powershell.exe -File .\Install.ps1'
+)
+Test-Case 'second migration is a no-op' (@(Update-ProjectPathFormat -Project $legacyProject).Count -eq 0)
 Test-Case 'reopened project asks nothing' (@(Get-PendingPrompt -Project $reopened -Operation 'BuildPackage').Count -eq 0)
 Test-Case 'reopened project keeps decisions' ((Get-Decision -Store $reopened.Evidence -Key 'decision.applyMachinePath').Value -eq $false)
 Test-Case 'reopened project keeps evidence'  (@(Get-Fact -Store $reopened.Evidence -Key 'application.name').Count -ge 1)

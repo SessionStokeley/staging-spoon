@@ -73,7 +73,7 @@ function Get-CommonDirectory {
     $splitPaths = @(
         foreach ($item in $paths) {
             $directory = Split-CanonicalPath -Path $item
-            if ($directory) { , @($directory.TrimEnd('\').Split('\')) }
+            if ($directory) { , @($directory.TrimEnd('/').Split('/')) }
         }
     )
 
@@ -99,7 +99,7 @@ function Get-CommonDirectory {
     # A drive root alone is not an install location.
     if ($common.Count -eq 1 -and $common[0] -match '^[A-Za-z]:$') { return '' }
 
-    $common -join '\'
+    $common -join '/'
 }
 
 function Select-PrimaryExecutable {
@@ -150,7 +150,7 @@ function Select-PrimaryExecutable {
         }
 
         # Shallower paths are more likely to be the entry point.
-        $score -= ($canonical.Split('\').Count)
+        $score -= ($canonical.Split('/').Count)
 
         [PSCustomObject]@{ Path = $canonical; Score = $score }
     }

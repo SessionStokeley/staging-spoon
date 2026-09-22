@@ -78,10 +78,15 @@ function New-PowerShellScriptCommand {
         [string[]]$ScriptArguments = @()
     )
 
-    $relative = if ($ScriptName.StartsWith('.\') -or $ScriptName.StartsWith('.//')) {
+    # "./" rather than ".\": PowerShell accepts either on Windows, and the
+    # forward slash is the one that survives JSON, logs and reports without
+    # becoming the doubled backslash that makes a stored command unreadable.
+    $relative = if ($ScriptName.StartsWith('./')) {
         $ScriptName
+    } elseif ($ScriptName.StartsWith('.\')) {
+        './' + $ScriptName.Substring(2)
     } else {
-        ".\$ScriptName"
+        "./$ScriptName"
     }
 
     # The path is not pre-quoted. Quoting is left to the renderer, which adds

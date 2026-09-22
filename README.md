@@ -231,12 +231,42 @@ running.
 executable plus an argument list and renders the string at the end. Re-parsing
 a command string is where quoting bugs and duplicated switches come from.
 
-**Path canonicalisation is separator-independent.** The platform stores paths
-in Windows form regardless of the host OS. `System.IO.Path` only honours the
-running platform's separator, so `PathResolver.ps1` provides
-`Split-CanonicalPath`, `Get-CanonicalLeaf`, `Get-CanonicalExtension` and
-`Get-CanonicalBaseName`. Using the framework methods on a canonical path
-silently returns empty off Windows.
+**One canonical path format, converted only at the edge.** Every stored and
+displayed path uses forward slashes, on every platform. A single form means a
+path reads identically in `project.json`, the manifest, the HTML report and the
+console, and never acquires the doubled backslashes a Windows path picks up the
+moment it is serialised to JSON. Windows accepts forward slashes throughout its
+filesystem APIs, so this costs nothing at runtime.
+
+```
+ConvertTo-CanonicalPath   any spelling in  ->  C:/Users/Example/App
+ConvertTo-NativePath      canonical in     ->  C:\Users\Example\App  (on Windows)
+```
+
+`ConvertTo-NativePath` is the execution boundary and is called only where a raw
+.NET API or an external process argument genuinely needs the host's spelling.
+`Resolve-Path` serves the same purpose where the provider is already involved.
+Converting at arbitrary points is how a codebase ends up with two
+representations and no rule about which is which, so everything between the
+boundaries stays canonical.
+
+Normalisation is applied only to values the field catalog declares to be a
+`Path` or a `Directory`. Registry keys, command lines, URLs and regular
+expressions all legitimately contain backslashes, and rewriting separators in
+arbitrary strings corrupts them. A project saved in the older format repairs
+itself on load through `Update-ProjectPathFormat`.
+
+`System.IO.Path` honours only the running platform's separator, so
+`PathResolver.ps1` provides `Split-CanonicalPath`, `Get-CanonicalLeaf`,
+`Get-CanonicalExtension` and `Get-CanonicalBaseName`. Using the framework
+methods on a canonical path silently returns empty.
+
+**A completion condition is never "every matching process has exited."**
+`msiexec` runs as the long-lived Windows Installer service, and `setup` and
+`install` are common names, so waiting for a machine-wide name match never goes
+quiet. `Get-InstallerChildProcess` counts a process only when it was absent
+before the installation started, and the wait has its own short budget rather
+than the installer's.
 
 **Failure classification.** `src/Core/FailureClassifier.ps1` maps a failure to
 one of fourteen classifications (`SYSTEM_CONTEXT_FAILURE`, `DETECTION_FAILURE`,

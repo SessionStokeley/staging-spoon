@@ -9,6 +9,67 @@
 
 Set-StrictMode -Version Latest
 
+function Get-InstallerChildProcess {
+    <#
+    .SYNOPSIS
+        Processes that look like a continuation of a specific installation.
+    .DESCRIPTION
+        Matching on process name alone is not a completion condition. msiexec
+        runs as the long-lived Windows Installer service, and "setup" or
+        "install" are common names, so a machine-wide name match never goes
+        quiet and anything waiting on it blocks until its deadline.
+
+        A process counts only when it was not already running before the
+        installation began and did not start before it.
+    .PARAMETER BaselineProcessId
+        Process ids captured before the installer started. These belong to the
+        machine, not to this installation.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string[]]$ProcessName,
+        [int[]]$BaselineProcessId = @(),
+        [AllowNull()][Nullable[datetime]]$StartedAfter = $null,
+        [int[]]$ExcludeProcessId = @()
+    )
+
+    $matched = foreach ($name in $ProcessName) {
+        foreach ($candidate in (Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+            if ($candidate.Id -in $ExcludeProcessId)  { continue }
+            if ($candidate.Id -in $BaselineProcessId) { continue }
+            if ($candidate.HasExited)                 { continue }
+
+            if ($null -ne $StartedAfter) {
+                # StartTime is unreadable for some processes even when
+                # elevated. Those are judged by the baseline alone rather than
+                # being assumed to belong to this installation.
+                $candidateStart = $null
+                try { $candidateStart = $candidate.StartTime } catch { }
+                if ($null -ne $candidateStart -and $candidateStart -lt $StartedAfter) { continue }
+            }
+
+            $candidate
+        }
+    }
+
+    @($matched)
+}
+
+function Get-ProcessBaseline {
+    <#
+    .SYNOPSIS
+        Ids of processes matching the watch names that are already running.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string[]]$ProcessName)
+
+    $ids = foreach ($name in $ProcessName) {
+        Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }
+    }
+
+    @($ids)
+}
+
 function Invoke-TrackedProcess {
     <#
     .SYNOPSIS
@@ -26,8 +87,20 @@ function Invoke-TrackedProcess {
         [string]$WorkingDirectory = $PWD.Path,
         [int]$TimeoutSeconds = 1800,
         [int]$SettleSeconds = 5,
+        [int]$ChildWaitSeconds = 120,
         [string[]]$ChildProcessName = @()
     )
+
+    $watchBaselineNames = if ($ChildProcessName.Count -gt 0) {
+        $ChildProcessName
+    } else {
+        @('msiexec', 'setup', 'install', 'installer')
+    }
+
+    # Captured before the process starts: anything already running belongs to
+    # the machine and must never be waited on.
+    $baselineIds = @(Get-ProcessBaseline -ProcessName $watchBaselineNames)
+    $startedAt   = Get-Date
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName               = $FilePath
@@ -77,9 +150,10 @@ function Invoke-TrackedProcess {
         $process.WaitForExit()
 
         if (-not $timedOut) {
-            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            # Waiting for a handover is a courtesy, not a completion condition,
+            # so it gets its own short budget rather than the installer's.
+            $deadline = (Get-Date).AddSeconds($ChildWaitSeconds)
 
-            # A bootstrapper may have spawned the real installer and exited.
             $watchNames = if ($ChildProcessName.Count -gt 0) {
                 $ChildProcessName
             } else {
@@ -87,12 +161,10 @@ function Invoke-TrackedProcess {
             }
 
             do {
-                $active = @(
-                    foreach ($name in $watchNames) {
-                        Get-Process -Name $name -ErrorAction SilentlyContinue |
-                            Where-Object { $_.Id -ne $processId -and -not $_.HasExited }
-                    }
-                )
+                $active = @(Get-InstallerChildProcess -ProcessName $watchNames `
+                                                      -BaselineProcessId $baselineIds `
+                                                      -StartedAfter $startedAt `
+                                                      -ExcludeProcessId @($processId))
 
                 foreach ($child in $active) {
                     $entry = "$($child.ProcessName) (PID $($child.Id))"
@@ -102,6 +174,10 @@ function Invoke-TrackedProcess {
                 if ($active.Count -eq 0) { break }
                 Start-Sleep -Seconds 2
             } while ((Get-Date) -lt $deadline)
+
+            if ((Get-Date) -ge $deadline) {
+                Write-Verbose "Installer children still running after ${ChildWaitSeconds}s; continuing"
+            }
 
             if ($SettleSeconds -gt 0) {
                 Start-Sleep -Seconds $SettleSeconds

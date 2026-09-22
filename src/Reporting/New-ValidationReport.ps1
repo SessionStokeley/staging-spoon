@@ -35,9 +35,10 @@ function New-ValidationReport {
 
     $stageRows = foreach ($stage in $Result.Stages) {
         $class = switch ($stage.Result) {
-            'PASS' { 'pass' }
-            'FAIL' { 'fail' }
-            default { 'skip' }
+            'PASS'      { 'pass' }
+            'FAIL'      { 'fail' }
+            'TIMED OUT' { 'fail' }
+            default     { 'skip' }
         }
         $duration = if ($stage.Duration -and $stage.Duration.TotalSeconds -gt 0) {
             '{0:n1}s' -f $stage.Duration.TotalSeconds

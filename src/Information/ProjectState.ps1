@@ -383,6 +383,62 @@ function Save-ProjectState {
     $Path
 }
 
+function Update-ProjectPathFormat {
+    <#
+    .SYNOPSIS
+        Brings a project's stored paths into the canonical format.
+    .DESCRIPTION
+        A project written before the canonical separator changed still holds
+        native paths, and nobody should have to repair one by hand. Only values
+        the field catalog declares to be a Path or a Directory are touched:
+        rewriting separators in arbitrary strings would corrupt registry keys,
+        command lines, URLs and regular expressions, all of which legitimately
+        contain backslashes.
+    .OUTPUTS
+        The field and resource paths that were rewritten.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][PSCustomObject]$Project)
+
+    $rewritten = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($path in @($Project.Fields.Keys)) {
+        $definition = Get-FieldDefinition -Path $path
+        if ($null -eq $definition) { continue }
+        if ($definition.Type -notin @('Path', 'Directory')) { continue }
+
+        $field = $Project.Fields[$path]
+        if ($null -eq $field -or $field.Value -isnot [string]) { continue }
+        if ([string]::IsNullOrWhiteSpace($field.Value)) { continue }
+
+        $canonical = ConvertTo-CanonicalPath -Path $field.Value
+        if ($canonical -ne $field.Value) {
+            $field.Value = $canonical
+            $rewritten.Add($path)
+        }
+    }
+
+    foreach ($id in @($Project.Resources.Keys)) {
+        $reference = $Project.Resources[$id]
+        if ($null -eq $reference) { continue }
+        if ($reference.PSObject.Properties.Name -notcontains 'StoredPath') { continue }
+        if ([string]::IsNullOrWhiteSpace($reference.StoredPath)) { continue }
+
+        $canonical = ConvertTo-CanonicalPath -Path $reference.StoredPath
+        if ($canonical -ne $reference.StoredPath) {
+            $reference.StoredPath = $canonical
+            $rewritten.Add("resource:$id")
+        }
+    }
+
+    if ($rewritten.Count -gt 0) {
+        Add-AuditEntry -Store $Project.Evidence -Category 'Operation' -Key 'NormalizePaths' `
+                       -Detail "Rewrote $($rewritten.Count) stored path(s) into canonical form" -Value $null | Out-Null
+    }
+
+    @($rewritten)
+}
+
 function Import-ProjectState {
     <#
     .SYNOPSIS
@@ -434,6 +490,8 @@ function Import-ProjectState {
             $project.Resources[$property.Name] = $property.Value
         }
     }
+
+    Update-ProjectPathFormat -Project $project | Out-Null
 
     $evidenceFile = Join-Path $directory 'evidence.json'
     if (Test-Path -LiteralPath $evidenceFile) {

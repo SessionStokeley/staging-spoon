@@ -215,6 +215,26 @@ rarely type a path, because installers and `IntuneWinAppUtil.exe` are found by
 scanning, and anything else can be passed as a parameter (`-InstallerPath`,
 `-CapturePath`, `-PreviousManifest`).
 
+### How paths are shown
+
+Every path the tool stores or displays uses forward slashes, including on
+Windows:
+
+```
+Project     C:/Users/774641/Downloads/staging-spoon-claude
+Source      C:/Users/774641/Downloads/staging-spoon-claude/source
+Installer   C:/Users/774641/Downloads/staging-spoon-claude/source/Setup.exe
+```
+
+This is the same path Windows would write with backslashes — Windows accepts
+either — and it is what keeps `package.json` readable, because a backslash path
+doubles every separator as soon as it is written to JSON. You will not see
+`C:\\Users\\...` in any file the tool produces.
+
+Generated commands follow the same rule, so the install command reads
+`-File ./Install.ps1`. If you type a path with backslashes it is accepted and
+converted; a project saved by an older version repairs itself when you open it.
+
 ### What the status words mean
 
 Each value the tool holds has a state. You will see these in the review and in
@@ -627,6 +647,37 @@ Reproduce first, fix second, rebuild third.
 ---
 
 ## Common problems
+
+### Validation appears to hang at "[3/9] Executing install command"
+
+The installer finished but the wrapper is still waiting on something. Each line
+is timestamped, so the last one printed tells you where it stopped, and the
+stage states its timeout when it begins.
+
+The usual cause was the wrapper waiting for *any* process named `msiexec`,
+`setup` or `install` to disappear. `msiexec.exe` also runs as the long-lived
+Windows Installer service, so that wait never ended and the stage sat for the
+full installer timeout. `Install.ps1` now waits only for processes that were
+not running before the installation started, and gives up after
+`$ChildWaitSeconds` (120 by default) rather than holding the deployment.
+
+If your installer deliberately leaves a helper or updater running, this is
+expected and no longer blocks anything — the log says so and continues:
+
+```
+[10:44:07] Child processes still running after 120s; continuing without waiting further
+```
+
+To tune it, edit the values at the top of `Install.ps1`:
+
+| Setting | Meaning |
+| --- | --- |
+| `$TimeoutSeconds` | How long the vendor installer itself may take |
+| `$ChildWaitSeconds` | How long to wait for a handover before continuing |
+| `$SettleSeconds` | Quiet period after the installer before detection runs |
+
+A stage that runs out of time is reported as `TIMED OUT` rather than a generic
+failure, so the report distinguishes "never finished" from "finished badly".
 
 ### Install fails with exit 1 and nothing obvious in the summary
 
