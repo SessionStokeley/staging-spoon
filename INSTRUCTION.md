@@ -672,6 +672,18 @@ apply" to the PATH decision. Check `InstallDelta.json` for what was observed
 and `.project\decisions.json` for what you chose. Note that a process started
 before the change will not see the new PATH until it restarts.
 
+### "InstallBehavior=User but this run uses -SystemContext"
+
+The package declares a per-user install, but validation is running as SYSTEM.
+A per-user installer driven as SYSTEM writes into the service account's
+profile, so it can appear to succeed while being invisible to every real user —
+and detection then reports "not installed" on every device.
+
+Decide which is true. If the application installs machine-wide, set
+`InstallBehavior` to `System`. If it genuinely installs per-user, drop
+`-SystemContext` so validation runs in the context Intune will actually use,
+and set the Intune app's install behaviour to User to match.
+
 ### User-specific configuration is missing
 
 Expected. A SYSTEM install cannot write a real user's `HKCU` or `%APPDATA%`.

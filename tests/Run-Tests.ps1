@@ -16,6 +16,7 @@ $ErrorActionPreference = 'Stop'
 
 $repo = Split-Path $PSScriptRoot -Parent
 . (Join-Path $repo 'src/Core/PreBuildValidator.ps1')
+. (Join-Path $repo 'src/Testing/SystemContext.ps1')
 . (Join-Path $repo 'src/Core/FailureClassifier.ps1')
 . (Join-Path $repo 'src/Reporting/Export-IntuneConfiguration.ps1')
 . (Join-Path $repo 'src/Reporting/New-ValidationReport.ps1')
@@ -69,6 +70,95 @@ Test-Case 'non-system drive invalid'    ((Get-PathClassification -Path 'D:\Apps\
 # An all-users shortcut legitimately lives under the Public profile.
 Test-Case 'Public profile not flagged'  ((Get-PathClassification -Path 'C:\Users\Public\Desktop\a.lnk').Classification -ne 'INVALID')
 
+# Paths with spaces must survive extraction intact. Truncating
+# "C:\Program Files\Vendor\App" at the space leaves "C:\Program", which matches
+# no known-good location and warns on essentially every real package.
+$spacedSource = Join-Path $WorkPath 'spaced'
+New-Item -Path $spacedSource -ItemType Directory -Force | Out-Null
+@'
+$ExpectedFile = "C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe"
+$Legacy       = "C:\Program Files (x86)\Vendor\App.exe"
+$Bad          = "C:\Users\jsmith\Desktop\Setup.exe"
+if (Test-Path HKLM:\SOFTWARE\Contoso) { }
+'@ | Set-Content -LiteralPath (Join-Path $spacedSource 'Detection.ps1')
+
+$spacedFindings = @(Find-AbsolutePath -PackagePath $spacedSource)
+
+Test-Case 'Program Files path not truncated' (
+    @($spacedFindings | Where-Object { $_.Path -eq 'C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe' }).Count -eq 1
+) (($spacedFindings | ForEach-Object { $_.Path }) -join ' | ')
+
+Test-Case 'Program Files path is valid' (
+    @($spacedFindings | Where-Object { $_.Path -like 'C:\Program Files\*' -and $_.Classification -ne 'VALID' }).Count -eq 0
+)
+Test-Case 'x86 Program Files is valid' (
+    @($spacedFindings | Where-Object { $_.Path -like '*(x86)*' -and $_.Classification -eq 'VALID' }).Count -eq 1
+)
+Test-Case 'developer path still flagged' (
+    @($spacedFindings | Where-Object { $_.Path -like '*jsmith*' -and $_.Classification -eq 'INVALID' }).Count -eq 1
+)
+Test-Case 'registry path still ignored' (
+    @($spacedFindings | Where-Object { $_.Path -like '*SOFTWARE*' }).Count -eq 0
+)
+
+# --- SYSTEM-context shim -----------------------------------------------------
+# The scheduled task itself needs Windows, but the shim it runs is an ordinary
+# script. Generating and executing one here covers the quoting that previously
+# made every SYSTEM-context stage fail with exit 1 and no output.
+Write-Host "`nSYSTEM-context shim"
+
+Test-Case 'literal escapes apostrophes' ((ConvertTo-PowerShellLiteral -Value "it's") -eq "'it''s'")
+
+$bareCommand = Split-ExecutableCommandLine -CommandLine 'powershell.exe -NoProfile -File ".\Install.ps1"'
+Test-Case 'executable split from arguments' ($bareCommand.Executable -eq 'powershell.exe')
+Test-Case 'arguments kept verbatim'         ($bareCommand.Arguments -eq '-NoProfile -File ".\Install.ps1"')
+
+$quotedCommand = Split-ExecutableCommandLine -CommandLine '"C:\Program Files\App\run.exe" /S /norestart'
+Test-Case 'quoted executable with spaces'   ($quotedCommand.Executable -eq 'C:\Program Files\App\run.exe')
+Test-Case 'arguments after quoted exe'      ($quotedCommand.Arguments -eq '/S /norestart')
+
+$shimWork = Join-Path $WorkPath 'shim'
+New-Item -Path $shimWork -ItemType Directory -Force | Out-Null
+
+$payloadPath = Join-Path $shimWork 'Payload.ps1'
+'Write-Output "ran in $PWD"; exit 3' | Set-Content -LiteralPath $payloadPath -Encoding UTF8
+
+# The running host's own executable: present on both editions, and on Windows
+# its path contains a space, which is the case that used to break.
+$shellPath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+$shimCommand = '"{0}" -NoProfile -NonInteractive -File "{1}"' -f $shellPath, $payloadPath
+
+$stdOutPath   = Join-Path $shimWork 'stdout.log'
+$stdErrPath   = Join-Path $shimWork 'stderr.log'
+$exitCodePath = Join-Path $shimWork 'exitcode.txt'
+$shimPath     = Join-Path $shimWork 'shim.ps1'
+
+$shimText = New-SystemContextShim -CommandLine $shimCommand -WorkingDirectory $shimWork `
+                                  -StdOutPath $stdOutPath -StdErrPath $stdErrPath `
+                                  -ExitCodePath $exitCodePath -TimeoutSeconds 120
+
+# The original defect was a generated script that PowerShell mis-parsed, so the
+# shim must be checked as code rather than only as text.
+$shimTokens = $null
+$shimErrors = $null
+[System.Management.Automation.Language.Parser]::ParseInput($shimText, [ref]$shimTokens, [ref]$shimErrors) | Out-Null
+Test-Case 'generated shim parses'    ($shimErrors.Count -eq 0) ($shimErrors | Select-Object -First 1)
+Test-Case 'shim does not shell out'  ($shimText -notmatch 'cmd\.exe')
+
+Set-Content -LiteralPath $shimPath -Value $shimText -Encoding UTF8
+& $shellPath -NoProfile -File $shimPath | Out-Null
+
+Test-Case 'shim recorded an exit code' (Test-Path -LiteralPath $exitCodePath)
+
+if (Test-Path -LiteralPath $exitCodePath) {
+    $shimExit   = (Get-Content -LiteralPath $exitCodePath -Raw).Trim()
+    $shimOutput = if (Test-Path -LiteralPath $stdOutPath) { Get-Content -LiteralPath $stdOutPath -Raw } else { '' }
+
+    Test-Case 'wrapped exit code preserved' ($shimExit -eq '3') $shimExit
+    Test-Case 'wrapped command produced output' ($shimOutput -match 'ran in') $shimOutput
+    Test-Case 'command ran in the package directory' ($shimOutput -match ([regex]::Escape($shimWork))) $shimOutput
+}
+
 # --- Manifest ----------------------------------------------------------------
 Write-Host "`nManifest"
 
@@ -112,6 +202,16 @@ foreach ($name in @('Install.ps1', 'Uninstall.ps1', 'Detection.ps1')) {
 $manifest.ContentDirectory = $clean
 $cleanResult = Invoke-PreBuildValidation -SourcePath $clean -Manifest $manifest
 Test-Case 'clean package can build' $cleanResult.CanBuild ($cleanResult.Errors -join ' | ')
+
+# A detection script inspects the installed application, not the package, so it
+# has no payload to resolve and must not be reported for lacking $PSScriptRoot.
+$cleanWarnings = @($cleanResult.Checks | Where-Object { -not $_.Passed } | ForEach-Object { $_.Name })
+Test-Case 'clean package warns about nothing' ($cleanWarnings.Count -eq 0) ($cleanWarnings -join ', ')
+
+'$DisplayName = "Contoso"; exit 0' | Set-Content -LiteralPath (Join-Path $clean 'Detection.ps1')
+$detectionOnly = Invoke-PreBuildValidation -SourcePath $clean -Manifest $manifest
+$scriptRootCheck = @($detectionOnly.Checks | Where-Object { $_.Name -eq 'Scripts resolve content from $PSScriptRoot' })
+Test-Case 'detection script exempt from $PSScriptRoot' ($scriptRootCheck[0].Passed) $scriptRootCheck[0].Detail
 
 # --- Pre-build gate: dirty package -------------------------------------------
 Write-Host "`nPre-build gate (dirty package)"

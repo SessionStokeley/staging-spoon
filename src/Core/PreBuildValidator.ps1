@@ -128,9 +128,16 @@ function Invoke-PreBuildValidation {
     }
 
     # --- Path hygiene -------------------------------------------------------
+    $detectionScriptName = if ($Manifest.PSObject.Properties.Name -contains 'DetectionScript' -and $Manifest.DetectionScript) {
+        @(Split-Path -Path $Manifest.DetectionScript -Leaf)
+    } else {
+        @()
+    }
+
     $pathResult = Invoke-PathValidation -PackagePath $resolvedSource `
                                         -InstallBehavior $Manifest.InstallBehavior `
-                                        -AllowedPath $AllowedPath
+                                        -AllowedPath $AllowedPath `
+                                        -ExcludeScript $detectionScriptName
 
     $invalid = @($pathResult.InvalidPaths)
     $checks.Add((New-ValidationCheck -Name 'No invalid absolute paths' -Passed ($invalid.Count -eq 0) `

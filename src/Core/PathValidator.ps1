@@ -130,7 +130,15 @@ function Find-AbsolutePath {
     # The lookbehind stops a registry provider path such as HKLM:\SOFTWARE
     # from matching as drive "M:\". Without it every package that reads the
     # registry would be reported as referencing a non-system drive.
-    $pathRegex = '(?<![A-Za-z0-9_$:])(?:[A-Za-z]:\\|\\\\)(?:[^\s"''<>|*?\r\n]+)'
+    #
+    # A single interior space is part of the path, because the most common
+    # system locations contain one: stopping at whitespace truncates
+    # "C:\Program Files\Vendor\App" to "C:\Program", which then matches no
+    # known-good location and is reported as an unclassified path on virtually
+    # every real package. Runs of two spaces, and a trailing space, end the
+    # match so prose following a path is not swallowed.
+    $pathRegex = '(?<![A-Za-z0-9_$:])(?:[A-Za-z]:\\|\\\\)' +
+                 '(?:[^\s"''<>|*?\r\n;]|(?<![\s]) (?=[^\s"''<>|*?\r\n;$]))+'
 
     $files = Get-ChildItem -LiteralPath $PackagePath -Recurse -File |
              Where-Object { $_.Extension -in $script:ScannableExtensions }
@@ -296,14 +304,19 @@ function Invoke-PathValidation {
     param(
         [Parameter(Mandatory)][string]$PackagePath,
         [ValidateSet('System', 'User')][string]$InstallBehavior = 'System',
-        [string[]]$AllowedPath = @()
+        [string[]]$AllowedPath = @(),
+        [string[]]$ExcludeScript = @()
     )
 
     $absolutePaths    = @(Find-AbsolutePath -PackagePath $PackagePath -AllowedPath $AllowedPath)
     $userDependencies = @(Find-UserProfileDependency -PackagePath $PackagePath -InstallBehavior $InstallBehavior)
     $workingDirectory = @(Find-WorkingDirectoryAssumption -PackagePath $PackagePath)
 
+    # $PSScriptRoot matters for scripts that must find payload shipped beside
+    # them. A detection script inspects the installed application rather than
+    # the package, so requiring it there reports a problem that is not one.
     $scripts = @(Get-ChildItem -LiteralPath $PackagePath -Recurse -File -Filter '*.ps1' |
+                 Where-Object { $_.Name -notin $ExcludeScript } |
                  ForEach-Object { $_.FullName })
     $scriptRoot = if ($scripts.Count -gt 0) { @(Test-ScriptRootUsage -ScriptPath $scripts) } else { @() }
 

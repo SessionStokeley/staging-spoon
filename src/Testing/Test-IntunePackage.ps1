@@ -105,6 +105,16 @@ if ($manifest.InstallBehavior -eq 'System' -and -not $SystemContext) {
     Write-Stage "         Working as Administrator does not prove the package works as SYSTEM." 'Skip'
 }
 
+# The inverse mismatch is the more damaging one: a per-user installer driven as
+# SYSTEM installs into the service account's profile, so it appears to succeed
+# and then cannot be found for any real user.
+if ($manifest.InstallBehavior -eq 'User' -and $SystemContext) {
+    Write-Stage "WARNING: manifest declares InstallBehavior=User but this run uses -SystemContext." 'Skip'
+    Write-Stage "         A per-user installer running as SYSTEM writes to the SYSTEM profile," 'Skip'
+    Write-Stage "         not to any signed-in user. Set InstallBehavior=System, or drop" 'Skip'
+    Write-Stage "         -SystemContext to validate the context Intune will actually use." 'Skip'
+}
+
 if (-not (Test-Path -LiteralPath $OutputPath)) {
     New-Item -Path $OutputPath -ItemType Directory -Force | Out-Null
 }
