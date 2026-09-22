@@ -263,42 +263,62 @@ function Invoke-AsCurrentUser {
         [int]$TimeoutSeconds = 1800
     )
 
-    $workRoot   = Join-Path $env:TEMP "IntuneValidation-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
-    New-Item -Path $workRoot -ItemType Directory -Force | Out-Null
-    $stdOutPath = Join-Path $workRoot 'stdout.log'
-    $stdErrPath = Join-Path $workRoot 'stderr.log'
-
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $timedOut = $false
     $exitCode = 1
 
+    $stdOut = ''
+    $stdErr = ''
+
     try {
-        $process = Start-Process -FilePath 'cmd.exe' `
-                                 -ArgumentList '/c', $CommandLine `
-                                 -WorkingDirectory $WorkingDirectory `
-                                 -RedirectStandardOutput $stdOutPath `
-                                 -RedirectStandardError $stdErrPath `
-                                 -NoNewWindow `
-                                 -PassThru
+        # The command is started directly rather than through cmd.exe. Handing
+        # a command line to "cmd /c" makes cmd strip the outermost pair of
+        # quotes in the string, which turns a correctly quoted argument into an
+        # unbalanced one. The SYSTEM path avoids cmd for the same reason, and
+        # both contexts must execute the command identically or validating one
+        # proves nothing about the other.
+        $command = Split-ExecutableCommandLine -CommandLine $CommandLine
+
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName               = $command.Executable
+        $startInfo.Arguments              = $command.Arguments
+        $startInfo.WorkingDirectory       = $WorkingDirectory
+        $startInfo.UseShellExecute        = $false
+        $startInfo.CreateNoWindow         = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError  = $true
+
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+
+        # Drain both pipes concurrently; reading one to the end first deadlocks
+        # as soon as the process fills the pipe that is not being read.
+        $outTask = $process.StandardOutput.ReadToEndAsync()
+        $errTask = $process.StandardError.ReadToEndAsync()
 
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             $timedOut = $true
-            try { $process.Kill($true) } catch { }
+            try { $process.Kill() } catch { }
             $process.WaitForExit(30000) | Out-Null
             $exitCode = 1460
         } else {
             $exitCode = $process.ExitCode
         }
 
-        $stdOut = if (Test-Path -LiteralPath $stdOutPath) { Get-Content -LiteralPath $stdOutPath -Raw } else { '' }
-        $stdErr = if (Test-Path -LiteralPath $stdErrPath) { Get-Content -LiteralPath $stdErrPath -Raw } else { '' }
+        $stdOut = $outTask.GetAwaiter().GetResult()
+        $stdErr = $errTask.GetAwaiter().GetResult()
     } finally {
         $stopwatch.Stop()
-        Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
+    # The context label is reporting detail. Failing to read it must not
+    # discard an execution result that was obtained successfully.
+    $context = try {
+        $identity  = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
+        if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { 'Administrator' } else { 'User' }
+    } catch {
+        'Unknown'
+    }
 
     [PSCustomObject]@{
         CommandLine = $CommandLine
@@ -307,7 +327,7 @@ function Invoke-AsCurrentUser {
         StdErr      = if ($stdErr) { $stdErr } else { '' }
         Duration    = $stopwatch.Elapsed
         TimedOut    = $timedOut
-        Context     = if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { 'Administrator' } else { 'User' }
+        Context     = $context
     }
 }
 

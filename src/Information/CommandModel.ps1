@@ -84,11 +84,16 @@ function New-PowerShellScriptCommand {
         ".\$ScriptName"
     }
 
+    # The path is not pre-quoted. Quoting is left to the renderer, which adds
+    # quotes only when the value contains whitespace. Quotes around a path that
+    # does not need them survive into every layer that later re-parses the
+    # command, and cmd.exe in particular strips the outermost pair of a /c
+    # string, which turns a correctly quoted argument into an unbalanced one.
     $arguments = @(
         '-NoProfile'
         '-ExecutionPolicy', 'Bypass'
         '-NonInteractive'
-        '-File', "`"$relative`""
+        '-File', $relative
     ) + $ScriptArguments
 
     New-StructuredCommand -Executable 'powershell.exe' -Arguments $arguments

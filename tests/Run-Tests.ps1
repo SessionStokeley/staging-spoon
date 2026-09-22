@@ -109,6 +109,16 @@ Write-Host "`nSYSTEM-context shim"
 
 Test-Case 'literal escapes apostrophes' ((ConvertTo-PowerShellLiteral -Value "it's") -eq "'it''s'")
 
+# Neither context may route through cmd.exe. "cmd /c" strips the outermost
+# pair of quotes in its string, so a correctly quoted argument arrives
+# unbalanced, and a command validated in one context would not be the command
+# run in the other.
+$systemContextSource = Get-Content -LiteralPath (Join-Path $repo 'src/Testing/SystemContext.ps1') -Raw
+$systemContextCode = [regex]::Replace($systemContextSource, '(?s)<#.*?#>', '')
+$systemContextCode = ($systemContextCode -split "`r?`n" |
+                      Where-Object { -not $_.TrimStart().StartsWith('#') }) -join "`n"
+Test-Case 'no context shells out to cmd' ($systemContextCode -notmatch 'cmd\.exe')
+
 $bareCommand = Split-ExecutableCommandLine -CommandLine 'powershell.exe -NoProfile -File ".\Install.ps1"'
 Test-Case 'executable split from arguments' ($bareCommand.Executable -eq 'powershell.exe')
 Test-Case 'arguments kept verbatim'         ($bareCommand.Arguments -eq '-NoProfile -File ".\Install.ps1"')
@@ -158,6 +168,15 @@ if (Test-Path -LiteralPath $exitCodePath) {
     Test-Case 'wrapped command produced output' ($shimOutput -match 'ran in') $shimOutput
     Test-Case 'command ran in the package directory' ($shimOutput -match ([regex]::Escape($shimWork))) $shimOutput
 }
+
+# The user context runs the same command the SYSTEM context does. Validating
+# one proves nothing about the other unless both execute it identically.
+$userResult = Invoke-AsCurrentUser -CommandLine $shimCommand -WorkingDirectory $shimWork -TimeoutSeconds 120
+
+Test-Case 'user context preserves exit code' ($userResult.ExitCode -eq 3) $userResult.ExitCode
+Test-Case 'user context captures output'     ($userResult.StdOut -match 'ran in') $userResult.StdOut
+Test-Case 'user context honours working dir' ($userResult.StdOut -match ([regex]::Escape($shimWork)))
+Test-Case 'user context did not time out'    (-not $userResult.TimedOut)
 
 # --- Manifest ----------------------------------------------------------------
 Write-Host "`nManifest"

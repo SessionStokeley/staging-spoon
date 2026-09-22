@@ -242,7 +242,14 @@ Write-Host "`nCommand model"
 
 $scriptCommand = New-PowerShellScriptCommand -ScriptName 'Install.ps1'
 $rendered = ConvertTo-CommandString -Command $scriptCommand
-Test-Case 'script command renders'       ($rendered -eq 'powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File ".\Install.ps1"')
+# A path without whitespace is rendered unquoted. Quotes it does not need
+# survive into every layer that later re-parses the command line, and cmd.exe
+# strips the outermost pair of a /c string, which leaves the rest unbalanced.
+Test-Case 'script command renders'       ($rendered -eq 'powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File .\Install.ps1') $rendered
+Test-Case 'unneeded quotes not emitted'  ($rendered -notmatch '"')
+
+$spacedCommand = New-PowerShellScriptCommand -ScriptName 'Install Contoso.ps1'
+Test-Case 'path with spaces is quoted'   ((ConvertTo-CommandString -Command $spacedCommand) -match '-File "\.\\Install Contoso\.ps1"')
 Test-Case 'generated command is valid'   (Test-StructuredCommand -Command $scriptCommand).IsValid
 
 $roundTrip = ConvertFrom-CommandString -CommandLine $rendered
