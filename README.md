@@ -194,7 +194,60 @@ Before moving to Phase 2, verify:
 - [ ] `source/Detection.ps1` has `$DisplayName` and `$ExpectedVersion` set
 - [ ] You can run `.\source\Install.ps1` manually and it installs (optional, but recommended)
 
-### Phase 2: Write your config
+### Phase 2: Create the config
+
+You have two ways to produce `package.json`. The guided one is recommended,
+because most of the file can be worked out from the installer itself.
+
+#### Option A — let the platform work it out (recommended)
+
+```powershell
+.\src\Build\New-PackageProject.ps1 -Root . -InstallerPath .\source\Setup.exe
+```
+
+It reads the installer, derives what it can, and asks only for what is left:
+
+```
+Analysed ContosoReader-4.2.1-x64.exe
+  Installer toolkit: NSIS
+
+Discovered automatically
+  Application Name           Contoso Reader
+                             Derived from the installer file name
+  Version                    4.2.1
+                             Derived from the installer file name
+  Architecture               x64
+  Silent Install Arguments   /S
+                             Standard silent switches for NSIS
+  Expected Exit Codes        0
+
+Generated commands
+  Install    powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File ".\Install.ps1"
+  Uninstall  powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File ".\Uninstall.ps1"
+
+2 decision(s) needed
+
+  Install Context  [required]
+    Why: Intune runs a package as SYSTEM or as the signed-in user. The wrong
+         choice installs to the wrong place or fails outright.
+    Automatic discovery could not resolve this.
+
+    [1] System
+    [2] User
+    [s] Skip for now
+```
+
+Answers are stored in `.project/`, so running it again asks nothing. Useful
+switches:
+
+| Switch | Effect |
+| --- | --- |
+| `-CapturePath <InstallDelta.json>` | Publishes a previous run's observed changes, so the install location, executable, PATH changes and shortcuts are never asked for |
+| `-PreviousManifest <PackageManifest.json>` | Carries forward the last build's decisions; this version's installer still wins on identity |
+| `-NonInteractive` | Accepts what was found, leaves the rest unanswered, exits 1 if anything required is missing |
+| `-IncludeRecommended` | Also asks about non-blocking fields such as publisher and minimum OS |
+
+#### Option B — write it by hand
 
 Copy `examples/package.example.json` to `package.json` at the root of your repo and edit it:
 
@@ -621,9 +674,66 @@ command, context and evidence needed to reproduce it.
 
 Order of work: **reproduce first, fix second, rebuild third.**
 
+## How the platform decides what to ask
+
+Every value the platform holds carries where it came from, how far it is
+trusted, and whether you confirmed it. Before anything is asked, it works
+through the sources in order:
+
+```
+Can it be discovered from the installer?
+Can it be derived from something already known?
+Was it observed during an installation capture?
+Is it on the machine already?
+Did a previous build use it?
+Is it stored in this project?
+```
+
+Only what survives all of that becomes a question, and every question states
+why it is being asked and what was already tried.
+
+**Facts and decisions are kept apart.** Capture recording that the installer
+added `C:\Program Files\Example\bin` to the machine PATH is a fact. Choosing
+not to reproduce that in the deployment is a decision. The decision never
+overwrites the fact, so the build evidence still shows what the installer
+actually does:
+
+```json
+{
+  "fact":     { "installation.machinePath": "C:\\Program Files\\Example\\bin" },
+  "decision": { "decision.applyMachinePath": false }
+}
+```
+
+**Sources that disagree are reported, not silently resolved.** If the installer
+says 5.2 and the registry says 5.1, both are kept, the platform names the one
+it would pick and why, and your choice is recorded as a decision.
+
+**Overrides never destroy what was discovered.** Replacing a detected value
+keeps the original, so `Reset to detected` always has something to return to.
+
+**A project survives being moved.** Files are stored as references carrying a
+project-relative path, size, hash and version rather than an absolute path. If
+one goes missing, recovery tries the stored path, then name and hash, then name
+and version, and only asks you to choose when several files genuinely match.
+
+State lives in `.project/`:
+
+```
+.project/
+    project.json      fields, resources and anchors
+    evidence.json     every observation with its source, plus the audit trail
+    facts.json        what was observed
+    decisions.json    what was chosen
+    captures/
+    builds/
+```
+
 ## Pre-build checklist and validator
 
-Before running the full build, use the evaluator to catch configuration errors early:
+If you wrote `package.json` by hand, use the evaluator to catch configuration
+errors early. (A config produced by `New-PackageProject.ps1` is already checked
+against the same rules.)
 
 ```powershell
 .\src\Build\Evaluate-Package.ps1 -ConfigPath .\package.json -SourcePath .\source
@@ -644,21 +754,46 @@ Fix any errors reported before proceeding to Phase 3.
 
 ```
 src/Core/          Manifest, path/command validation, state snapshots, failure classification
+src/Information/   Information intelligence layer: field model, discovery, prompting, project state
 src/Testing/       Intune simulation engine and SYSTEM-context executor
 src/Reporting/     HTML validation report and Intune configuration export
-src/Build/         Workflow orchestrator and pre-build evaluator
+src/Build/         Workflow orchestrator, project wizard and pre-build evaluator
 templates/         Reference Install / Uninstall / Detection scripts
 examples/          Example configuration file
 tests/             Tests for the platform-independent modules
 ```
+
+Inside `src/Information/`, dot-source `Load.ps1` to bring the whole layer into
+scope:
+
+| Module | Responsibility |
+| --- | --- |
+| `FieldModel.ps1` | Values with source, confidence, state, override history |
+| `FieldRegistry.ps1` | The catalog of every field and which operation needs it |
+| `PathResolver.ps1` | Canonical paths, project-relative storage, anchors |
+| `ResourceResolver.ps1` | File identity and missing-resource recovery |
+| `EvidenceStore.ps1` | Facts, decisions and the audit trail |
+| `ProjectState.ps1` | The single source of truth, and its persistence |
+| `DiscoveryEngine.ps1` | Installer metadata, name/version derivation, installed-machine lookup |
+| `CaptureIntegration.ps1` | Turns an install delta into answers and policy questions |
+| `ConflictResolver.ps1` | Sources that disagree |
+| `RequirementEngine.ps1` | What an operation needs and how complete it is |
+| `PromptEngine.ps1` | Which questions are worth asking, and never twice |
+| `CommandModel.ps1` | Commands as structure rather than strings |
+| `InformationManager.ps1` | The facade every feature calls |
+| `Show-InformationPrompt.ps1` | Console rendering of prompts, review and inventory |
 
 ## Requirements
 
 - Windows with PowerShell 5.1 or later for deployment validation
 - Elevation for `-SystemContext`
 - `IntuneWinAppUtil.exe` to produce the `.intunewin`
-- Python 3.8+ only if you use the Python driver
 
-The validation modules (path, command, manifest, classification, reporting) are
-platform-independent. `pwsh -NoProfile -File ./tests/Run-Tests.ps1` runs them
-on Linux for CI.
+Reading the MSI property table and the uninstall registry needs Windows;
+everything else, including the whole information layer, runs anywhere. Both
+suites run on Linux for CI:
+
+```
+pwsh -NoProfile -File ./tests/Run-Tests.ps1             # validation modules
+pwsh -NoProfile -File ./tests/Run-InformationTests.ps1  # information layer
+```
