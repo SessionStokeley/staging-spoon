@@ -664,12 +664,24 @@ never finish arriving, and no timeout covered that wait. Output is now read as
 it arrives and the *process* is what is timed, so a resident helper cannot
 block anything.
 
-**The wrapper waited for unrelated processes.** `Install.ps1` waited for *any*
-process named `msiexec`, `setup` or `install` to disappear. `msiexec.exe` also
-runs as the long-lived Windows Installer service, so that wait never ended
-either. It now waits only for processes that were not running before the
-installation started, and gives up after `$ChildWaitSeconds` (120 by default)
-rather than holding the deployment.
+**The wrapper waited for the installer's descendants.** `Install.ps1` used
+`Start-Process -Wait`, which on Windows waits for the process *and every
+descendant it started*. An installer that leaves a helper or updater resident —
+normal behaviour, not a failure — therefore never let the wait return, and the
+stage sat until the timeout fired. `Uninstall.ps1` did the same, and also
+waited for any process named `msiexec` to disappear, which never happens
+because `msiexec.exe` is the long-lived Windows Installer service.
+
+Both wrappers now run the installer exactly as a command prompt would — no
+shell, no redirection, no window handling — and wait for the installer process
+alone. Its exit code is what says the installation finished. Anything it leaves
+running is left running, and is never terminated.
+
+```
+[16:07:28] [INFO] Starting installer: C:/.../Setup.exe /S
+[16:07:28] [INFO] Installer running as PID 733
+[16:07:28] [INFO] Installer process exited with code 0
+```
 
 ### Cancelling a run without closing the window
 

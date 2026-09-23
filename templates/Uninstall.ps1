@@ -120,24 +120,37 @@ try {
         throw "Uninstaller not found: $filePath"
     }
 
-    Write-Log "Starting uninstaller: $filePath $($arguments -join ' ')"
+    $argumentLine = (
+        $arguments | ForEach-Object {
+            if ($_ -match '\s' -and -not ($_.StartsWith('"') -and $_.EndsWith('"'))) { '"' + $_ + '"' } else { $_ }
+        }
+    ) -join ' '
 
-    $process = Start-Process -FilePath $filePath `
-                             -ArgumentList $arguments `
-                             -PassThru `
-                             -Wait `
-                             -NoNewWindow
+    Write-Log "Starting uninstaller: $filePath $argumentLine"
+
+    # Run exactly as a command prompt would, and wait for this process only.
+    #
+    # Start-Process -Wait is deliberately not used: on Windows it waits for the
+    # process AND ITS DESCENDANTS. Nor is there a wait on msiexec by name -
+    # msiexec also runs as the long-lived Windows Installer service, so a
+    # machine-wide name match never goes quiet and the wait runs to its
+    # deadline on every uninstall.
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName        = $filePath
+    $startInfo.Arguments       = $argumentLine
+    $startInfo.UseShellExecute = $false
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    Write-Log "Uninstaller running as PID $($process.Id)"
+
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        Write-Log "Uninstaller did not exit within $TimeoutSeconds seconds" -Level ERROR
+        try { $process.Kill() } catch { }
+        exit 1460
+    }
 
     $vendorExitCode = $process.ExitCode
     Write-Log "Uninstaller exited with code $vendorExitCode"
-
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    do {
-        $active = @(Get-Process -Name 'msiexec' -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Id -ne $process.Id -and -not $_.HasExited })
-        if ($active.Count -eq 0) { break }
-        Start-Sleep -Seconds 2
-    } while ((Get-Date) -lt $deadline)
 
     $requiresReboot = $vendorExitCode -in $RebootExitCodes
     $isSuccess      = $vendorExitCode -in $SuccessExitCodes -or $requiresReboot

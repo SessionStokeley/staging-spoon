@@ -9,7 +9,13 @@
       - All payload resolves from $PSScriptRoot, never the working directory.
       - The vendor exit code is preserved, never replaced with 0.
       - Installer failure propagates upward so Intune reports failure.
-      - Child processes are awaited before success is declared.
+      - The installer is run exactly as a command prompt would run it: no
+        shell, no redirection, and a wait on the installer process alone.
+
+    What this template deliberately does NOT do: wait for descendants of the
+    installer. Leaving a helper or updater resident is normal behaviour, not an
+    unfinished installation, and waiting for one that never exits stalls the
+    deployment. The installer's own exit code is what says it finished.
 #>
 
 [CmdletBinding()]
@@ -29,18 +35,6 @@ $InstallerArguments = @('/S', '/v/qn')
 $SuccessExitCodes = @(0)
 $RebootExitCodes  = @(1641, 3010)
 $TimeoutSeconds   = 1800
-$SettleSeconds    = 10
-
-# Waiting for installer children is a courtesy, not a completion condition, so
-# it gets its own short budget. Tying it to $TimeoutSeconds means a process
-# that never exits blocks the deployment for the full installer timeout.
-$ChildWaitSeconds = 120
-
-# Names that may be a continuation of this installation. Matching on name alone
-# is not enough: msiexec.exe also runs as the long-lived Windows Installer
-# service, so a machine-wide name match never goes quiet and the wait below
-# would run to its deadline on every install.
-$ChildProcessNames = @('msiexec', 'setup', 'install', 'installer')
 
 $LogRoot = Join-Path $env:ProgramData 'IntuneDeployment\Logs'
 $LogFile = Join-Path $LogRoot ('Install-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -79,72 +73,42 @@ try {
         throw "Installer not found in package: $installerPath"
     }
 
-    # Anything matching by name that is already running belongs to the machine,
-    # not to this installation, and must never be waited on.
-    $preexistingIds = @(
-        foreach ($name in $ChildProcessNames) {
-            Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }
+    # Arguments are joined into one string and quoted only where a value
+    # contains whitespace, so the installer receives exactly what it would from
+    # a command prompt.
+    $argumentLine = (
+        $InstallerArguments | ForEach-Object {
+            if ($_ -match '\s' -and -not ($_.StartsWith('"') -and $_.EndsWith('"'))) { '"' + $_ + '"' } else { $_ }
         }
-    )
+    ) -join ' '
 
-    if ($preexistingIds.Count -gt 0) {
-        Write-Log "Ignoring $($preexistingIds.Count) pre-existing installer-named process(es)"
+    Write-Log "Starting installer: $installerPath $argumentLine"
+
+    # Run exactly as a command prompt would: no shell, no redirection, no
+    # window games, and a wait on this process only.
+    #
+    # Start-Process -Wait is deliberately not used. On Windows it waits for the
+    # process AND ITS DESCENDANTS, so an installer that leaves a helper or
+    # updater resident - which is normal, and not a failure - never lets the
+    # wait return. Waiting on the process object waits for the installer alone,
+    # which is the thing whose exit code means the installation finished.
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName         = $installerPath
+    $startInfo.Arguments        = $argumentLine
+    $startInfo.WorkingDirectory = $PackageRoot
+    $startInfo.UseShellExecute  = $false
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    Write-Log "Installer running as PID $($process.Id)"
+
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        Write-Log "Installer did not exit within $TimeoutSeconds seconds" -Level ERROR
+        try { $process.Kill() } catch { }
+        exit 1460
     }
-
-    $installStartedAt = Get-Date
-    Write-Log "Starting installer: $installerPath $($InstallerArguments -join ' ')"
-
-    $process = Start-Process -FilePath $installerPath `
-                             -ArgumentList $InstallerArguments `
-                             -WorkingDirectory $PackageRoot `
-                             -PassThru `
-                             -Wait `
-                             -NoNewWindow
 
     $vendorExitCode = $process.ExitCode
     Write-Log "Installer process exited with code $vendorExitCode"
-
-    # A bootstrapper may hand off to the real installer and exit, so the first
-    # process exiting does not always mean installation finished. Only
-    # processes this installation actually started are waited on, and only for
-    # $ChildWaitSeconds: a handover that has not finished by then is reported
-    # and the deployment continues, because some installers deliberately leave
-    # a helper or updater running.
-    $childDeadline = (Get-Date).AddSeconds($ChildWaitSeconds)
-
-    do {
-        $active = @(
-            foreach ($name in $ChildProcessNames) {
-                foreach ($candidate in (Get-Process -Name $name -ErrorAction SilentlyContinue)) {
-                    if ($candidate.Id -eq $process.Id) { continue }
-                    if ($candidate.Id -in $preexistingIds) { continue }
-                    if ($candidate.HasExited) { continue }
-
-                    # A process older than this installation cannot be part of
-                    # it. StartTime is unreadable for some processes even when
-                    # elevated; those are judged by the baseline alone.
-                    $startedAt = $null
-                    try { $startedAt = $candidate.StartTime } catch { }
-                    if ($null -ne $startedAt -and $startedAt -lt $installStartedAt) { continue }
-
-                    $candidate
-                }
-            }
-        )
-
-        if ($active.Count -eq 0) { break }
-        Write-Log "Waiting for installer child processes: $(($active | ForEach-Object { "$($_.ProcessName)($($_.Id))" }) -join ', ')"
-        Start-Sleep -Seconds 2
-    } while ((Get-Date) -lt $childDeadline)
-
-    if ((Get-Date) -ge $childDeadline) {
-        Write-Log "Child processes still running after ${ChildWaitSeconds}s; continuing without waiting further" -Level WARN
-    }
-
-    if ($SettleSeconds -gt 0) {
-        Write-Log "Allowing $SettleSeconds seconds for asynchronous components to settle"
-        Start-Sleep -Seconds $SettleSeconds
-    }
 
     # Map the vendor code onto the wrapper's exit code. Meaningful codes are
     # preserved; only an explicit strategy may translate a reboot code.

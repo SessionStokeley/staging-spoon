@@ -279,12 +279,20 @@ carrying the pid, command line, start time, exit code, both streams and elapsed
 time. Cancellation is a watched sentinel file, so a stuck stage can be released
 without terminating the session.
 
-**A completion condition is never "every matching process has exited."**
-`msiexec` runs as the long-lived Windows Installer service, and `setup` and
-`install` are common names, so waiting for a machine-wide name match never goes
-quiet. `Get-InstallerChildProcess` counts a process only when it was absent
-before the installation started, and the wait has its own short budget rather
-than the installer's.
+**Completion is the installer's own exit, and nothing else.** The wrappers run
+the vendor installer the way a command prompt would - no shell, no redirection
+- and wait for that process alone.
+
+Two things they deliberately do not do. `Start-Process -Wait` is not used: on
+Windows it waits for the process *and its descendants*, so an installer that
+leaves a helper or updater resident never lets the wait return. Nor is any
+process waited on by name: `msiexec` is also the long-lived Windows Installer
+service, so a machine-wide name match never goes quiet. Both stalled a
+successful install until its timeout fired. Processes the installer leaves
+behind are left alone, never waited on and never terminated.
+
+`tests/Run-Tests.ps1` asserts both, by scanning the wrapper source and by
+running one against an installer that deliberately leaves a helper resident.
 
 **Failure classification.** `src/Core/FailureClassifier.ps1` maps a failure to
 one of fourteen classifications (`SYSTEM_CONTEXT_FAILURE`, `DETECTION_FAILURE`,

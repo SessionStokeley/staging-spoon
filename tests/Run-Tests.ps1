@@ -275,6 +275,65 @@ Test-Case 'result carries diagnostics' (
     $survivorResult.CommandLine -match 'Survivor'
 )
 
+# --- Deployment wrappers -----------------------------------------------------
+# The wrappers run the vendor installer. Nothing in them may wait on anything
+# other than the installer process itself: leaving a helper or updater resident
+# is normal behaviour, and waiting for one that never exits stalls the whole
+# deployment until the timeout fires.
+Write-Host "`nDeployment wrappers"
+
+$installTemplate   = Join-Path $repo 'templates/Install.ps1'
+$uninstallTemplate = Join-Path $repo 'templates/Uninstall.ps1'
+
+foreach ($wrapper in @($installTemplate, $uninstallTemplate)) {
+    $name = Split-Path $wrapper -Leaf
+    $body = [regex]::Replace((Get-Content -LiteralPath $wrapper -Raw), '(?s)<#.*?#>', '')
+    $code = ($body -split "`r?`n" | Where-Object { -not $_.TrimStart().StartsWith('#') }) -join "`n"
+
+    # Start-Process -Wait waits for the process AND ITS DESCENDANTS on Windows,
+    # so a resident updater keeps it from ever returning.
+    Test-Case "$name does not use Start-Process -Wait" ($code -notmatch '(?s)Start-Process[^\r\n]*(\r?\n[^\r\n]*)*?-Wait')
+
+    # Waiting for a process by name is never a completion condition: msiexec is
+    # also the long-lived Windows Installer service.
+    Test-Case "$name does not wait on processes by name" ($code -notmatch "Get-Process\s+-Name")
+}
+
+# The wrapper must come straight back from an installer that leaves a helper
+# running, and must not terminate that helper either.
+if (Test-WindowsPlatform) {
+    Write-Host '  SKIP wrapper execution (needs a POSIX shell to fake an installer)'
+} else {
+    $wrapperWork = Join-Path $WorkPath 'wrapper'
+    New-Item -Path $wrapperWork -ItemType Directory -Force | Out-Null
+
+    $fakeInstaller = Join-Path $wrapperWork 'Setup.exe'
+    "#!/bin/sh`n( sleep 120 ) &`necho `"vendor installer finished`"`nexit 0`n" |
+        Set-Content -LiteralPath $fakeInstaller -Encoding UTF8 -NoNewline
+    & /bin/chmod '+x' $fakeInstaller
+
+    $wrapperScript = Join-Path $wrapperWork 'Install.ps1'
+    $wrapperBody = (Get-Content -LiteralPath $installTemplate -Raw).
+        Replace("`$InstallerArguments = @('/S', '/v/qn')", "`$InstallerArguments = @('/S')").
+        Replace('[System.Security.Principal.WindowsIdentity]::GetCurrent()',
+                "[PSCustomObject]@{ Name = 'test'; IsSystem = `$false }")
+    Set-Content -LiteralPath $wrapperScript -Value $wrapperBody -Encoding UTF8
+
+    $wrapperWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $wrapperResult = Invoke-ProcessWithTimeout -FilePath $shellPath `
+                                               -Arguments "-NoProfile -NonInteractive -File `"$wrapperScript`"" `
+                                               -WorkingDirectory $wrapperWork -TimeoutSeconds 120
+    $wrapperWatch.Stop()
+
+    Test-Case 'wrapper returns without waiting on the helper' ($wrapperWatch.Elapsed.TotalSeconds -lt 30) ("{0:n1}s" -f $wrapperWatch.Elapsed.TotalSeconds)
+    Test-Case 'wrapper preserves the vendor exit code' ($wrapperResult.ExitCode -eq 0) $wrapperResult.ExitCode
+    Test-Case 'wrapper passes arguments through' ($wrapperResult.StdOut -match 'Setup\.exe /S') $wrapperResult.StdOut
+    Test-Case 'installer output reaches the log' ($wrapperResult.StdOut -match 'vendor installer finished')
+    Test-Case 'wrapper leaves the helper running' (@(Get-Process -Name 'sleep' -ErrorAction SilentlyContinue).Count -gt 0)
+
+    Get-Process -Name 'sleep' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+}
+
 # --- Manifest ----------------------------------------------------------------
 Write-Host "`nManifest"
 
