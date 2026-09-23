@@ -38,6 +38,7 @@ function New-ValidationReport {
             'PASS'      { 'pass' }
             'FAIL'      { 'fail' }
             'TIMED OUT' { 'fail' }
+            'CANCELLED' { 'fail' }
             default     { 'skip' }
         }
         $duration = if ($stage.Duration -and $stage.Duration.TotalSeconds -gt 0) {

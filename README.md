@@ -261,6 +261,24 @@ itself on load through `Update-ProjectPathFormat`.
 `Get-CanonicalExtension` and `Get-CanonicalBaseName`. Using the framework
 methods on a canonical path silently returns empty.
 
+**One execution layer, and it always returns.** Install, detection and uninstall
+all run through `Invoke-ProcessWithTimeout`. Two implementations of "run a
+process and wait" drift, and the one that is harder to test is the one that
+breaks.
+
+Output is captured through events rather than by reading the redirected streams
+to their end. Reading to the end waits for EOF, and EOF arrives only when every
+handle to the pipe's write end is closed — including the copies an installer
+passes to a helper or updater that deliberately outlives it. That wait is not
+covered by any process timeout, so a successful install whose updater stays
+resident blocks the caller permanently. The *process* wait is what is bounded;
+trailing output gets a short grace period it can never exceed.
+
+Every call returns one of `COMPLETED`, `TIMED_OUT`, `CANCELLED` or `FAILED`,
+carrying the pid, command line, start time, exit code, both streams and elapsed
+time. Cancellation is a watched sentinel file, so a stuck stage can be released
+without terminating the session.
+
 **A completion condition is never "every matching process has exited."**
 `msiexec` runs as the long-lived Windows Installer service, and `setup` and
 `install` are common names, so waiting for a machine-wide name match never goes

@@ -16,6 +16,8 @@ $ErrorActionPreference = 'Stop'
 
 $repo = Split-Path $PSScriptRoot -Parent
 . (Join-Path $repo 'src/Core/PreBuildValidator.ps1')
+. (Join-Path $repo 'src/Core/Platform.ps1')
+. (Join-Path $repo 'src/Core/ProcessRunner.ps1')
 . (Join-Path $repo 'src/Testing/SystemContext.ps1')
 . (Join-Path $repo 'src/Core/FailureClassifier.ps1')
 . (Join-Path $repo 'src/Reporting/Export-IntuneConfiguration.ps1')
@@ -141,11 +143,21 @@ $shimCommand = '"{0}" -NoProfile -NonInteractive -File "{1}"' -f $shellPath, $pa
 $stdOutPath   = Join-Path $shimWork 'stdout.log'
 $stdErrPath   = Join-Path $shimWork 'stderr.log'
 $exitCodePath = Join-Path $shimWork 'exitcode.txt'
+$statePath    = Join-Path $shimWork 'state.txt'
 $shimPath     = Join-Path $shimWork 'shim.ps1'
+
+# The shim runs as SYSTEM and cannot assume the repository is readable from
+# there, so the execution layer is staged beside it.
+$shimModules = Join-Path $shimWork 'modules'
+New-Item -Path $shimModules -ItemType Directory -Force | Out-Null
+foreach ($module in @('src/Core/Platform.ps1', 'src/Core/ProcessRunner.ps1', 'src/Testing/SystemContext.ps1')) {
+    Copy-Item -LiteralPath (Join-Path $repo $module) -Destination $shimModules -Force
+}
 
 $shimText = New-SystemContextShim -CommandLine $shimCommand -WorkingDirectory $shimWork `
                                   -StdOutPath $stdOutPath -StdErrPath $stdErrPath `
-                                  -ExitCodePath $exitCodePath -TimeoutSeconds 120
+                                  -ExitCodePath $exitCodePath -StatePath $statePath `
+                                  -ModuleDirectory $shimModules -TimeoutSeconds 120
 
 # The original defect was a generated script that PowerShell mis-parsed, so the
 # shim must be checked as code rather than only as text.
@@ -167,6 +179,7 @@ if (Test-Path -LiteralPath $exitCodePath) {
     Test-Case 'wrapped exit code preserved' ($shimExit -eq '3') $shimExit
     Test-Case 'wrapped command produced output' ($shimOutput -match 'ran in') $shimOutput
     Test-Case 'command ran in the package directory' ($shimOutput -match ([regex]::Escape($shimWork))) $shimOutput
+    Test-Case 'shim reports its state' ((Get-Content -LiteralPath $statePath -Raw).Trim() -eq 'COMPLETED')
 }
 
 # The user context runs the same command the SYSTEM context does. Validating
@@ -174,9 +187,93 @@ if (Test-Path -LiteralPath $exitCodePath) {
 $userResult = Invoke-AsCurrentUser -CommandLine $shimCommand -WorkingDirectory $shimWork -TimeoutSeconds 120
 
 Test-Case 'user context preserves exit code' ($userResult.ExitCode -eq 3) $userResult.ExitCode
+Test-Case 'user context reports state'       ($userResult.State -eq 'COMPLETED') $userResult.State
 Test-Case 'user context captures output'     ($userResult.StdOut -match 'ran in') $userResult.StdOut
 Test-Case 'user context honours working dir' ($userResult.StdOut -match ([regex]::Escape($shimWork)))
 Test-Case 'user context did not time out'    (-not $userResult.TimedOut)
+
+# --- Execution layer ---------------------------------------------------------
+# Install, detection and uninstall all run through Invoke-ProcessWithTimeout,
+# so every state it can return is exercised here once.
+Write-Host "`nExecution layer"
+
+# THE DEFECT THIS COVERS: a successful installer whose helper or updater keeps
+# running inherits the redirected pipe, so reading the stream to its end waits
+# for an EOF that never comes. The process wait had already returned with the
+# exit code; the caller then blocked permanently on the stream, and no timeout
+# covered it. This must return promptly with the output that was produced.
+$survivorScript = Join-Path $shimWork 'Survivor.ps1'
+@"
+`$child = Start-Process -FilePath '$shellPath' ``
+                       -ArgumentList '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 300' ``
+                       -PassThru
+Write-Output "installer-finished"
+exit 0
+"@ | Set-Content -LiteralPath $survivorScript -Encoding UTF8
+
+$survivorWatch = [System.Diagnostics.Stopwatch]::StartNew()
+$survivorResult = Invoke-ProcessWithTimeout -FilePath $shellPath `
+                                            -Arguments "-NoProfile -NonInteractive -File `"$survivorScript`"" `
+                                            -WorkingDirectory $shimWork -TimeoutSeconds 120
+$survivorWatch.Stop()
+
+Test-Case 'surviving child does not block' ($survivorWatch.Elapsed.TotalSeconds -lt 60) ("{0:n1}s" -f $survivorWatch.Elapsed.TotalSeconds)
+Test-Case 'surviving child still completes' ($survivorResult.State -eq 'COMPLETED') $survivorResult.State
+Test-Case 'output captured despite survivor' ($survivorResult.StdOut -match 'installer-finished') $survivorResult.StdOut
+Test-Case 'exit code captured despite survivor' ($survivorResult.ExitCode -eq 0) $survivorResult.ExitCode
+
+$failingScript = Join-Path $shimWork 'Failing.ps1'
+'Write-Error "installer failed"; exit 13' | Set-Content -LiteralPath $failingScript -Encoding UTF8
+$failingResult = Invoke-ProcessWithTimeout -FilePath $shellPath `
+                                           -Arguments "-NoProfile -NonInteractive -File `"$failingScript`"" `
+                                           -WorkingDirectory $shimWork -TimeoutSeconds 120
+
+Test-Case 'failure keeps its exit code' ($failingResult.ExitCode -eq 13) $failingResult.ExitCode
+Test-Case 'failure is still COMPLETED'  ($failingResult.State -eq 'COMPLETED') $failingResult.State
+Test-Case 'stderr captured'             ($failingResult.StdErr -match 'installer failed') $failingResult.StdErr
+
+$hangingScript = Join-Path $shimWork 'Hanging.ps1'
+'Start-Sleep -Seconds 300' | Set-Content -LiteralPath $hangingScript -Encoding UTF8
+
+$hangWatch = [System.Diagnostics.Stopwatch]::StartNew()
+$hangResult = Invoke-ProcessWithTimeout -FilePath $shellPath `
+                                        -Arguments "-NoProfile -NonInteractive -File `"$hangingScript`"" `
+                                        -WorkingDirectory $shimWork -TimeoutSeconds 3
+$hangWatch.Stop()
+
+Test-Case 'hung process times out'       ($hangResult.State -eq 'TIMED_OUT') $hangResult.State
+Test-Case 'timeout is actually enforced' ($hangWatch.Elapsed.TotalSeconds -lt 30) ("{0:n1}s" -f $hangWatch.Elapsed.TotalSeconds)
+Test-Case 'timeout reports 1460'         ($hangResult.ExitCode -eq 1460) $hangResult.ExitCode
+Test-Case 'timeout flag set'             ($hangResult.TimedOut)
+
+# Cancellation must release a stuck stage without ending the session.
+$cancelSignal = Join-Path $shimWork 'cancel.request'
+Remove-Item -LiteralPath $cancelSignal -Force -ErrorAction SilentlyContinue
+'requested' | Set-Content -LiteralPath $cancelSignal -Encoding UTF8
+
+$cancelWatch = [System.Diagnostics.Stopwatch]::StartNew()
+$cancelResult = Invoke-ProcessWithTimeout -FilePath $shellPath `
+                                          -Arguments "-NoProfile -NonInteractive -File `"$hangingScript`"" `
+                                          -WorkingDirectory $shimWork -TimeoutSeconds 300 `
+                                          -CancelSignalPath $cancelSignal
+$cancelWatch.Stop()
+
+Test-Case 'cancellation is honoured'   ($cancelResult.State -eq 'CANCELLED') $cancelResult.State
+Test-Case 'cancellation is prompt'     ($cancelWatch.Elapsed.TotalSeconds -lt 30) ("{0:n1}s" -f $cancelWatch.Elapsed.TotalSeconds)
+Test-Case 'cancellation flag set'      ($cancelResult.Cancelled)
+Remove-Item -LiteralPath $cancelSignal -Force -ErrorAction SilentlyContinue
+
+$missingResult = Invoke-ProcessWithTimeout -FilePath (Join-Path $shimWork 'no-such-binary') `
+                                           -Arguments '' -WorkingDirectory $shimWork -TimeoutSeconds 10
+Test-Case 'unstartable process is FAILED' ($missingResult.State -eq 'FAILED') $missingResult.State
+Test-Case 'unstartable process explains why' ($missingResult.StdErr.Length -gt 0)
+
+Test-Case 'result carries diagnostics' (
+    $survivorResult.ProcessId -gt 0 -and
+    $survivorResult.StartedAt -and
+    $survivorResult.Duration.TotalSeconds -ge 0 -and
+    $survivorResult.CommandLine -match 'Survivor'
+)
 
 # --- Manifest ----------------------------------------------------------------
 Write-Host "`nManifest"

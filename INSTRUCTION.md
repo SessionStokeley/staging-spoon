@@ -650,16 +650,47 @@ Reproduce first, fix second, rebuild third.
 
 ### Validation appears to hang at "[3/9] Executing install command"
 
-The installer finished but the wrapper is still waiting on something. Each line
-is timestamped, so the last one printed tells you where it stopped, and the
-stage states its timeout when it begins.
+Two separate causes produced this, both fixed. Each line is timestamped, so the
+last one printed tells you where a run stopped, and the stage states its
+timeout when it begins.
 
-The usual cause was the wrapper waiting for *any* process named `msiexec`,
-`setup` or `install` to disappear. `msiexec.exe` also runs as the long-lived
-Windows Installer service, so that wait never ended and the stage sat for the
-full installer timeout. `Install.ps1` now waits only for processes that were
-not running before the installation started, and gives up after
-`$ChildWaitSeconds` (120 by default) rather than holding the deployment.
+**The application installed fine but the console never came back.** The stage
+captures the installer's output through a pipe. That pipe is inherited by
+whatever the installer starts, and by whatever *those* start. Reading it to the
+end waits for every copy of the handle to close — so a vendor updater or helper
+that deliberately keeps running held it open, and the wait never ended. The
+exit code had already been collected; the run then blocked on output that would
+never finish arriving, and no timeout covered that wait. Output is now read as
+it arrives and the *process* is what is timed, so a resident helper cannot
+block anything.
+
+**The wrapper waited for unrelated processes.** `Install.ps1` waited for *any*
+process named `msiexec`, `setup` or `install` to disappear. `msiexec.exe` also
+runs as the long-lived Windows Installer service, so that wait never ended
+either. It now waits only for processes that were not running before the
+installation started, and gives up after `$ChildWaitSeconds` (120 by default)
+rather than holding the deployment.
+
+### Cancelling a run without closing the window
+
+Every stage watches for a cancel signal. The path is printed when validation
+starts:
+
+```
+[08:05:51]   Cancel  : C:/.../build/TestResults/cancel.request
+```
+
+Create that file and the current stage stops, terminates the process tree it
+started, and unwinds through normal cleanup — the scheduled task is removed and
+the report still gets written. From another window:
+
+```powershell
+New-Item -Path .\build\TestResults\cancel.request -ItemType File
+```
+
+The stage is recorded as `CANCELLED`, which blocks production readiness the
+same way a failure does. The file is cleared automatically at the start of the
+next run. Ctrl+C still works, but it is no longer the only way out.
 
 If your installer deliberately leaves a helper or updater running, this is
 expected and no longer blocks anything — the log says so and continues:

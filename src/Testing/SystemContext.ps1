@@ -86,7 +86,10 @@ function New-SystemContextShim {
         [Parameter(Mandatory)][string]$StdOutPath,
         [Parameter(Mandatory)][string]$StdErrPath,
         [Parameter(Mandatory)][string]$ExitCodePath,
-        [int]$TimeoutSeconds = 1800
+        [Parameter(Mandatory)][string]$StatePath,
+        [Parameter(Mandatory)][string]$ModuleDirectory,
+        [int]$TimeoutSeconds = 1800,
+        [string]$CancelSignalPath = ''
     )
 
     $command = Split-ExecutableCommandLine -CommandLine $CommandLine
@@ -95,55 +98,53 @@ function New-SystemContextShim {
         throw "Cannot run an empty command line as SYSTEM"
     }
 
-    $executableLiteral = ConvertTo-PowerShellLiteral -Value $command.Executable
-    $argumentLiteral   = ConvertTo-PowerShellLiteral -Value $command.Arguments
-    $workingLiteral    = ConvertTo-PowerShellLiteral -Value $WorkingDirectory
-    $stdOutLiteral     = ConvertTo-PowerShellLiteral -Value $StdOutPath
-    $stdErrLiteral     = ConvertTo-PowerShellLiteral -Value $StdErrPath
-    $exitCodeLiteral   = ConvertTo-PowerShellLiteral -Value $ExitCodePath
-    $timeoutMs         = [int]$TimeoutSeconds * 1000
+    $commandLiteral  = ConvertTo-PowerShellLiteral -Value $CommandLine
+    $workingLiteral  = ConvertTo-PowerShellLiteral -Value $WorkingDirectory
+    $stdOutLiteral   = ConvertTo-PowerShellLiteral -Value $StdOutPath
+    $stdErrLiteral   = ConvertTo-PowerShellLiteral -Value $StdErrPath
+    $exitCodeLiteral = ConvertTo-PowerShellLiteral -Value $ExitCodePath
+    $stateLiteral    = ConvertTo-PowerShellLiteral -Value $StatePath
+    $cancelLiteral   = ConvertTo-PowerShellLiteral -Value $CancelSignalPath
+    $moduleLiteral   = ConvertTo-PowerShellLiteral -Value $ModuleDirectory
 
+    # The shim runs the command through the same execution layer the current
+    # user context uses. Two implementations of "run a process and wait" drift,
+    # and the one that is harder to test is the one that breaks.
     @"
 `$ErrorActionPreference = 'Stop'
 `$exitCode = 1
 `$stdOut = ''
 `$stdErr = ''
+`$state = 'FAILED'
 
 try {
-    `$startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    `$startInfo.FileName               = $executableLiteral
-    `$startInfo.Arguments              = $argumentLiteral
-    `$startInfo.WorkingDirectory       = $workingLiteral
-    `$startInfo.UseShellExecute        = `$false
-    `$startInfo.CreateNoWindow         = `$true
-    `$startInfo.RedirectStandardOutput = `$true
-    `$startInfo.RedirectStandardError  = `$true
+    `$moduleRoot = $moduleLiteral
+    . (Join-Path `$moduleRoot 'Platform.ps1')
+    . (Join-Path `$moduleRoot 'ProcessRunner.ps1')
+    . (Join-Path `$moduleRoot 'SystemContext.ps1')
 
-    `$process = [System.Diagnostics.Process]::Start(`$startInfo)
+    `$command = Split-ExecutableCommandLine -CommandLine $commandLiteral
 
-    # Both pipes are drained concurrently. Reading one to the end before the
-    # other deadlocks as soon as the process fills the pipe it is not reading.
-    `$outTask = `$process.StandardOutput.ReadToEndAsync()
-    `$errTask = `$process.StandardError.ReadToEndAsync()
+    `$result = Invoke-ProcessWithTimeout -FilePath `$command.Executable ``
+                                        -Arguments `$command.Arguments ``
+                                        -WorkingDirectory $workingLiteral ``
+                                        -TimeoutSeconds $TimeoutSeconds ``
+                                        -CancelSignalPath $cancelLiteral
 
-    if (`$process.WaitForExit($timeoutMs)) {
-        `$exitCode = `$process.ExitCode
-    } else {
-        try { `$process.Kill() } catch { }
-        `$process.WaitForExit(30000) | Out-Null
-        `$exitCode = 1460
-    }
-
-    `$stdOut = `$outTask.GetAwaiter().GetResult()
-    `$stdErr = `$errTask.GetAwaiter().GetResult()
+    `$exitCode = `$result.ExitCode
+    `$stdOut   = `$result.StdOut
+    `$stdErr   = `$result.StdErr
+    `$state    = `$result.State
 } catch {
     `$stdErr = `$_.Exception.Message
     `$exitCode = 1
+    `$state = 'FAILED'
 }
 
 Set-Content -LiteralPath $stdOutLiteral -Value `$stdOut -Encoding UTF8
 Set-Content -LiteralPath $stdErrLiteral -Value `$stdErr -Encoding UTF8
 Set-Content -LiteralPath $exitCodeLiteral -Value `$exitCode -Encoding UTF8
+Set-Content -LiteralPath $stateLiteral -Value `$state -Encoding UTF8
 "@
 }
 
@@ -162,7 +163,8 @@ function Invoke-AsSystem {
     param(
         [Parameter(Mandatory)][string]$CommandLine,
         [Parameter(Mandatory)][string]$WorkingDirectory,
-        [int]$TimeoutSeconds = 1800
+        [int]$TimeoutSeconds = 1800,
+        [string]$CancelSignalPath = ''
     )
 
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -173,19 +175,36 @@ function Invoke-AsSystem {
 
     $taskName = "IntuneValidation-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
     $shimRoot = Join-Path $env:SystemRoot "Temp\$taskName"
-    New-Item -Path $shimRoot -ItemType Directory -Force | Out-Null
+    $moduleRoot = Join-Path $shimRoot 'modules'
+    New-Item -Path $moduleRoot -ItemType Directory -Force | Out-Null
 
     $stdOutPath   = Join-Path $shimRoot 'stdout.log'
     $stdErrPath   = Join-Path $shimRoot 'stderr.log'
     $exitCodePath = Join-Path $shimRoot 'exitcode.txt'
+    $statePath    = Join-Path $shimRoot 'state.txt'
     $shimPath     = Join-Path $shimRoot 'shim.ps1'
+
+    # The shim runs as SYSTEM and needs the execution layer. The modules are
+    # copied beside it under %SystemRoot%\Temp rather than referenced where
+    # they live, because the repository may sit somewhere SYSTEM cannot read.
+    $coreDirectory = Join-Path (Split-Path $PSScriptRoot -Parent) 'Core'
+    foreach ($module in @(
+        (Join-Path $coreDirectory 'Platform.ps1')
+        (Join-Path $coreDirectory 'ProcessRunner.ps1')
+        (Join-Path $PSScriptRoot 'SystemContext.ps1')
+    )) {
+        Copy-Item -LiteralPath $module -Destination $moduleRoot -Force
+    }
 
     $shim = New-SystemContextShim -CommandLine $CommandLine `
                                   -WorkingDirectory $WorkingDirectory `
                                   -StdOutPath $stdOutPath `
                                   -StdErrPath $stdErrPath `
                                   -ExitCodePath $exitCodePath `
-                                  -TimeoutSeconds $TimeoutSeconds
+                                  -StatePath $statePath `
+                                  -ModuleDirectory $moduleRoot `
+                                  -TimeoutSeconds $TimeoutSeconds `
+                                  -CancelSignalPath $CancelSignalPath
 
     Set-Content -LiteralPath $shimPath -Value $shim -Encoding UTF8
 
@@ -209,27 +228,52 @@ function Invoke-AsSystem {
 
         Start-ScheduledTask -TaskName $taskName
 
-        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        # The shim enforces the timeout on the process itself. This outer loop
+        # is a backstop for the task never starting or never reporting, and is
+        # given headroom so the shim's own result is the one that is normally
+        # returned.
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds + 120)
+        $cancelled = $false
+
         do {
             Start-Sleep -Seconds 2
+
+            if ($CancelSignalPath -and (Test-Path -LiteralPath $CancelSignalPath)) {
+                $cancelled = $true
+                Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+                break
+            }
+
             $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
             if (-not $task) { break }
             if ($task.State -ne 'Running') { break }
         } while ((Get-Date) -lt $deadline)
 
-        if ((Get-Date) -ge $deadline) {
+        if (-not $cancelled -and (Get-Date) -ge $deadline) {
             $timedOut = $true
             Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         }
 
-        # The shim writes the exit code only after the wrapped command returns.
+        # The shim writes these only after the wrapped command returns.
         $exitCode = if (Test-Path -LiteralPath $exitCodePath) {
             [int](Get-Content -LiteralPath $exitCodePath -Raw).Trim()
+        } elseif ($cancelled) {
+            1223
         } elseif ($timedOut) {
             1460
         } else {
             $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
             if ($info) { $info.LastTaskResult } else { 1 }
+        }
+
+        $state = if (Test-Path -LiteralPath $statePath) {
+            (Get-Content -LiteralPath $statePath -Raw).Trim()
+        } elseif ($cancelled) {
+            'CANCELLED'
+        } elseif ($timedOut) {
+            'TIMED_OUT'
+        } else {
+            'FAILED'
         }
 
         $stdOut = if (Test-Path -LiteralPath $stdOutPath) { Get-Content -LiteralPath $stdOutPath -Raw } else { '' }
@@ -246,7 +290,11 @@ function Invoke-AsSystem {
         StdOut      = if ($stdOut) { $stdOut } else { '' }
         StdErr      = if ($stdErr) { $stdErr } else { '' }
         Duration    = $stopwatch.Elapsed
-        TimedOut    = $timedOut
+        TimedOut    = $state -eq 'TIMED_OUT'
+        Cancelled   = $state -eq 'CANCELLED'
+        State       = $state
+        ProcessId   = 0
+        StartedAt   = $stopwatch.Elapsed.ToString()
         Context     = 'System'
     }
 }
@@ -260,55 +308,22 @@ function Invoke-AsCurrentUser {
     param(
         [Parameter(Mandatory)][string]$CommandLine,
         [Parameter(Mandatory)][string]$WorkingDirectory,
-        [int]$TimeoutSeconds = 1800
+        [int]$TimeoutSeconds = 1800,
+        [string]$CancelSignalPath = ''
     )
 
-    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $timedOut = $false
-    $exitCode = 1
+    # The command is started directly rather than through cmd.exe. Handing a
+    # command line to "cmd /c" makes cmd strip the outermost pair of quotes in
+    # the string, which turns a correctly quoted argument into an unbalanced
+    # one. Both contexts run through the same execution layer, because
+    # validating one proves nothing about the other unless they agree.
+    $command = Split-ExecutableCommandLine -CommandLine $CommandLine
 
-    $stdOut = ''
-    $stdErr = ''
-
-    try {
-        # The command is started directly rather than through cmd.exe. Handing
-        # a command line to "cmd /c" makes cmd strip the outermost pair of
-        # quotes in the string, which turns a correctly quoted argument into an
-        # unbalanced one. The SYSTEM path avoids cmd for the same reason, and
-        # both contexts must execute the command identically or validating one
-        # proves nothing about the other.
-        $command = Split-ExecutableCommandLine -CommandLine $CommandLine
-
-        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-        $startInfo.FileName               = $command.Executable
-        $startInfo.Arguments              = $command.Arguments
-        $startInfo.WorkingDirectory       = $WorkingDirectory
-        $startInfo.UseShellExecute        = $false
-        $startInfo.CreateNoWindow         = $true
-        $startInfo.RedirectStandardOutput = $true
-        $startInfo.RedirectStandardError  = $true
-
-        $process = [System.Diagnostics.Process]::Start($startInfo)
-
-        # Drain both pipes concurrently; reading one to the end first deadlocks
-        # as soon as the process fills the pipe that is not being read.
-        $outTask = $process.StandardOutput.ReadToEndAsync()
-        $errTask = $process.StandardError.ReadToEndAsync()
-
-        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-            $timedOut = $true
-            try { $process.Kill() } catch { }
-            $process.WaitForExit(30000) | Out-Null
-            $exitCode = 1460
-        } else {
-            $exitCode = $process.ExitCode
-        }
-
-        $stdOut = $outTask.GetAwaiter().GetResult()
-        $stdErr = $errTask.GetAwaiter().GetResult()
-    } finally {
-        $stopwatch.Stop()
-    }
+    $result = Invoke-ProcessWithTimeout -FilePath $command.Executable `
+                                        -Arguments $command.Arguments `
+                                        -WorkingDirectory $WorkingDirectory `
+                                        -TimeoutSeconds $TimeoutSeconds `
+                                        -CancelSignalPath $CancelSignalPath
 
     # The context label is reporting detail. Failing to read it must not
     # discard an execution result that was obtained successfully.
@@ -322,11 +337,15 @@ function Invoke-AsCurrentUser {
 
     [PSCustomObject]@{
         CommandLine = $CommandLine
-        ExitCode    = $exitCode
-        StdOut      = if ($stdOut) { $stdOut } else { '' }
-        StdErr      = if ($stdErr) { $stdErr } else { '' }
-        Duration    = $stopwatch.Elapsed
-        TimedOut    = $timedOut
+        ExitCode    = $result.ExitCode
+        StdOut      = $result.StdOut
+        StdErr      = $result.StdErr
+        Duration    = $result.Duration
+        TimedOut    = $result.TimedOut
+        Cancelled   = $result.Cancelled
+        State       = $result.State
+        ProcessId   = $result.ProcessId
+        StartedAt   = $result.StartedAt
         Context     = $context
     }
 }
@@ -341,12 +360,15 @@ function Invoke-InContext {
         [Parameter(Mandatory)][string]$CommandLine,
         [Parameter(Mandatory)][string]$WorkingDirectory,
         [ValidateSet('System', 'Current')][string]$Context = 'Current',
-        [int]$TimeoutSeconds = 1800
+        [int]$TimeoutSeconds = 1800,
+        [string]$CancelSignalPath = ''
     )
 
     if ($Context -eq 'System') {
-        Invoke-AsSystem -CommandLine $CommandLine -WorkingDirectory $WorkingDirectory -TimeoutSeconds $TimeoutSeconds
+        Invoke-AsSystem -CommandLine $CommandLine -WorkingDirectory $WorkingDirectory `
+                        -TimeoutSeconds $TimeoutSeconds -CancelSignalPath $CancelSignalPath
     } else {
-        Invoke-AsCurrentUser -CommandLine $CommandLine -WorkingDirectory $WorkingDirectory -TimeoutSeconds $TimeoutSeconds
+        Invoke-AsCurrentUser -CommandLine $CommandLine -WorkingDirectory $WorkingDirectory `
+                             -TimeoutSeconds $TimeoutSeconds -CancelSignalPath $CancelSignalPath
     }
 }

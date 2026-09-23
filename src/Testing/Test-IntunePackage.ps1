@@ -31,6 +31,8 @@ param(
     [switch]$SkipUninstall,
     [int]$DetectionSettleSeconds = 15,
     [int]$TimeoutSeconds = 1800,
+    [int]$DetectionTimeoutSeconds = 300,
+    [string]$CancelSignalPath = '',
     [hashtable]$PostInstallExpectation = @{}
 )
 
@@ -122,6 +124,16 @@ if (-not (Test-Path -LiteralPath $OutputPath)) {
     New-Item -Path $OutputPath -ItemType Directory -Force | Out-Null
 }
 
+# Cancellation without terminating the session: creating this file releases
+# whatever stage is waiting, which then reports CANCELLED and unwinds through
+# the normal cleanup rather than leaving a process and a scheduled task behind.
+if (-not $CancelSignalPath) {
+    $CancelSignalPath = Join-Path $OutputPath 'cancel.request'
+}
+
+# A signal left behind by an earlier run would cancel this one immediately.
+Remove-Item -LiteralPath $CancelSignalPath -Force -ErrorAction SilentlyContinue
+
 # Self-containment: run from an arbitrary directory, never the build directory.
 $packageId = [guid]::NewGuid().ToString('N').Substring(0, 12)
 $testRoot  = Join-Path $env:SystemRoot "Temp\IntunePkg-$packageId"
@@ -131,7 +143,7 @@ $stages = [System.Collections.Generic.List[PSCustomObject]]::new()
 function Add-Stage {
     param(
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][ValidateSet('PASS', 'FAIL', 'TIMED OUT', 'NOT TESTED')][string]$Result,
+        [Parameter(Mandatory)][ValidateSet('PASS', 'FAIL', 'TIMED OUT', 'CANCELLED', 'NOT TESTED')][string]$Result,
         [string]$Command = '',
         [Nullable[int]]$ExitCode = $null,
         [string]$Output = '',
@@ -160,6 +172,7 @@ try {
     Write-Stage "  Package : $($manifest.ApplicationName) $($manifest.ApplicationVersion) (pkg $($manifest.PackageVersion))"
     Write-Stage "  Context : $(if ($SystemContext) { 'NT AUTHORITY\SYSTEM' } else { $identity.Context })"
     Write-Stage "  Test dir: $testRoot"
+    Write-Stage "  Cancel  : create $CancelSignalPath"
     Write-Stage ""
 
     # --- 1-2. Stage the package into a temporary directory --------------------
@@ -188,7 +201,8 @@ try {
     $installResult = Invoke-InContext -CommandLine $manifest.InstallCommand `
                                       -WorkingDirectory $testRoot `
                                       -Context $context `
-                                      -TimeoutSeconds $TimeoutSeconds
+                                      -TimeoutSeconds $TimeoutSeconds `
+                                      -CancelSignalPath $CancelSignalPath
 
     Write-Stage ("      Installer returned after {0:n1}s" -f $installResult.Duration.TotalSeconds)
 
@@ -204,12 +218,21 @@ try {
                   -Detail $exitCodeResult.Interpretation -Duration $installResult.Duration
         Write-Stage "      Exit code $($installResult.ExitCode) - $($exitCodeResult.Interpretation)" 'Pass'
     } else {
-        # A stage that ran out of time is reported as such. Recording it as an
-        # ordinary failure loses the one detail that says the package never
-        # finished rather than finished badly.
-        $installStageResult = if ($installResult.TimedOut) { 'TIMED OUT' } else { 'FAIL' }
-        $installDetail = if ($installResult.TimedOut) {
-            "No exit after $TimeoutSeconds seconds; the process was terminated"
+        # A stage that ran out of time or was cancelled is reported as such.
+        # Recording either as an ordinary failure loses the one detail that
+        # says the package never finished rather than finished badly.
+        $installStageResult = if ($installResult.Cancelled) {
+            'CANCELLED'
+        } elseif ($installResult.TimedOut) {
+            'TIMED OUT'
+        } else {
+            'FAIL'
+        }
+
+        $installDetail = if ($installResult.Cancelled) {
+            'Cancelled on request; the process tree was terminated'
+        } elseif ($installResult.TimedOut) {
+            "No exit after $TimeoutSeconds seconds; the process tree was terminated"
         } else {
             $exitCodeResult.Interpretation
         }
@@ -243,7 +266,8 @@ try {
     $detectionResult = Invoke-InContext -CommandLine $detectionCommand `
                                         -WorkingDirectory $testRoot `
                                         -Context $context `
-                                        -TimeoutSeconds 300
+                                        -TimeoutSeconds $DetectionTimeoutSeconds `
+                                        -CancelSignalPath $CancelSignalPath
     $detection = Test-DetectionContract -Result $detectionResult
 
     if ($detection.Detected) {
@@ -309,7 +333,8 @@ try {
         $uninstallResult = Invoke-InContext -CommandLine $manifest.UninstallCommand `
                                             -WorkingDirectory $testRoot `
                                             -Context $context `
-                                            -TimeoutSeconds $TimeoutSeconds
+                                            -TimeoutSeconds $TimeoutSeconds `
+                                            -CancelSignalPath $CancelSignalPath
 
         $uninstallExitResult = Resolve-InstallerExitCode -VendorExitCode $uninstallResult.ExitCode `
                                                          -SuccessExitCodes @($manifest.ExpectedExitCodes | Where-Object { $_ -notin @(1641, 3010) }) `
@@ -342,7 +367,8 @@ try {
         $removalResult = Invoke-InContext -CommandLine $detectionCommand `
                                           -WorkingDirectory $testRoot `
                                           -Context $context `
-                                          -TimeoutSeconds 300
+                                          -TimeoutSeconds $DetectionTimeoutSeconds `
+                                          -CancelSignalPath $CancelSignalPath
         $removalDetection = Test-DetectionContract -Result $removalResult
 
         if (-not $removalDetection.Detected) {
@@ -370,7 +396,7 @@ try {
 $allStages = $stages.ToArray()
 # A stage that ran out of time did not pass, so it counts as failed for the
 # purpose of blocking the build, while keeping its own result for the report.
-$failed    = @($allStages | Where-Object { $_.Result -in @('FAIL', 'TIMED OUT') })
+$failed    = @($allStages | Where-Object { $_.Result -in @('FAIL', 'TIMED OUT', 'CANCELLED') })
 $notTested = @($allStages | Where-Object { $_.Result -eq 'NOT TESTED' })
 
 # The golden rule: every stage of the cycle must pass, with none untested.
