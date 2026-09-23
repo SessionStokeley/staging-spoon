@@ -301,6 +301,38 @@ function Get-FieldCatalog {
             -InputMethods @('UseDetected', 'Choice') `
             -Priority 'Detection' -Group 'Deployment'
 
+        # --- Detection proposal ---------------------------------------------
+        # What the generated Detection.ps1 should check. Populated from the
+        # strongest evidence the evaluation found, never from a default.
+        New-FieldDefinition -Path 'detection.type' -Label 'Detection Type' -Type 'Choice' `
+            -Why 'How Intune decides the application is present. The strongest available evidence is proposed.' `
+            -RecommendedFor @('GenerateDetection') `
+            -Choices @('MsiProductCode', 'File', 'Registry', 'Folder') `
+            -Discoverers @('InstallerMetadata', 'InstalledSystem', 'InstallationCapture') `
+            -InputMethods @('UseDetected', 'Choice') `
+            -Priority 'Detection' -Group 'Detection'
+
+        New-FieldDefinition -Path 'detection.path' -Label 'Detection Path' -Type 'String' `
+            -Why 'The folder, file location or registry key the detection rule checks.' `
+            -DerivesFrom @('detection.type') `
+            -Discoverers @('InstalledSystem', 'InstallationCapture') `
+            -InputMethods @('UseDetected', 'BrowseFolder', 'FreeText') `
+            -Priority 'Detection' -Group 'Detection'
+
+        New-FieldDefinition -Path 'detection.value' -Label 'Detection Value' -Type 'String' `
+            -Why 'The file name, product code or registry value that identifies the application.' `
+            -DerivesFrom @('detection.type') `
+            -Discoverers @('InstallerMetadata', 'InstalledSystem', 'InstallationCapture') `
+            -InputMethods @('UseDetected', 'FreeText') `
+            -Priority 'Detection' -Group 'Detection'
+
+        New-FieldDefinition -Path 'detection.version' -Label 'Detection Version' -Type 'String' `
+            -Why 'Detecting a version as well as presence stops an upgrade reporting as already installed.' `
+            -DerivesFrom @('application.version') `
+            -Discoverers @('InstallerMetadata', 'InstalledSystem') `
+            -InputMethods @('UseDetected', 'FreeText') `
+            -Priority 'Detection' -Group 'Detection'
+
         New-FieldDefinition -Path 'deployment.rebootBehavior' -Label 'Restart Behavior' -Type 'Choice' `
             -Why 'Controls what Intune does when the installer returns a reboot code.' `
             -RequiredFor @('BuildPackage') `

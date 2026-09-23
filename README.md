@@ -122,6 +122,7 @@ Four invariants make this more than a form cache:
 | `EvidenceStore.ps1` | Facts, decisions and the audit trail |
 | `ProjectState.ps1` | The single source of truth, and its persistence |
 | `DiscoveryEngine.ps1` | Installer metadata, name/version derivation, installed-machine lookup |
+| `InstallerEvaluator.ps1` | Evaluates EXE/MSI/MSIX and BAT/CMD/PS1 wrappers into a reviewable proposal |
 | `CaptureIntegration.ps1` | Turns an install delta into answers and policy questions |
 | `ConflictResolver.ps1` | Sources that disagree |
 | `RequirementEngine.ps1` | What an operation needs and how complete it is |
@@ -162,6 +163,7 @@ Entry points:
 
 | Script | Role |
 | --- | --- |
+| `src/Build/Evaluate-Installer.ps1` | Evaluates an installer into a reviewable configuration proposal |
 | `src/Build/New-PackageProject.ps1` | Discovery and prompting; produces `package.json` |
 | `src/Build/Build-IntunePackage.ps1` | Full validate-then-package pipeline |
 | `src/Testing/Test-IntunePackage.ps1` | Deployment validation only |
@@ -278,6 +280,28 @@ Every call returns one of `COMPLETED`, `TIMED_OUT`, `CANCELLED` or `FAILED`,
 carrying the pid, command line, start time, exit code, both streams and elapsed
 time. Cancellation is a watched sentinel file, so a stuck stage can be released
 without terminating the session.
+
+**Evidence populates, absence reports.** `InstallerEvaluator.ps1` reads file
+metadata, the MSI property table, the lines of a wrapper script, the uninstall
+registry and an installation capture. A value it cannot source stays empty and
+is reported as requiring the administrator.
+
+Silent switches are the case that matters. They are populated from a wrapper
+script that passes them, from Windows Installer semantics for an MSI, or from a
+recognised installer toolkit's documented switches - never because a switch is
+common. A guessed switch produces a package that installs interactively on
+every device, which is the failure the whole project exists to prevent. The
+same rule governs uninstall commands, install locations and detection rules.
+
+Detection is proposed from the strongest evidence available - MSI product code,
+then primary executable, then uninstall registration, then install folder - and
+a folder-only rule is marked unreliable because folders commonly survive an
+uninstall.
+
+Evaluation writes through the same field model as everything else, so each
+proposed value carries its source and confidence and can be reviewed,
+overridden or reset. Generation is separate: approved facts become Install.ps1,
+Uninstall.ps1 and Detection.ps1 afterwards.
 
 **Completion is the installer's own exit, and nothing else.** The wrappers run
 the vendor installer the way a command prompt would - no shell, no redirection

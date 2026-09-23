@@ -27,6 +27,7 @@ foreach ($informationModule in @(
     'ProjectState'
     'CommandModel'
     'DiscoveryEngine'
+    'InstallerEvaluator'
     'ConflictResolver'
     'RequirementEngine'
     'PromptEngine'

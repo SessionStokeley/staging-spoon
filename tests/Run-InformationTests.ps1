@@ -321,6 +321,149 @@ Test-Case 'uninstaller never chosen' ((Select-PrimaryExecutable -Path @(
     'C:\Program Files\App\App.exe'
 )) -notmatch 'unins')
 
+# --- Installer evaluation ----------------------------------------------------
+Write-Host "`nInstaller evaluation"
+
+Test-Case 'EXE classified'  ((Get-InstallerKind -Path 'C:/a/Setup.exe') -eq 'EXE')
+Test-Case 'MSI classified'  ((Get-InstallerKind -Path 'C:/a/App.msi') -eq 'MSI')
+Test-Case 'CMD classified'  ((Get-InstallerKind -Path 'C:/a/Deploy.cmd') -eq 'CMD')
+Test-Case 'BAT classified'  ((Get-InstallerKind -Path 'C:/a/Deploy.bat') -eq 'BAT')
+Test-Case 'PS1 classified'  ((Get-InstallerKind -Path 'C:/a/Install.ps1') -eq 'PS1')
+Test-Case 'MSIX classified' ((Get-InstallerKind -Path 'C:/a/App.msix') -eq 'MSIX')
+Test-Case 'unknown stays unknown' ((Get-InstallerKind -Path 'C:/a/readme.txt') -eq 'Unknown')
+
+$scriptWork = Join-Path $WorkPath 'scripts'
+New-Item -Path $scriptWork -ItemType Directory -Force | Out-Null
+
+@'
+@echo off
+REM This comment names setup.exe /shouldbeignored
+:: so does this one
+start /wait "%~dp0VendorSetup.exe" /silent /norestart
+reg add "HKLM\Software\Vendor" /v Installed /t REG_DWORD /d 1 /f
+setx VENDOR_HOME "C:\Program Files\Vendor"
+xcopy config.xml "C:\ProgramData\Vendor\" /Y
+'@ | Set-Content -LiteralPath (Join-Path $scriptWork 'Deploy.cmd')
+
+$cmdAnalysis = Get-ScriptInstallerReference -Path (Join-Path $scriptWork 'Deploy.cmd')
+
+Test-Case 'cmd wrapper finds one invocation' ($cmdAnalysis.Invocations.Count -eq 1) ($cmdAnalysis.Invocations.Count)
+Test-Case 'cmd wrapper reads the executable' ($cmdAnalysis.Invocations[0].Executable -match 'VendorSetup\.exe')
+Test-Case 'cmd wrapper reads the switches'   ($cmdAnalysis.Invocations[0].Arguments -eq '/silent /norestart')
+Test-Case 'cmd comments are ignored'         ($cmdAnalysis.Invocations[0].Line -eq 4) $cmdAnalysis.Invocations[0].Line
+Test-Case 'cmd registry work reported'       ($cmdAnalysis.RegistryOperations.Count -eq 1)
+Test-Case 'cmd environment work reported'    ($cmdAnalysis.EnvironmentOperations.Count -eq 1)
+Test-Case 'cmd file work reported'           ($cmdAnalysis.FileOperations.Count -eq 1)
+
+@'
+# Install the vendor package
+$ErrorActionPreference = "Stop"
+Start-Process -FilePath "msiexec.exe" -ArgumentList @("/i", "Vendor.msi", "/qn", "/norestart") -Wait
+Start-Process -FilePath $ComputedInstaller -ArgumentList @("/S") -Wait
+'@ | Set-Content -LiteralPath (Join-Path $scriptWork 'Install-Vendor.ps1')
+
+$ps1Analysis = Get-ScriptInstallerReference -Path (Join-Path $scriptWork 'Install-Vendor.ps1')
+
+Test-Case 'ps1 wrapper finds msiexec'      ($ps1Analysis.Invocations[0].Executable -eq 'msiexec.exe')
+Test-Case 'ps1 wrapper reads argument list' ($ps1Analysis.Invocations[0].Arguments -eq '/i Vendor.msi /qn /norestart') $ps1Analysis.Invocations[0].Arguments
+Test-Case 'ps1 wrapper knows it is an MSI'  ($ps1Analysis.Invocations[0].Kind -eq 'MSI')
+# A target built from a variable is not a discovered installer.
+Test-Case 'variable target not invented'    ($ps1Analysis.Invocations.Count -eq 1) ($ps1Analysis.Invocations.Count)
+
+# THE RULE THIS ENFORCES: a silent switch that was not found stays empty. A
+# guessed switch produces a package that installs interactively on every
+# device, which is exactly the failure this tool exists to prevent.
+$blankProject = New-ProjectState -Root (Join-Path $WorkPath 'noevidence')
+$plainInstaller = Join-Path $WorkPath 'noevidence/source/Mystery.exe'
+New-Item -Path (Split-Path $plainInstaller -Parent) -ItemType Directory -Force | Out-Null
+[System.IO.File]::WriteAllBytes($plainInstaller, (Get-Latin1Encoding).GetBytes('MZ' + ('.' * 400)))
+
+Invoke-InstallerDiscovery -Project $blankProject -InstallerPath $plainInstaller | Out-Null
+Test-Case 'silent switches never invented' (-not (Test-ProjectFieldKnown -Project $blankProject -Path 'installer.silentArguments'))
+
+# Detection is proposed from the strongest evidence, in a fixed order.
+$msiDetection = New-DetectionProposal -ProductCode '{11111111-2222-3333-4444-555555555555}' `
+                                      -PrimaryExecutable 'C:/PF/V/v.exe' -InstallLocation 'C:/PF/V'
+Test-Case 'product code outranks a file' ($msiDetection.Type -eq 'MsiProductCode')
+Test-Case 'product code is high confidence' ($msiDetection.Confidence -eq 'HIGH')
+
+$fileDetection = New-DetectionProposal -PrimaryExecutable 'C:/Program Files/Vendor/Vendor.exe' `
+                                       -ExpectedVersion '5.2.1' -InstallLocation 'C:/Program Files/Vendor'
+Test-Case 'executable outranks a folder' ($fileDetection.Type -eq 'File')
+Test-Case 'detection splits path and file' (
+    $fileDetection.Path -eq 'C:/Program Files/Vendor' -and $fileDetection.Value -eq 'Vendor.exe'
+)
+Test-Case 'detection keeps the version' ($fileDetection.Version -eq '5.2.1')
+
+$registryDetection = New-DetectionProposal -UninstallDisplayName 'Vendor App' -InstallLocation 'C:/PF/V'
+Test-Case 'registry outranks a folder' ($registryDetection.Type -eq 'Registry')
+
+$folderDetection = New-DetectionProposal -InstallLocation 'C:/Program Files/Vendor'
+Test-Case 'folder is the last resort'   ($folderDetection.Type -eq 'Folder')
+# A folder commonly survives an uninstall, so it cannot prove removal.
+Test-Case 'folder detection flagged weak' (-not $folderDetection.IsReliable)
+Test-Case 'folder detection is low confidence' ($folderDetection.Confidence -eq 'LOW')
+
+$noDetection = New-DetectionProposal
+Test-Case 'no evidence proposes nothing' ($noDetection.Type -eq '')
+
+# Uninstall: the vendor's own quiet string first, then an exact MSI command.
+$quietProposal = New-UninstallProposal -Registration ([PSCustomObject]@{
+    QuietUninstallString = '"C:\PF\V\unins.exe" /quiet'
+    UninstallString      = '"C:\PF\V\unins.exe"'
+    ProductCode          = 'Vendor'
+})
+Test-Case 'quiet uninstall preferred'   ($quietProposal.Command -match '/quiet')
+Test-Case 'quiet uninstall needs no review' (-not $quietProposal.RequiresReview)
+
+$msiProposal = New-UninstallProposal -Registration ([PSCustomObject]@{
+    QuietUninstallString = ''
+    UninstallString      = 'MsiExec.exe /X{11111111-2222-3333-4444-555555555555}'
+    ProductCode          = '{11111111-2222-3333-4444-555555555555}'
+})
+Test-Case 'product code gives a silent uninstall' ($msiProposal.Command -eq 'msiexec.exe /x {11111111-2222-3333-4444-555555555555} /qn /norestart') $msiProposal.Command
+
+# A bare uninstall string is not known to run unattended, so it is not assumed to.
+$bareProposal = New-UninstallProposal -Registration ([PSCustomObject]@{
+    QuietUninstallString = ''
+    UninstallString      = '"C:\PF\V\unins.exe"'
+    ProductCode          = 'Vendor'
+})
+Test-Case 'bare uninstall flagged for review' ($bareProposal.RequiresReview)
+Test-Case 'bare uninstall gains no switch'    ($bareProposal.Command -eq '"C:\PF\V\unins.exe"')
+
+$noProposal = New-UninstallProposal -Registration ([PSCustomObject]@{
+    QuietUninstallString = ''; UninstallString = ''; ProductCode = 'Vendor'
+})
+Test-Case 'no uninstall string proposes nothing' ($noProposal.Command -eq '')
+
+# A wrapper script resolves to the installer it actually runs, and the switches
+# written in the script outrank a toolkit default.
+$wrapperProject = New-ProjectState -Root (Join-Path $WorkPath 'wrapperproj')
+$wrapperSource = Join-Path $WorkPath 'wrapperproj/source'
+New-Item -Path $wrapperSource -ItemType Directory -Force | Out-Null
+New-FakeInstaller -Path (Join-Path $wrapperSource 'VendorSetup-5.2.1-x64.exe') | Out-Null
+
+@'
+@echo off
+start /wait "%~dp0VendorSetup-5.2.1-x64.exe" /VERYSILENT /NORESTART
+'@ | Set-Content -LiteralPath (Join-Path $wrapperSource 'Deploy.cmd')
+
+$wrapperEvaluation = Invoke-InstallerEvaluation -Project $wrapperProject -Path (Join-Path $wrapperSource 'Deploy.cmd')
+
+Test-Case 'wrapper resolves to the installer' ($wrapperEvaluation.EvaluatedPath -match 'VendorSetup-5\.2\.1-x64\.exe')
+Test-Case 'wrapper reports the toolkit'       ($wrapperEvaluation.InstallerFamily -eq 'NSIS')
+Test-Case 'script switches beat the default'  ((Get-ProjectFieldValue -Project $wrapperProject -Path 'installer.silentArguments') -eq '/VERYSILENT /NORESTART')
+Test-Case 'identity derived from the installer' ((Get-ProjectFieldValue -Project $wrapperProject -Path 'application.version') -eq '5.2.1')
+
+$wrapperCompleteness = Test-EvaluationComplete -Project $wrapperProject
+Test-Case 'incomplete evaluation names what is missing' ($wrapperCompleteness.Missing.Count -gt 0)
+Test-Case 'incomplete evaluation blocks'                (-not $wrapperCompleteness.IsComplete)
+
+$wrapperSummary = @(Get-EvaluationSummary -Project $wrapperProject)
+Test-Case 'summary reports undetected values' (@($wrapperSummary | Where-Object { -not $_.Detected }).Count -gt 0)
+Test-Case 'summary carries confidence'        (@($wrapperSummary | Where-Object { $_.Detected -and $_.Confidence }).Count -gt 0)
+
 # --- Requirements and completeness -------------------------------------------
 Write-Host "`nRequirements and completeness"
 

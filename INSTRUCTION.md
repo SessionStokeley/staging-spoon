@@ -71,13 +71,14 @@ upload `build\*.intunewin`.
 
 ---
 
-## The three commands
+## The commands
 
 The tool is a set of PowerShell commands. There is no graphical application to
 launch.
 
 | Command | What it is for |
 | --- | --- |
+| `src\Build\Evaluate-Installer.ps1` | Inspects an installer and proposes as much of the configuration as the evidence supports |
 | `src\Build\New-PackageProject.ps1` | Works out the configuration and asks you only what it cannot determine. Produces `package.json`. |
 | `src\Build\Build-IntunePackage.ps1` | Validates the package end to end and builds the `.intunewin`. The command you ship from. |
 | `src\Testing\Test-IntunePackage.ps1` | Runs only the install/detect/uninstall validation against a package you already have. Useful while iterating. |
@@ -116,6 +117,55 @@ editing the variables is normally all that is needed.
 To find the uninstall details, install the application manually once and look
 in `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` (and the
 `WOW6432Node` copy for 32-bit applications).
+
+### 1a. Evaluate the installer first (optional, recommended)
+
+Before writing anything, have the tool inspect the installer and report what it
+can establish:
+
+```powershell
+.\src\Build\Evaluate-Installer.ps1 -Root . -Path .\source\Setup.exe
+```
+
+It handles EXE, MSI, MSIX and BAT/CMD/PS1 wrappers. Given a wrapper it reports
+the installer that the script actually runs, the switches the script passes,
+and any registry, environment or file work the script does — flagged for your
+review rather than acted on.
+
+Every value is shown with where it came from and how far it is to be trusted:
+
+```
+INSTALL
+  Installer File Name        VendorSetup-5.2.1-x64.exe
+                             MEDIUM
+  Silent Install Arguments   /VERYSILENT /NORESTART
+                             MEDIUM
+  Install Context            NOT DETECTED - administrator input required
+```
+
+**Nothing is invented.** A silent switch is populated only when something was
+actually read — a wrapper script that passes it, an MSI (where `/qn` is defined
+by Windows Installer), or a recognised installer toolkit. An installer that
+offers no such evidence reports `NOT DETECTED`, because a guessed switch makes
+a package that stops for a user who is not there. The same applies to uninstall
+commands, install locations and detection rules.
+
+Detection is proposed from the strongest available evidence, in this order:
+
+| Evidence | Confidence | Why |
+| --- | --- | --- |
+| MSI product code | HIGH | Identifies the product exactly |
+| Primary executable (+ version) | HIGH | Proves the files are present |
+| Uninstall registration | MEDIUM | Removed on uninstall, but does not prove files exist |
+| Install folder | LOW | Folders commonly survive an uninstall — flagged as unable to prove removal |
+
+Uninstall is proposed from `QuietUninstallString` first, then an MSI product
+code. A bare `UninstallString` is reported for review rather than silently given
+a silent switch the vendor may not accept.
+
+The command exits 1 while anything required is missing and lists what it is.
+Add `-Capture .\build\TestResults\InstallDelta.json` once you have run a
+validation: what was observed outranks anything read statically.
 
 ### 2. Let the tool read the installer
 
