@@ -56,6 +56,67 @@ function Get-WrapperInstallerReference {
     [PSCustomObject]@{ Declared = $true; InstallerName = $match.Groups[1].Value }
 }
 
+# The example values the templates ship with. A package that still carries any
+# of them has a criterion nobody filled in. Kept as data rather than read back
+# out of templates/, because a deployment script is validated where it is, not
+# where it was copied from; the test suite asserts the templates still use
+# exactly these, so the two cannot drift apart silently.
+$script:TemplatePlaceholders = @{
+    'DisplayName'      = 'Vendor Application'
+    'ExpectedVersion'  = '1.0.0'
+    'ExpectedFile'     = 'Vendor\Application\App.exe'
+}
+
+function Get-ScriptLiteral {
+    <#
+    .SYNOPSIS
+        Reads a literal string assignment from a script, or an empty string.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) { return '' }
+
+    $content = Get-Content -LiteralPath $ScriptPath -Raw
+    $pattern = '(?m)^\s*\$' + [regex]::Escape($Name) + '\s*=\s*[''"]([^''"]*)[''"]'
+    $match = [regex]::Match($content, $pattern)
+
+    if ($match.Success) { $match.Groups[1].Value } else { '' }
+}
+
+function Get-ScriptPlaceholder {
+    <#
+    .SYNOPSIS
+        Names the template example values a script still assigns.
+    .DESCRIPTION
+        Only literal assignments are read. A criterion computed at runtime is
+        the administrator's business, and guessing at one would block a package
+        that is correct.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ScriptPath)
+
+    if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) { return @() }
+
+    $content = Get-Content -LiteralPath $ScriptPath -Raw
+    $found = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($name in $script:TemplatePlaceholders.Keys) {
+        $pattern = '(?m)^\s*\$' + [regex]::Escape($name) + '\s*=\s*[''"]([^''"]*)[''"]'
+        $match = [regex]::Match($content, $pattern)
+        if (-not $match.Success) { continue }
+
+        if ($match.Groups[1].Value -eq $script:TemplatePlaceholders[$name]) {
+            $found.Add("`$$name")
+        }
+    }
+
+    $found.ToArray()
+}
+
 function Invoke-PreBuildValidation {
     <#
     .SYNOPSIS
@@ -116,7 +177,21 @@ function Invoke-PreBuildValidation {
     $checks.Add((New-ValidationCheck -Name 'Install.ps1 exists' -Passed (Test-Path -LiteralPath $installScript -PathType Leaf)))
 
     $uninstallScript = Join-Path $resolvedSource 'Uninstall.ps1'
-    $checks.Add((New-ValidationCheck -Name 'Uninstall.ps1 exists' -Passed (Test-Path -LiteralPath $uninstallScript -PathType Leaf)))
+    $uninstallExists = Test-Path -LiteralPath $uninstallScript -PathType Leaf
+    $checks.Add((New-ValidationCheck -Name 'Uninstall.ps1 exists' -Passed $uninstallExists))
+
+    # The wrapper identifies the application by product code or by display
+    # name. A product code makes the name irrelevant, so only a wrapper relying
+    # on the name is held to having filled it in.
+    if ($uninstallExists -and -not (Get-ScriptLiteral -ScriptPath $uninstallScript -Name 'ProductCode')) {
+        $uninstallPlaceholders = @(Get-ScriptPlaceholder -ScriptPath $uninstallScript)
+        $checks.Add((New-ValidationCheck -Name 'Uninstall criteria are filled in' -Passed ($uninstallPlaceholders.Count -eq 0) `
+                     -Detail $(if ($uninstallPlaceholders.Count -eq 0) {
+                         'No template example values remain'
+                     } else {
+                         "Uninstall.ps1 sets no `$ProductCode and still carries the template's example values: $($uninstallPlaceholders -join ', ')"
+                     })))
+    }
 
     # The wrapper names its own installer. Left at the template default while
     # the package ships something else, it throws before the vendor installer
@@ -139,7 +214,22 @@ function Invoke-PreBuildValidation {
     if ($Manifest.DetectionMethod -eq 'Script') {
         $detectionName = if ([string]::IsNullOrWhiteSpace($Manifest.DetectionScript)) { 'Detection.ps1' } else { $Manifest.DetectionScript }
         $detectionScript = Join-Path $resolvedSource $detectionName
-        $checks.Add((New-ValidationCheck -Name 'Detection script exists' -Passed (Test-Path -LiteralPath $detectionScript -PathType Leaf) -Detail $detectionName))
+        $detectionExists = Test-Path -LiteralPath $detectionScript -PathType Leaf
+        $checks.Add((New-ValidationCheck -Name 'Detection script exists' -Passed $detectionExists -Detail $detectionName))
+
+        # Criteria left at the template's example values match nothing on any
+        # machine. The package installs, detection returns false, and the
+        # failure appears only after a full cycle has run - or, in production,
+        # as an application that reinstalls forever.
+        if ($detectionExists) {
+            $placeholders = @(Get-ScriptPlaceholder -ScriptPath $detectionScript)
+            $checks.Add((New-ValidationCheck -Name 'Detection criteria are filled in' -Passed ($placeholders.Count -eq 0) `
+                         -Detail $(if ($placeholders.Count -eq 0) {
+                             'No template example values remain'
+                         } else {
+                             "$detectionName still carries the template's example values: $($placeholders -join ', ')"
+                         })))
+        }
     } else {
         $checks.Add((New-ValidationCheck -Name 'Detection script exists' -Passed $true -Detail "Not required for DetectionMethod '$($Manifest.DetectionMethod)'"))
     }

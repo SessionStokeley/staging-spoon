@@ -409,6 +409,38 @@ $unresolvableResult = Invoke-DetectionScript -Body $unresolvable -Name 'Unresolv
 Test-Case 'unresolvable file criterion still exits 0' ($unresolvableResult.ExitCode -eq 0) $unresolvableResult.StdErr
 Test-Case 'unresolvable file criterion reports nothing detected' ([string]::IsNullOrWhiteSpace($unresolvableResult.StdOut))
 
+# The version rule is pure, so it is loaded out of the template and exercised
+# directly rather than through a registry the test host does not have.
+$templateAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    $detectionTemplate, [ref]$null, [ref]$null)
+$versionRule = $templateAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Test-VersionSatisfied'
+}, $true)[0]
+. ([scriptblock]::Create($versionRule.Extent.Text))
+
+Test-Case 'exact version satisfies'      (Test-VersionSatisfied -Installed '1.0.0' -Expected '1.0.0')
+Test-Case 'newer version satisfies'      (Test-VersionSatisfied -Installed '5.2.1' -Expected '5.2.0')
+Test-Case 'older version does not'       (-not (Test-VersionSatisfied -Installed '5.1.9' -Expected '5.2.0'))
+# String comparison would put 5.2.10 below 5.2.9.
+Test-Case 'version parts compare as numbers' (Test-VersionSatisfied -Installed '5.2.10' -Expected '5.2.9')
+# A file stamped 1.0.0.0 satisfies an expected 1.0.0; string equality would not.
+Test-Case 'four-part file version satisfies three-part' (Test-VersionSatisfied -Installed '1.0.0.0' -Expected '1.0.0')
+# A vendor string with no ordering falls back to equality rather than guessing.
+Test-Case 'unparsable version matches exactly'   (Test-VersionSatisfied -Installed '2024 R2' -Expected '2024 R2')
+Test-Case 'unparsable version rejects mismatch'  (-not (Test-VersionSatisfied -Installed '2024 R1' -Expected '2024 R2'))
+Test-Case 'nothing installed is never satisfied' (-not (Test-VersionSatisfied -Installed '' -Expected '1.0.0'))
+Test-Case 'no expected version accepts any'      (Test-VersionSatisfied -Installed '1.0.0' -Expected '')
+
+# "Not detected" must still say what it looked for. A detection script that
+# reports absence with no reasoning is the reason these failures take days.
+$absentResult = Invoke-DetectionScript -Body $detectionSource -Name 'Absent.ps1'
+Test-Case 'absence exits 0'            ($absentResult.ExitCode -eq 0) $absentResult.StdErr
+Test-Case 'absence writes no STDOUT'   ([string]::IsNullOrWhiteSpace($absentResult.StdOut))
+Test-Case 'absence explains itself'    ($absentResult.StdErr -match 'Not detected. Criteria checked:')
+Test-Case 'absence names the criterion' ($absentResult.StdErr -match "matched DisplayName 'Vendor Application'")
+
 # An exception raised while the criteria are evaluated must not escape either.
 $throwing = $detectionSource.Replace('function Resolve-ExpectedFile {',
                                      "function Resolve-ExpectedFile {`n    throw 'criteria could not be evaluated'")
@@ -496,6 +528,25 @@ foreach ($name in @('Install.ps1', 'Uninstall.ps1', 'Detection.ps1')) {
     Copy-Item -LiteralPath (Join-Path $repo "templates/$name") -Destination (Join-Path $clean $name)
 }
 
+# A real package has its criteria filled in. Leaving the template's example
+# values in place is itself a finding, checked separately below.
+function Set-PackageCriteria {
+    param([Parameter(Mandatory)][string]$Directory)
+
+    foreach ($name in @('Uninstall.ps1', 'Detection.ps1')) {
+        $path = Join-Path $Directory $name
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+
+        $body = (Get-Content -LiteralPath $path -Raw).
+            Replace("'Vendor Application'", "'Contoso Reader'").
+            Replace("'1.0.0'", "'4.2.1'").
+            Replace("'Vendor\Application\App.exe'", "'Contoso\Reader\Reader.exe'")
+        Set-Content -LiteralPath $path -Value $body -Encoding UTF8
+    }
+}
+
+Set-PackageCriteria -Directory $clean
+
 $manifest.ContentDirectory = $clean
 $cleanResult = Invoke-PreBuildValidation -SourcePath $clean -Manifest $manifest
 Test-Case 'clean package can build' $cleanResult.CanBuild ($cleanResult.Errors -join ' | ')
@@ -504,6 +555,49 @@ Test-Case 'clean package can build' $cleanResult.CanBuild ($cleanResult.Errors -
 # has no payload to resolve and must not be reported for lacking $PSScriptRoot.
 $cleanWarnings = @($cleanResult.Checks | Where-Object { -not $_.Passed } | ForEach-Object { $_.Name })
 Test-Case 'clean package warns about nothing' ($cleanWarnings.Count -eq 0) ($cleanWarnings -join ', ')
+
+# Criteria left at the template's example values match nothing on any machine.
+# Caught here, that costs one line of output; caught later, it costs a full
+# install/uninstall cycle, or an application that reinstalls forever.
+$unedited = Join-Path $WorkPath 'unedited'
+New-Item -Path $unedited -ItemType Directory -Force | Out-Null
+'binary' | Set-Content -LiteralPath (Join-Path $unedited 'Setup.exe')
+foreach ($name in @('Install.ps1', 'Uninstall.ps1', 'Detection.ps1')) {
+    Copy-Item -LiteralPath (Join-Path $repo "templates/$name") -Destination (Join-Path $unedited $name)
+}
+
+$uneditedManifest = $manifest.PSObject.Copy()
+$uneditedManifest.ContentDirectory = $unedited
+$uneditedResult = Invoke-PreBuildValidation -SourcePath $unedited -Manifest $uneditedManifest
+$uneditedFailed = @($uneditedResult.Checks | Where-Object { -not $_.Passed } | ForEach-Object { $_.Name })
+
+Test-Case 'unedited detection criteria flagged' ($uneditedFailed -contains 'Detection criteria are filled in')
+Test-Case 'unedited uninstall criteria flagged' ($uneditedFailed -contains 'Uninstall criteria are filled in')
+Test-Case 'unedited criteria block the build'   (-not $uneditedResult.CanBuild)
+
+# The gate holds the example values as data. If a template changes one and this
+# list does not, the check silently stops finding anything, so the two are
+# asserted to agree rather than assumed to.
+foreach ($name in @('DisplayName', 'ExpectedVersion', 'ExpectedFile')) {
+    $inTemplate = Get-ScriptLiteral -ScriptPath (Join-Path $repo 'templates/Detection.ps1') -Name $name
+    Test-Case "template still uses the declared `$$name" (
+        $inTemplate -eq $script:TemplatePlaceholders[$name]
+    ) "template: '$inTemplate'"
+}
+
+$uneditedDetail = @($uneditedResult.Checks | Where-Object { $_.Name -eq 'Detection criteria are filled in' })[0].Detail
+Test-Case 'flagged criteria are named' ($uneditedDetail -match '\$DisplayName' -and $uneditedDetail -match '\$ExpectedVersion')
+
+# A product code identifies the application on its own, so an uninstall wrapper
+# using one is not held to a display name it never reads.
+$byProductCode = Join-Path $unedited 'Uninstall.ps1'
+(Get-Content -LiteralPath $byProductCode -Raw).
+    Replace("`$ProductCode   = ''", "`$ProductCode   = '{11111111-2222-3333-4444-555555555555}'") |
+    Set-Content -LiteralPath $byProductCode -Encoding UTF8
+
+$codeResult = Invoke-PreBuildValidation -SourcePath $unedited -Manifest $uneditedManifest
+$codeChecks = @($codeResult.Checks | Where-Object { $_.Name -eq 'Uninstall criteria are filled in' })
+Test-Case 'product code exempts the display name' ($codeChecks.Count -eq 0)
 
 # An install wrapper left pointing at a different file throws before the vendor
 # installer starts, and reports only a bare exit 1 after a full cycle has run.

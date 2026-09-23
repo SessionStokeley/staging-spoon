@@ -70,8 +70,10 @@ if any gate fails:
 | `FINAL VALIDATION` | Every gate re-asserted before exit 0 |
 
 The pre-build checklist is generated from the manifest, so its length varies —
-a standard EXE package with script detection produces 21 checks. It covers the
+a standard EXE package with script detection produces 24 checks. It covers the
 installer's existence and readability, the presence of each wrapper script,
+whether the install wrapper targets the packaged installer, whether the
+detection and uninstall criteria are still the template's example values,
 whether every command resolves to a file inside the package, interactive and
 duplicate arguments, absolute-path hygiene, working-directory assumptions,
 unreviewed user-profile dependencies, `$PSScriptRoot` usage, nested
@@ -244,6 +246,15 @@ cannot be resolved on the target machine produces "not detected" rather than a
 non-zero exit. The validation harness keeps the two apart as well: a non-zero
 exit is reported as a script that did not complete, never as proof the
 application is absent.
+
+**"Not detected" states its reasoning.** When the template finds nothing it
+writes what it checked, and the registered names resembling the one it was
+given, to STDERR — which Intune ignores and the harness records. A detection
+script that reports absence with no reasoning is why these failures take days:
+the usual cause is a `$DisplayName` that does not match what the installer
+registered, and that is invisible until something names the alternatives.
+Pre-build validation separately blocks a package whose criteria are still the
+template's example values.
 
 **Command rendering happens once.** `CommandModel.ps1` holds commands as an
 executable plus an argument list and renders the string at the end. Re-parsing

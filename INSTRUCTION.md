@@ -112,7 +112,7 @@ editing the variables is normally all that is needed.
 | --- | --- |
 | `Install.ps1` | `$InstallerName` (must match the file name) and `$InstallerArguments` (the silent switches) |
 | `Uninstall.ps1` | `$DisplayName` **or** `$ProductCode`, matching what the installer registers |
-| `Detection.ps1` | `$DisplayName`, `$ExpectedVersion`, `$ExpectedFile` (relative to Program Files), and `$ProgramFilesVariable` (set it to `ProgramFiles(x86)` for a 32-bit application) |
+| `Detection.ps1` | `$DisplayName` (matched against the registry with `-like`, so `Example App*` handles a version suffix), `$ExpectedVersion` (a **minimum**, not an exact match), `$ExpectedFile` (relative to Program Files), `$ProgramFilesVariable` (set it to `ProgramFiles(x86)` for a 32-bit application) |
 
 To find the uninstall details, install the application manually once and look
 in `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` (and the
@@ -791,20 +791,15 @@ The stage is recorded as `CANCELLED`, which blocks production readiness the
 same way a failure does. The file is cleared automatically at the start of the
 next run. Ctrl+C still works, but it is no longer the only way out.
 
-If your installer deliberately leaves a helper or updater running, this is
-expected and no longer blocks anything — the log says so and continues:
+If your installer deliberately leaves a helper or updater running, that is
+expected and blocks nothing. The wrapper waits for the installer process and
+nothing else, because the installer's own exit code is what says it finished.
 
-```
-[10:44:07] Child processes still running after 120s; continuing without waiting further
-```
-
-To tune it, edit the values at the top of `Install.ps1`:
-
-| Setting | Meaning |
-| --- | --- |
-| `$TimeoutSeconds` | How long the vendor installer itself may take |
-| `$ChildWaitSeconds` | How long to wait for a handover before continuing |
-| `$SettleSeconds` | Quiet period after the installer before detection runs |
+To tune the waiting, edit `$TimeoutSeconds` at the top of `Install.ps1` — how
+long the vendor installer itself may take. The validation run's own budgets are
+`-TimeoutSeconds`, `-DetectionTimeoutSeconds` and `-DetectionSettleSeconds`
+(the quiet period after the installer, for applications that finish
+registering asynchronously).
 
 A stage that runs out of time is reported as `TIMED OUT` rather than a generic
 failure, so the report distinguishes "never finished" from "finished badly".
@@ -842,10 +837,48 @@ profile dependency, or a mapped drive.
 
 ### Detection says "Not installed" after a successful install
 
-Run `Detection.ps1` yourself on a machine where the application is installed.
-It must write something to STDOUT **and** exit 0. Check `$DisplayName` matches
-the registry entry exactly, and that `$ExpectedVersion` matches what the
-installer actually registered — `InstallDelta.json` shows what that was.
+The script says why. When it finds nothing it writes its reasoning to STDERR,
+which Intune ignores and the validation harness records, so the report and the
+console both carry it:
+
+```
+Not detected. Criteria checked:
+  - No registry entry matched DisplayName 'Vendor Application'.
+  - Registered names containing 'Vendor': Vendor Application 5.2.1 (64-bit)
+  - File not present: C:\Program Files\Vendor\Application\App.exe
+```
+
+Read the candidate list. **The usual cause is `$DisplayName` not matching what
+the installer registered** — installers routinely append an edition or a
+version, so `Example App` does not match `Example App 5.2.1 (64-bit)`. Either
+use the registered name exactly or use a wildcard: `Example App*`.
+
+The other causes the reasoning distinguishes:
+
+| What it says | What it means |
+| --- | --- |
+| `is version X, below the expected Y` | `$ExpectedVersion` is above what is installed. It is a minimum, not an exact match |
+| `matched but registers no DisplayVersion` | The application has no version in the registry; detect it by file instead |
+| `Registry view not readable from this process` | A 32-bit PowerShell cannot see `WOW6432Node` by that name |
+| `Nothing registered contains '<name>'` | Nothing by that name is installed machine-wide. A per-user install is invisible to SYSTEM |
+| `Environment variable '<name>' is not set` | `$ProgramFilesVariable` names a variable that does not exist |
+
+To run it on its own against a machine where the application is installed:
+
+```powershell
+.\src\Testing\Invoke-PackageCommand.ps1 -SourcePath .\source -Command Detection
+```
+
+`InstallDelta.json` from a validation run shows what the installer actually
+registered, if you need to compare.
+
+Pre-build validation blocks a package whose criteria are still the template's
+example values, so this cannot be caused by a `Detection.ps1` nobody edited:
+
+```
+[FAIL] Detection criteria are filled in
+       Detection.ps1 still carries the template's example values: $DisplayName, $ExpectedVersion
+```
 
 ### Detection says "Installed" when the application is gone
 
@@ -856,8 +889,8 @@ for the executable and its version rather than a directory.
 ### The application reinstalls over and over
 
 Detection is returning "not installed" after a successful install. Same fix as
-above. A detection script that throws produces exactly this, which is why the
-template never throws.
+above. A detection script that throws produces exactly this, which is why
+nothing in the template runs outside its error handling.
 
 ### PowerShell `-File` path errors
 
