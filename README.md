@@ -88,6 +88,12 @@ validation rather than on a device. With `-SystemContext`, every stage runs as
 `NT AUTHORITY\SYSTEM` via a scheduled task — no interactive desktop, no user
 profile, no mapped drives.
 
+`src/Testing/Invoke-PackageCommand.ps1` runs one of those commands on its own,
+printing the exit code and both streams in full. It exists because a full cycle
+is a slow way to find out that an install command is one switch short, and
+because a stage that reports only an exit code leaves nothing to work from. It
+produces no package.
+
 ### Information intelligence layer
 
 `src/Information/` decides what the platform needs to know, discovers what it
@@ -167,6 +173,7 @@ Entry points:
 | `src/Build/New-PackageProject.ps1` | Discovery and prompting; produces `package.json` |
 | `src/Build/Build-IntunePackage.ps1` | Full validate-then-package pipeline |
 | `src/Testing/Test-IntunePackage.ps1` | Deployment validation only |
+| `src/Testing/Invoke-PackageCommand.ps1` | One of the package's commands, with both streams shown |
 | `src/Build/Evaluate-Package.ps1` | Static check of a hand-written config |
 
 ## Configuration architecture

@@ -18,6 +18,7 @@ $repo = Split-Path $PSScriptRoot -Parent
 . (Join-Path $repo 'src/Core/PreBuildValidator.ps1')
 . (Join-Path $repo 'src/Core/Platform.ps1')
 . (Join-Path $repo 'src/Core/ProcessRunner.ps1')
+. (Join-Path $repo 'src/Core/DetectionContract.ps1')
 . (Join-Path $repo 'src/Testing/SystemContext.ps1')
 . (Join-Path $repo 'src/Core/FailureClassifier.ps1')
 . (Join-Path $repo 'src/Reporting/Export-IntuneConfiguration.ps1')
@@ -415,19 +416,6 @@ $throwingResult = Invoke-DetectionScript -Body $throwing -Name 'Throwing.ps1'
 Test-Case 'a throwing criterion still exits 0'  ($throwingResult.ExitCode -eq 0) $throwingResult.StdErr
 Test-Case 'a throwing criterion says why'       ($throwingResult.StdErr -match 'criteria could not be evaluated')
 Test-Case 'a throwing criterion writes no STDOUT' ([string]::IsNullOrWhiteSpace($throwingResult.StdOut))
-
-# The contract evaluation used by the validation harness. Loaded by parsing the
-# harness rather than running it, since running it starts a deployment.
-$harnessAst = [System.Management.Automation.Language.Parser]::ParseFile(
-    (Join-Path $repo 'src/Testing/Test-IntunePackage.ps1'), [ref]$null, [ref]$null)
-$contractFunctions = @($harnessAst.FindAll({
-    param($node)
-    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-    $node.Name -in @('Test-DetectionContract', 'Format-DetectionOutput')
-}, $true))
-foreach ($function in $contractFunctions) {
-    . ([scriptblock]::Create($function.Extent.Text))
-}
 
 function New-DetectionResult {
     param([int]$ExitCode = 0, [string]$StdOut = '', [string]$StdErr = '')

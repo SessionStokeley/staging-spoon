@@ -529,6 +529,34 @@ The package is copied to a random directory under `%SystemRoot%\Temp` before it
 runs, so a package that only works from its build location fails here instead
 of on a device.
 
+### Running one command on its own
+
+A full cycle is a lot of machine time to spend on an install command that is
+one switch away from working. To run a single command and see everything it
+produced:
+
+```powershell
+.\src\Testing\Invoke-PackageCommand.ps1 -SourcePath .\source -Command Install
+.\src\Testing\Invoke-PackageCommand.ps1 -SourcePath .\source -Command Detection
+.\src\Testing\Invoke-PackageCommand.ps1 -SourcePath .\source -Command Uninstall
+```
+
+It runs the same string the cycle runs and the same string you enter into
+Intune, and prints the exit code, STDOUT and STDERR in full. Add
+`-SystemContext` to run it the way Intune will, and `-Staged` to run it from a
+temporary copy the way the full cycle does.
+
+This never produces a `.intunewin`, and one command passing is not a validated
+package. Use it to get each command working, then run the full cycle.
+
+**When detection reports `exit code 1` with nothing on either stream**, the
+script failed before its own error handling ran. Run it directly to see the
+parser's message, which nothing else will show you:
+
+```powershell
+powershell.exe -NoProfile -File .\source\Detection.ps1
+```
+
 ---
 
 ## SYSTEM validation
