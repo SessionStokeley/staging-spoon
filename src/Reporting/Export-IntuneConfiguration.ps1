@@ -9,6 +9,7 @@
 Set-StrictMode -Version Latest
 
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'Core\CommandParser.ps1')
+. (Join-Path (Split-Path $PSScriptRoot -Parent) 'Core\PackageManifest.ps1')
 
 function Get-IntuneRestartBehavior {
     param([Parameter(Mandatory)][string]$RebootBehavior)
@@ -72,11 +73,7 @@ function Export-IntuneConfiguration {
         New-Item -Path $OutputPath -ItemType Directory -Force | Out-Null
     }
 
-    $detectionCommand = if ($Manifest.DetectionMethod -eq 'Script' -and $Manifest.DetectionScript) {
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `".\$($Manifest.DetectionScript)`""
-    } else {
-        ''
-    }
+    $detectionCommand = Get-DetectionCommand -Manifest $Manifest
 
     # --- Sanity check: tested vs production ---------------------------------
     $comparisons = [System.Collections.Generic.List[PSCustomObject]]::new()

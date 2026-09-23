@@ -76,18 +76,68 @@ function Test-DetectionContract {
     $hasOutput = -not [string]::IsNullOrWhiteSpace($Result.StdOut)
     $detected = ($Result.ExitCode -eq 0) -and $hasOutput
 
+    # A non-zero exit is not the same answer as "exit 0, nothing found". The
+    # first means the script did not complete, so it reports nothing about the
+    # application either way; the second is a real, trustworthy "absent".
+    # Collapsing them hides a broken script behind an expected result.
     [PSCustomObject]@{
         Detected  = $detected
+        Failed    = $Result.ExitCode -ne 0
         ExitCode  = $Result.ExitCode
         HasOutput = $hasOutput
         Evidence  = $Result.StdOut.Trim()
+        Error     = $Result.StdErr.Trim()
+        Duration  = $Result.Duration
         Reason    = if ($detected) {
             'Exit code 0 with STDOUT output'
         } elseif ($Result.ExitCode -ne 0) {
-            "Exit code $($Result.ExitCode); Intune reads any non-zero exit as not detected"
+            "The detection script did not complete: exit code $($Result.ExitCode). Intune reads any non-zero exit as not detected, so this reinstalls forever"
         } else {
             'Exit code 0 with no STDOUT output'
         }
+    }
+}
+
+function Format-DetectionOutput {
+    <#
+    .SYNOPSIS
+        Combines what a detection run wrote on both streams.
+    .DESCRIPTION
+        STDERR carries the reason a detection script failed. Recording only
+        STDOUT keeps the one line that explains the failure out of the report,
+        which leaves an exit code with nothing to attribute it to.
+    #>
+    param([Parameter(Mandatory)][PSCustomObject]$Detection)
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    if ($Detection.Evidence) { $parts.Add($Detection.Evidence) }
+    if ($Detection.Error)    { $parts.Add("STDERR: $($Detection.Error)") }
+    $parts -join "`n"
+}
+
+function Write-DetectionDiagnostics {
+    <#
+    .SYNOPSIS
+        Prints what a failed detection run reported, so the cause is on screen.
+    #>
+    param([Parameter(Mandatory)][PSCustomObject]$Detection)
+
+    if ($Detection.Error) {
+        foreach ($line in ($Detection.Error -split "`r?`n" | Where-Object { $_.Trim() })) {
+            Write-Stage "      STDERR: $line" 'Fail'
+        }
+    }
+
+    if ($Detection.Evidence) {
+        foreach ($line in ($Detection.Evidence -split "`r?`n" | Where-Object { $_.Trim() })) {
+            Write-Stage "      STDOUT: $line" 'Fail'
+        }
+    }
+
+    if ($Detection.Failed -and -not $Detection.Error -and -not $Detection.Evidence) {
+        Write-Stage "      The script exited $($Detection.ExitCode) without writing to either stream." 'Fail'
+        Write-Stage "      A script that fails before its own error handling runs exits this way:" 'Fail'
+        Write-Stage "      a parse error, or a statement outside the try block that threw." 'Fail'
     }
 }
 
@@ -255,13 +305,10 @@ try {
     Start-Sleep -Seconds $DetectionSettleSeconds
 
     Write-Stage "[5/9] Running detection (expecting TRUE)"
-    # Built the same way the packaged commands are: -NonInteractive because
-    # there is no desktop to prompt on, and the path quoted only when it
-    # contains whitespace, since quotes it does not need are stripped unevenly
-    # by anything that re-parses the command line.
-    $detectionRelativePath = "./$($manifest.DetectionScript)"
-    $detectionTarget = if ($detectionRelativePath -match '\s') { "`"$detectionRelativePath`"" } else { $detectionRelativePath }
-    $detectionCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File $detectionTarget"
+    # The same string Intune will run, from the same definition that writes it.
+    # A detection command validated in one form and deployed in another proves
+    # nothing about the form that runs on a device.
+    $detectionCommand = Get-DetectionCommand -Manifest $manifest
 
     $detectionResult = Invoke-InContext -CommandLine $detectionCommand `
                                         -WorkingDirectory $testRoot `
@@ -270,14 +317,19 @@ try {
                                         -CancelSignalPath $CancelSignalPath
     $detection = Test-DetectionContract -Result $detectionResult
 
+    Write-Stage ("      Detection returned after {0:n1}s" -f $detection.Duration.TotalSeconds)
+
     if ($detection.Detected) {
         Add-Stage -Name 'Detection after install' -Result 'PASS' -Command $detectionCommand `
-                  -ExitCode $detection.ExitCode -Output $detection.Evidence -Detail $detection.Reason
+                  -ExitCode $detection.ExitCode -Output $detection.Evidence -Detail $detection.Reason `
+                  -Duration $detection.Duration
         Write-Stage "      Detected: $($detection.Evidence)" 'Pass'
     } else {
         Add-Stage -Name 'Detection after install' -Result 'FAIL' -Command $detectionCommand `
-                  -ExitCode $detection.ExitCode -Output $detection.Evidence -Detail $detection.Reason
+                  -ExitCode $detection.ExitCode -Output (Format-DetectionOutput -Detection $detection) `
+                  -Detail $detection.Reason -Duration $detection.Duration
         Write-Stage "      Not detected - $($detection.Reason)" 'Fail'
+        Write-DetectionDiagnostics -Detection $detection
 
         if (-not $failureClassification) {
             $failureClassification = Get-FailureClassification -Stage 'Detection' `
@@ -371,9 +423,26 @@ try {
                                           -CancelSignalPath $CancelSignalPath
         $removalDetection = Test-DetectionContract -Result $removalResult
 
-        if (-not $removalDetection.Detected) {
+        Write-Stage ("      Detection returned after {0:n1}s" -f $removalDetection.Duration.TotalSeconds)
+
+        if ($removalDetection.Failed) {
+            # A script that did not complete says nothing about the application.
+            # Reading its non-zero exit as "correctly absent" would pass a
+            # package whose detection is broken in both directions.
+            Add-Stage -Name 'Detection after uninstall' -Result 'FAIL' -Command $detectionCommand `
+                      -ExitCode $removalDetection.ExitCode -Output (Format-DetectionOutput -Detection $removalDetection) `
+                      -Detail "$($removalDetection.Reason). A script that did not complete cannot prove removal" `
+                      -Duration $removalDetection.Duration
+            Write-Stage "      Not proven - $($removalDetection.Reason)" 'Fail'
+            Write-DetectionDiagnostics -Detection $removalDetection
+
+            if (-not $failureClassification) {
+                $failureClassification = Get-FailureClassification -Stage 'Detection' -DetectionResult $false
+            }
+        } elseif (-not $removalDetection.Detected) {
             Add-Stage -Name 'Detection after uninstall' -Result 'PASS' -Command $detectionCommand `
-                      -ExitCode $removalDetection.ExitCode -Detail 'Detection correctly returns false after uninstall'
+                      -ExitCode $removalDetection.ExitCode -Detail 'Detection correctly returns false after uninstall' `
+                      -Duration $removalDetection.Duration
             Write-Stage "      Not detected - correct" 'Pass'
         } else {
             Add-Stage -Name 'Detection after uninstall' -Result 'FAIL' -Command $detectionCommand `

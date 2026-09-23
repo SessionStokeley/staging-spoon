@@ -225,9 +225,18 @@ unchanged, never replaced with 0 because the PowerShell wrapper completed.
 Reboot codes (1641, 3010) are preserved by default; translating them is an
 explicit choice.
 
-**Child process awareness.** `Install.ps1` waits for known installer child
-processes, so a deployment is not reported complete while `msiexec` is still
-running.
+**Completion is the installer's own exit.** `Install.ps1` waits for the
+installer process and nothing else. A resident helper or updater is normal
+behaviour, not an unfinished installation, and waiting for one that never exits
+stalls the deployment until the timeout. Nothing is matched by process name:
+`msiexec` is also the long-lived Windows Installer service.
+
+**A detection script cannot fail in a way that looks like an answer.** Nothing
+in `templates/Detection.ps1` runs outside its error handling, so a value that
+cannot be resolved on the target machine produces "not detected" rather than a
+non-zero exit. The validation harness keeps the two apart as well: a non-zero
+exit is reported as a script that did not complete, never as proof the
+application is absent.
 
 **Command rendering happens once.** `CommandModel.ps1` holds commands as an
 executable plus an argument list and renders the string at the end. Re-parsing

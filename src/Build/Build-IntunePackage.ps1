@@ -120,9 +120,7 @@ Write-Host "Install behavior: $($manifest.InstallBehavior) | Architecture: $($ma
 # --- Phase 3: exact commands -------------------------------------------------
 Write-Phase 'EXACT COMMANDS'
 
-$detectionCommand = if ($manifest.DetectionMethod -eq 'Script' -and $manifest.DetectionScript) {
-    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `".\$($manifest.DetectionScript)`""
-} else { '' }
+$detectionCommand = Get-DetectionCommand -Manifest $manifest
 
 # These are the strings entered into Intune. The tested command and the
 # production command are the same string, read from the same source.

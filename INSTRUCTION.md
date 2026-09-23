@@ -112,7 +112,7 @@ editing the variables is normally all that is needed.
 | --- | --- |
 | `Install.ps1` | `$InstallerName` (must match the file name) and `$InstallerArguments` (the silent switches) |
 | `Uninstall.ps1` | `$DisplayName` **or** `$ProductCode`, matching what the installer registers |
-| `Detection.ps1` | `$DisplayName`, `$ExpectedVersion`, `$ExpectedFile` |
+| `Detection.ps1` | `$DisplayName`, `$ExpectedVersion`, `$ExpectedFile` (relative to Program Files), and `$ProgramFilesVariable` (set it to `ProgramFiles(x86)` for a 32-bit application) |
 
 To find the uninstall details, install the application manually once and look
 in `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` (and the
@@ -458,8 +458,10 @@ Choose **System** for machine-wide installs, which is most applications. Choose
 Three scripts are packaged, and Intune calls each at a different time.
 
 **Install.ps1** runs the vendor installer silently and returns the vendor's own
-exit code. It waits for installer child processes so the deployment is not
-reported as finished while `msiexec` is still running, and writes a log.
+exit code, and writes a log. It waits for the installer process itself and
+nothing else: an installer that leaves a helper or updater running is behaving
+normally, and waiting for one that never exits would stall the deployment until
+the timeout.
 
 **Uninstall.ps1** removes the application, using the product code or the
 registered uninstall string.
@@ -477,7 +479,14 @@ Detection drives everything you see in Intune and Company Portal: install
 status, compliance reporting, and whether Intune retries. Get it wrong and the
 application reinstalls in a loop or reports failure after a successful install.
 The template never throws, because an unhandled exception is a non-zero exit,
-which Intune reads as "not installed".
+which Intune reads as "not installed". That is also why its criteria section
+holds plain text only. Anything that can fail - reading an environment
+variable, joining a path, touching the disk - runs inside the guarded section,
+because a statement above it that throws ends the script before the error
+handling exists. If your detection stage reports `exit code 1` with nothing on
+either stream, that is what happened: look for a typo or a parse error in
+`Detection.ps1`. `$env:ProgramFiles(x86)` is the usual one - it is not valid
+PowerShell, which is why the template names the variable as text instead.
 
 ---
 

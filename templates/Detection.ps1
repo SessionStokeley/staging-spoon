@@ -23,9 +23,20 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # --- Detection criteria ------------------------------------------------------
-$DisplayName       = 'Vendor Application'
-$ExpectedVersion   = '1.0.0'
-$ExpectedFile      = Join-Path $env:ProgramFiles 'Vendor\Application\App.exe'
+# These are literal values on purpose. Anything that can fail - reading an
+# environment variable, joining a path, touching the disk - belongs inside the
+# try block below, because a statement out here that throws ends the script
+# with a non-zero exit before the error handling exists. Intune reads that as
+# "not installed" and reinstalls, every cycle, forever.
+#
+# $ExpectedFile is relative to Program Files. For a 32-bit application on a
+# 64-bit OS, set $ProgramFilesVariable to 'ProgramFiles(x86)'. Note that
+# $env:ProgramFiles(x86) is NOT valid PowerShell - the (x86) parses as a
+# separate expression - which is why the name is given as text here.
+$DisplayName           = 'Vendor Application'
+$ExpectedVersion       = '1.0.0'
+$ExpectedFile          = 'Vendor\Application\App.exe'
+$ProgramFilesVariable  = 'ProgramFiles'
 
 # Which registry view the application registers in. A 32-bit application on a
 # 64-bit OS registers under WOW6432Node; looking in the wrong view is a
@@ -34,6 +45,23 @@ $RegistryViews = @(
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
 )
+
+function Resolve-ExpectedFile {
+    <#
+    .SYNOPSIS
+        Builds the full path to the expected file, or nothing if it cannot.
+    .DESCRIPTION
+        Runs inside the guarded path, so a missing environment variable turns
+        into "no file criterion" rather than into a non-zero exit that Intune
+        would read as "not installed".
+    #>
+    if (-not $ExpectedFile) { return $null }
+
+    $base = [Environment]::GetEnvironmentVariable($ProgramFilesVariable)
+    if (-not $base) { return $null }
+
+    Join-Path $base $ExpectedFile
+}
 
 function Test-ApplicationPresent {
     foreach ($view in $RegistryViews) {
@@ -66,10 +94,11 @@ function Test-ApplicationPresent {
         }
     }
 
-    if ($ExpectedFile -and (Test-Path -LiteralPath $ExpectedFile -PathType Leaf)) {
-        $fileVersion = (Get-Item -LiteralPath $ExpectedFile).VersionInfo.FileVersion
+    $expectedFullPath = Resolve-ExpectedFile
+    if ($expectedFullPath -and (Test-Path -LiteralPath $expectedFullPath -PathType Leaf)) {
+        $fileVersion = (Get-Item -LiteralPath $expectedFullPath).VersionInfo.FileVersion
         if ($fileVersion -eq $ExpectedVersion) {
-            return "Detected $ExpectedFile $fileVersion"
+            return "Detected $expectedFullPath $fileVersion"
         }
     }
 
@@ -87,6 +116,9 @@ try {
     # Not detected: no output, exit 0.
     exit 0
 } catch {
-    # Never let an exception escape as a non-zero exit with output.
+    # Never let an exception escape as a non-zero exit with output. The reason
+    # goes to STDERR, which Intune ignores and the validation harness records,
+    # so a detection script that is quietly failing is still visible somewhere.
+    [Console]::Error.WriteLine("Detection failed: $($_.Exception.Message)")
     exit 0
 }

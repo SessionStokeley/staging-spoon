@@ -334,6 +334,126 @@ if (Test-WindowsPlatform) {
     Get-Process -Name 'sleep' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
+# --- SYSTEM-context completion -----------------------------------------------
+# Start-ScheduledTask only queues the launch, so the task is still 'Ready' for
+# a moment afterwards. Reading that as "finished" ends the wait before the
+# command has run and reports a Task Scheduler code as its exit code.
+Write-Host "`nSYSTEM-context completion"
+
+Test-Case 'queued but not yet running is not finished' (
+    (Get-TaskWaitDecision -Reported $false -TaskState 'Ready' -ObservedRunning $false -StartDeadlinePassed $false) -eq 'WAITING'
+)
+Test-Case 'running is not finished' (
+    (Get-TaskWaitDecision -Reported $false -TaskState 'Running' -ObservedRunning $true -StartDeadlinePassed $false) -eq 'WAITING'
+)
+Test-Case 'a reported result ends the wait' (
+    (Get-TaskWaitDecision -Reported $true -TaskState 'Running' -ObservedRunning $true -StartDeadlinePassed $false) -eq 'REPORTED'
+)
+Test-Case 'ran then stopped without reporting' (
+    (Get-TaskWaitDecision -Reported $false -TaskState 'Ready' -ObservedRunning $true -StartDeadlinePassed $false) -eq 'STOPPED'
+)
+Test-Case 'never started is distinguished' (
+    (Get-TaskWaitDecision -Reported $false -TaskState 'Ready' -ObservedRunning $false -StartDeadlinePassed $true) -eq 'NEVER_STARTED'
+)
+Test-Case 'a vanished task ends the wait' (
+    (Get-TaskWaitDecision -Reported $false -TaskState '' -ObservedRunning $true -StartDeadlinePassed $false) -eq 'VANISHED'
+)
+# A result written between two polls must still be read, whatever the task is
+# doing by then.
+Test-Case 'a result written late is still read' (
+    (Get-TaskWaitDecision -Reported $true -TaskState '' -ObservedRunning $true -StartDeadlinePassed $true) -eq 'REPORTED'
+)
+
+# --- Detection contract ------------------------------------------------------
+# Intune reads a non-zero exit as "not installed", so a detection script that
+# fails for its own reasons is indistinguishable from an absent application and
+# reinstalls forever. Nothing in the template may be able to exit non-zero.
+Write-Host "`nDetection contract"
+
+$detectionTemplate = Join-Path $repo 'templates/Detection.ps1'
+$detectionSource = Get-Content -LiteralPath $detectionTemplate -Raw
+
+# Everything ahead of the try block runs with no handler to catch it, so it may
+# not touch anything that can fail: no environment variables, no path joining,
+# no disk. Those belong inside the guard.
+$beforeTry = ($detectionSource -split '(?m)^try\s*\{', 2)[0]
+$beforeTryCode = ($beforeTry -split "`r?`n" |
+    Where-Object { -not $_.TrimStart().StartsWith('#') }) -join "`n"
+$beforeTryCode = [regex]::Replace($beforeTryCode, '(?s)<#.*?#>', '')
+# Function bodies only run when called, which happens inside the guard.
+$beforeTryCode = [regex]::Replace($beforeTryCode, '(?s)function\s+[\w-]+\s*\{.*', '')
+
+Test-Case 'no environment access before the guard' ($beforeTryCode -notmatch '\$env:|GetEnvironmentVariable')
+Test-Case 'no path building before the guard'      ($beforeTryCode -notmatch 'Join-Path')
+Test-Case 'no disk access before the guard'        ($beforeTryCode -notmatch 'Test-Path|Get-Item|Get-ChildItem')
+
+$detectionWork = Join-Path $WorkPath 'detection'
+New-Item -Path $detectionWork -ItemType Directory -Force | Out-Null
+
+function Invoke-DetectionScript {
+    param([Parameter(Mandatory)][string]$Body, [Parameter(Mandatory)][string]$Name)
+
+    $path = Join-Path $detectionWork $Name
+    Set-Content -LiteralPath $path -Value $Body -Encoding UTF8
+    Invoke-ProcessWithTimeout -FilePath $shellPath `
+                              -Arguments "-NoProfile -NonInteractive -File `"$path`"" `
+                              -WorkingDirectory $detectionWork -TimeoutSeconds 60
+}
+
+# The criteria block is what an administrator edits, so it is the most likely
+# place for a value that cannot be resolved on the target machine.
+$unresolvable = $detectionSource.Replace("`$ProgramFilesVariable  = 'ProgramFiles'",
+                                         "`$ProgramFilesVariable  = 'NoSuchVariableAnywhere'")
+$unresolvableResult = Invoke-DetectionScript -Body $unresolvable -Name 'Unresolvable.ps1'
+Test-Case 'unresolvable file criterion still exits 0' ($unresolvableResult.ExitCode -eq 0) $unresolvableResult.StdErr
+Test-Case 'unresolvable file criterion reports nothing detected' ([string]::IsNullOrWhiteSpace($unresolvableResult.StdOut))
+
+# An exception raised while the criteria are evaluated must not escape either.
+$throwing = $detectionSource.Replace('function Resolve-ExpectedFile {',
+                                     "function Resolve-ExpectedFile {`n    throw 'criteria could not be evaluated'")
+$throwingResult = Invoke-DetectionScript -Body $throwing -Name 'Throwing.ps1'
+Test-Case 'a throwing criterion still exits 0'  ($throwingResult.ExitCode -eq 0) $throwingResult.StdErr
+Test-Case 'a throwing criterion says why'       ($throwingResult.StdErr -match 'criteria could not be evaluated')
+Test-Case 'a throwing criterion writes no STDOUT' ([string]::IsNullOrWhiteSpace($throwingResult.StdOut))
+
+# The contract evaluation used by the validation harness. Loaded by parsing the
+# harness rather than running it, since running it starts a deployment.
+$harnessAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $repo 'src/Testing/Test-IntunePackage.ps1'), [ref]$null, [ref]$null)
+$contractFunctions = @($harnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -in @('Test-DetectionContract', 'Format-DetectionOutput')
+}, $true))
+foreach ($function in $contractFunctions) {
+    . ([scriptblock]::Create($function.Extent.Text))
+}
+
+function New-DetectionResult {
+    param([int]$ExitCode = 0, [string]$StdOut = '', [string]$StdErr = '')
+    [PSCustomObject]@{
+        ExitCode = $ExitCode; StdOut = $StdOut; StdErr = $StdErr
+        Duration = [timespan]::FromSeconds(1)
+    }
+}
+
+$detectedContract = Test-DetectionContract -Result (New-DetectionResult -StdOut 'Detected Contoso 4.2.1')
+Test-Case 'output with exit 0 is detected' ($detectedContract.Detected -and -not $detectedContract.Failed)
+
+$absentContract = Test-DetectionContract -Result (New-DetectionResult)
+Test-Case 'exit 0 with no output is absent'    (-not $absentContract.Detected)
+Test-Case 'exit 0 with no output is not a failure' (-not $absentContract.Failed)
+
+# The distinction that matters: a script that did not complete reports nothing
+# about the application, so it can never stand in for a trustworthy "absent".
+$brokenContract = Test-DetectionContract -Result (New-DetectionResult -ExitCode 1 -StdErr 'parse error')
+Test-Case 'non-zero exit is not detected'   (-not $brokenContract.Detected)
+Test-Case 'non-zero exit is a failure'      $brokenContract.Failed
+Test-Case 'non-zero exit keeps its stderr'  ($brokenContract.Error -eq 'parse error')
+Test-Case 'failed detection output carries stderr' (
+    (Format-DetectionOutput -Detection $brokenContract) -match 'STDERR: parse error'
+)
+
 # --- Manifest ----------------------------------------------------------------
 Write-Host "`nManifest"
 
@@ -350,6 +470,20 @@ Test-Case 'script detection needs a script' (-not (Test-PackageManifest -Manifes
 
 $noName = $manifest.PSObject.Copy(); $noName.ApplicationName = ''
 Test-Case 'empty required field rejected' (-not (Test-PackageManifest -Manifest $noName).IsValid)
+
+# The validated command and the deployed command come from one definition, so
+# a package cannot be proven in one form and shipped in another.
+Test-Case 'detection command built once' (
+    (Get-DetectionCommand -Manifest $manifest) -eq 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Detection.ps1'
+)
+
+$spacedDetection = $manifest.PSObject.Copy(); $spacedDetection.DetectionScript = 'Detect App.ps1'
+Test-Case 'detection command quotes only when needed' (
+    (Get-DetectionCommand -Manifest $spacedDetection) -match '-File "\.\\Detect App\.ps1"$'
+)
+
+$fileDetection = $manifest.PSObject.Copy(); $fileDetection.DetectionMethod = 'File'
+Test-Case 'no detection command without a script' ((Get-DetectionCommand -Manifest $fileDetection) -eq '')
 
 # --- Failure classification --------------------------------------------------
 Write-Host "`nFailure classification"
@@ -459,7 +593,7 @@ Write-Host "`nIntune configuration export"
 $validated = @{
     Install   = $manifest.InstallCommand
     Uninstall = $manifest.UninstallCommand
-    Detection = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Detection.ps1"'
+    Detection = Get-DetectionCommand -Manifest $manifest
 }
 
 $export = Export-IntuneConfiguration -Manifest $manifest -OutputPath (Join-Path $WorkPath 'out') `

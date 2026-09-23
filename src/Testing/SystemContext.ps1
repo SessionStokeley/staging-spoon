@@ -148,6 +148,39 @@ Set-Content -LiteralPath $stateLiteral -Value `$state -Encoding UTF8
 "@
 }
 
+function Get-TaskWaitDecision {
+    <#
+    .SYNOPSIS
+        Decides whether a SYSTEM-context run has finished, from one poll.
+    .DESCRIPTION
+        Kept separate from the polling loop so the rule can be tested without
+        a Task Scheduler. The rule that matters: a task that has not yet been
+        seen Running has not finished, however un-Running it currently looks.
+        Start-ScheduledTask only queues the request, so the state immediately
+        afterwards is still 'Ready'.
+    .PARAMETER Reported
+        Whether the shim has written its exit code.
+    .PARAMETER TaskState
+        The task's current state, or an empty string if the task is gone.
+    .OUTPUTS
+        REPORTED, VANISHED, STOPPED, NEVER_STARTED or WAITING.
+    #>
+    [CmdletBinding()]
+    param(
+        [bool]$Reported,
+        [AllowEmptyString()][string]$TaskState,
+        [bool]$ObservedRunning,
+        [bool]$StartDeadlinePassed
+    )
+
+    if ($Reported) { return 'REPORTED' }
+    if (-not $TaskState) { return 'VANISHED' }
+    if ($TaskState -eq 'Running') { return 'WAITING' }
+    if ($ObservedRunning) { return 'STOPPED' }
+    if ($StartDeadlinePassed) { return 'NEVER_STARTED' }
+    'WAITING'
+}
+
 function Invoke-AsSystem {
     <#
     .SYNOPSIS
@@ -156,6 +189,9 @@ function Invoke-AsSystem {
         The command is wrapped in a shim that redirects streams to files, since
         a scheduled task has nowhere to write a console. The shim records the
         wrapped command's real exit code so it is not lost.
+    .PARAMETER TaskStartSeconds
+        How long to allow for Task Scheduler to actually launch the task before
+        concluding it never started. Registration and launch are asynchronous.
     .OUTPUTS
         PSCustomObject with ExitCode, StdOut, StdErr, Duration and TimedOut.
     #>
@@ -164,7 +200,8 @@ function Invoke-AsSystem {
         [Parameter(Mandatory)][string]$CommandLine,
         [Parameter(Mandatory)][string]$WorkingDirectory,
         [int]$TimeoutSeconds = 1800,
-        [string]$CancelSignalPath = ''
+        [string]$CancelSignalPath = '',
+        [int]$TaskStartSeconds = 60
     )
 
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -228,15 +265,21 @@ function Invoke-AsSystem {
 
         Start-ScheduledTask -TaskName $taskName
 
-        # The shim enforces the timeout on the process itself. This outer loop
-        # is a backstop for the task never starting or never reporting, and is
-        # given headroom so the shim's own result is the one that is normally
-        # returned.
-        $deadline = (Get-Date).AddSeconds($TimeoutSeconds + 120)
-        $cancelled = $false
+        # Completion is the shim writing its result, never the task's state.
+        # Start-ScheduledTask returns as soon as the request is queued, so the
+        # task is still 'Ready' for a moment afterwards; treating "not Running"
+        # as "finished" ends the wait before the command has even started, and
+        # then reports a Task Scheduler code as though it were the command's
+        # exit code. Task state is only the backstop for a task that never
+        # starts or dies without reporting.
+        $deadline      = (Get-Date).AddSeconds($TimeoutSeconds + 120)
+        $startDeadline = (Get-Date).AddSeconds($TaskStartSeconds)
+        $cancelled     = $false
+        $observedRunning = $false
+        $neverStarted  = $false
 
         do {
-            Start-Sleep -Seconds 2
+            Start-Sleep -Milliseconds 500
 
             if ($CancelSignalPath -and (Test-Path -LiteralPath $CancelSignalPath)) {
                 $cancelled = $true
@@ -245,25 +288,43 @@ function Invoke-AsSystem {
             }
 
             $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-            if (-not $task) { break }
-            if ($task.State -ne 'Running') { break }
+            $taskState = if ($task) { [string]$task.State } else { '' }
+            if ($taskState -eq 'Running') { $observedRunning = $true }
+
+            # The shim's own report is authoritative and is checked first, so a
+            # task that finishes between two polls is still read correctly.
+            $decision = Get-TaskWaitDecision -Reported (Test-Path -LiteralPath $exitCodePath) `
+                                             -TaskState $taskState `
+                                             -ObservedRunning $observedRunning `
+                                             -StartDeadlinePassed ((Get-Date) -ge $startDeadline)
+
+            if ($decision -eq 'WAITING') { continue }
+
+            if ($decision -eq 'NEVER_STARTED') { $neverStarted = $true }
+
+            # A task that stopped without reporting gets a moment for its files
+            # to appear before that is called a failure.
+            if ($decision -in @('STOPPED', 'VANISHED')) { Start-Sleep -Milliseconds 500 }
+
+            break
         } while ((Get-Date) -lt $deadline)
 
-        if (-not $cancelled -and (Get-Date) -ge $deadline) {
+        if (-not $cancelled -and -not $neverStarted -and (Get-Date) -ge $deadline) {
             $timedOut = $true
             Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         }
 
+        $reported = Test-Path -LiteralPath $exitCodePath
+
         # The shim writes these only after the wrapped command returns.
-        $exitCode = if (Test-Path -LiteralPath $exitCodePath) {
+        $exitCode = if ($reported) {
             [int](Get-Content -LiteralPath $exitCodePath -Raw).Trim()
         } elseif ($cancelled) {
             1223
         } elseif ($timedOut) {
             1460
         } else {
-            $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
-            if ($info) { $info.LastTaskResult } else { 1 }
+            1
         }
 
         $state = if (Test-Path -LiteralPath $statePath) {
@@ -278,6 +339,26 @@ function Invoke-AsSystem {
 
         $stdOut = if (Test-Path -LiteralPath $stdOutPath) { Get-Content -LiteralPath $stdOutPath -Raw } else { '' }
         $stdErr = if (Test-Path -LiteralPath $stdErrPath) { Get-Content -LiteralPath $stdErrPath -Raw } else { '' }
+
+        # A run that produced no result of its own would otherwise come back as
+        # a bare exit 1 with both streams empty, which reads exactly like a
+        # command that ran and failed. Say which one it was.
+        if (-not $reported -and -not $cancelled -and -not $timedOut) {
+            $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+            $launchResult = if ($info) { $info.LastTaskResult } else { $null }
+
+            $explanation = if ($neverStarted) {
+                "The scheduled task did not start within $TaskStartSeconds seconds, so the command never ran."
+            } else {
+                'The scheduled task ended without reporting a result, so the command did not run to completion.'
+            }
+
+            if ($null -ne $launchResult) {
+                $explanation += " Task Scheduler last result: $launchResult."
+            }
+
+            $stdErr = ($stdErr, $explanation | Where-Object { $_ }) -join "`n"
+        }
     } finally {
         $stopwatch.Stop()
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue

@@ -87,6 +87,34 @@ function New-PackageManifest {
     }
 }
 
+function Get-DetectionCommand {
+    <#
+    .SYNOPSIS
+        Builds the detection command line for a manifest.
+    .DESCRIPTION
+        One definition, used by the validation run, by the string written for
+        Intune, and by the exported configuration. A command that is validated
+        in one form and deployed in another proves nothing about the form that
+        actually runs on a device.
+    .OUTPUTS
+        The command line, or an empty string when detection is not a script.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][PSCustomObject]$Manifest)
+
+    if ($Manifest.DetectionMethod -ne 'Script') { return '' }
+
+    $hasScript = $Manifest.PSObject.Properties.Name -contains 'DetectionScript' -and $Manifest.DetectionScript
+    if (-not $hasScript) { return '' }
+
+    # Quoted only when the path needs it: quotes a path does not need are
+    # stripped unevenly by anything that re-parses the command line.
+    $target = ".\$($Manifest.DetectionScript)"
+    if ($target -match '\s') { $target = "`"$target`"" }
+
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $target"
+}
+
 function Save-PackageManifest {
     [CmdletBinding()]
     param(
