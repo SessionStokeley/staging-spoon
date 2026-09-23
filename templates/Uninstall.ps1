@@ -26,7 +26,11 @@ $SuccessExitCodes = @(0, 1605)   # 1605: already absent
 $RebootExitCodes  = @(1641, 3010)
 $TimeoutSeconds   = 1800
 
-$LogRoot = Join-Path $env:ProgramData 'IntuneDeployment\Logs'
+# Resolving the log location must never be able to throw: it runs before the
+# try block, so a failure here would end the wrapper with exit 1 and no log at
+# all - indistinguishable from an uninstaller that failed.
+$LogParent = if ($env:ProgramData) { $env:ProgramData } elseif ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+$LogRoot = Join-Path $LogParent 'IntuneDeployment\Logs'
 $LogFile = Join-Path $LogRoot ('Uninstall-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
 function Write-Log {
