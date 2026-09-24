@@ -82,7 +82,8 @@ completeness.
 
 `src/Testing/Test-IntunePackage.ps1` runs the deployment validation alone. Its
 stages are `Package staging`, `Install`, `Detection after install`,
-`Post-install validation`, `Uninstall`, `Detection after uninstall`.
+`Integration validation`, `Post-install validation`, `Uninstall`,
+`Detection after uninstall`, `Integration cleanup`.
 
 Staging copies the package to a random directory under `%SystemRoot%\Temp`
 before execution, so any dependency on the build location fails during
@@ -162,8 +163,9 @@ src/Information/   Information intelligence layer
 src/Testing/       Intune simulation engine and SYSTEM-context executor
 src/Reporting/     HTML validation report and Intune configuration export
 src/Build/         Workflow orchestrator, project wizard, pre-build evaluator
-templates/         Reference Install / Uninstall / Detection scripts
-examples/          Example configuration file
+templates/         Reference Install / Uninstall / Detection scripts,
+                   plus Apply-/Remove-Integrations wrappers
+examples/          Example configuration files
 tests/             Test suites
 ```
 
@@ -177,6 +179,47 @@ Entry points:
 | `src/Testing/Test-IntunePackage.ps1` | Deployment validation only |
 | `src/Testing/Invoke-PackageCommand.ps1` | One of the package's commands, with both streams shown |
 | `src/Build/Evaluate-Package.ps1` | Static check of a hand-written config |
+
+## Windows integrations
+
+A package can establish, verify and remove four Windows integrations as owned
+resources: a **PATH/environment** entry, a **desktop shortcut**, a
+**context-menu** action, and a **file association**. They are declared in
+`package.json` under `Integrations`, carried through the manifest, staged into
+the package, applied by `Install.ps1`, verified by `Test-IntunePackage.ps1`,
+and removed by `Uninstall.ps1`. `examples/package.intellij-integrations.json`
+is a full IntelliJ IDEA example.
+
+Each integration runs in one of three **modes**:
+
+| Mode | Meaning |
+| --- | --- |
+| `DISABLED` | The package does nothing with it. |
+| `VALIDATE` | The vendor installer owns it; the package only verifies it exists and is correct, and never creates or removes it. |
+| `MANAGE` | The package creates it, records that it owns it, and removes only what it recorded during uninstall. |
+
+**Ownership, not filenames, drives removal.** `Apply-Integrations.ps1` records
+each resource it creates — the PATH entry it added, the `.lnk` it wrote, the
+registry keys it created — in `%ProgramData%\IntuneDeployment\State\<app>\integration-state.json`.
+`Remove-Integrations.ps1` removes exactly those, so a pre-existing PATH entry,
+an unrelated shortcut of the same name, or a vendor-created (VALIDATE)
+association is never touched. A PATH entry is matched case- and
+trailing-slash-insensitively, so it is never added twice.
+
+**SYSTEM is not the signed-in user.** Under SYSTEM (the Intune norm) a
+device-wide integration must use machine scope: the Public desktop, `HKLM\SOFTWARE\Classes`,
+the machine PATH. A request for a per-user (`HKCU`, user PATH, user desktop)
+integration from SYSTEM is reported as not reaching the intended users rather
+than silently claiming success.
+
+The engine, `src/Core/Integrations.ps1`, is self-contained so it can be staged
+into the package. Its decision logic — PATH add/deduplicate/remove and
+preserve-others, ownership selection, the registry command and ProgID
+generation, mode and scope resolution, and capture that identifies only
+application-relevant associations — is pure and tested on any platform; the raw
+Windows calls (COM `.lnk`, the live registry, the persistent machine PATH) run
+only on Windows, and `Test-IntunePackage.ps1` reports its integration stages as
+NOT TESTED off Windows rather than faking them.
 
 ## Configuration architecture
 

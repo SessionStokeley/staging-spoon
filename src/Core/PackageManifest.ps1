@@ -62,7 +62,8 @@ function New-PackageManifest {
         [string]$MinimumOS = 'W10_1809',
         [int[]]$ExpectedExitCodes = @(0, 1641, 3010),
         [ValidateScript({ $_ -in $script:ValidRebootBehavior })][string]$RebootBehavior = 'BasedOnReturnCode',
-        [string]$PackageHash = ''
+        [string]$PackageHash = '',
+        [AllowNull()]$Integrations = $null
     )
 
     [PSCustomObject]@{
@@ -84,6 +85,7 @@ function New-PackageManifest {
         ContentDirectory   = $ContentDirectory
         BuildTimestamp     = (Get-Date).ToString('o')
         PackageHash        = $PackageHash
+        Integrations       = $Integrations
     }
 }
 
@@ -191,6 +193,19 @@ function Test-PackageManifest {
     if ('DetectionMethod' -in $manifestProperties -and $Manifest.DetectionMethod -eq 'Script') {
         if ([string]::IsNullOrWhiteSpace($Manifest.DetectionScript)) {
             $errors.Add('DetectionMethod is Script but DetectionScript is not set')
+        }
+    }
+
+    # Integrations are validated by the same normaliser that applies them, so a
+    # malformed or under-specified integration is caught at manifest time rather
+    # than on the target. Only checked when the integration engine is loaded, so
+    # the manifest module stays usable on its own.
+    if ('Integrations' -in $manifestProperties -and $null -ne $Manifest.Integrations -and
+        (Get-Command -Name 'ConvertTo-IntegrationConfig' -ErrorAction SilentlyContinue)) {
+        try {
+            ConvertTo-IntegrationConfig -Integrations $Manifest.Integrations | Out-Null
+        } catch {
+            $errors.Add("Invalid Integrations: $($_.Exception.Message)")
         }
     }
 

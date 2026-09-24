@@ -122,7 +122,8 @@ function Find-AbsolutePath {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$PackagePath,
-        [string[]]$AllowedPath = @()
+        [string[]]$AllowedPath = @(),
+        [string[]]$ExcludeFile = @()
     )
 
     $findings = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -141,7 +142,7 @@ function Find-AbsolutePath {
                  '(?:[^\s"''<>|*?\r\n;]|(?<![\s]) (?=[^\s"''<>|*?\r\n;$]))+'
 
     $files = Get-ChildItem -LiteralPath $PackagePath -Recurse -File |
-             Where-Object { $_.Extension -in $script:ScannableExtensions }
+             Where-Object { $_.Extension -in $script:ScannableExtensions -and $_.Name -notin $ExcludeFile }
 
     foreach ($file in $files) {
         $lineNumber = 0
@@ -181,13 +182,14 @@ function Find-UserProfileDependency {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$PackagePath,
-        [ValidateSet('System', 'User')][string]$InstallBehavior = 'System'
+        [ValidateSet('System', 'User')][string]$InstallBehavior = 'System',
+        [string[]]$ExcludeFile = @()
     )
 
     $findings = [System.Collections.Generic.List[PSCustomObject]]::new()
 
     $files = Get-ChildItem -LiteralPath $PackagePath -Recurse -File |
-             Where-Object { $_.Extension -in $script:ScannableExtensions }
+             Where-Object { $_.Extension -in $script:ScannableExtensions -and $_.Name -notin $ExcludeFile }
 
     foreach ($file in $files) {
         $lineNumber = 0
@@ -308,8 +310,8 @@ function Invoke-PathValidation {
         [string[]]$ExcludeScript = @()
     )
 
-    $absolutePaths    = @(Find-AbsolutePath -PackagePath $PackagePath -AllowedPath $AllowedPath)
-    $userDependencies = @(Find-UserProfileDependency -PackagePath $PackagePath -InstallBehavior $InstallBehavior)
+    $absolutePaths    = @(Find-AbsolutePath -PackagePath $PackagePath -AllowedPath $AllowedPath -ExcludeFile $ExcludeScript)
+    $userDependencies = @(Find-UserProfileDependency -PackagePath $PackagePath -InstallBehavior $InstallBehavior -ExcludeFile $ExcludeScript)
     $workingDirectory = @(Find-WorkingDirectoryAssumption -PackagePath $PackagePath)
 
     # $PSScriptRoot matters for scripts that must find payload shipped beside

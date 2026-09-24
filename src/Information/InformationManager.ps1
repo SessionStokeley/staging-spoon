@@ -462,5 +462,12 @@ function Export-ProjectManifest {
         $manifestArgs['DetectionScript'] = 'Detection.ps1'
     }
 
+    # Integrations are carried through when the project holds a resolved set, so
+    # a build reproduces exactly the integrations that were reviewed rather than
+    # re-deriving them.
+    if (Test-ProjectFieldKnown -Project $Project -Path 'deployment.integrations') {
+        $manifestArgs['Integrations'] = Get-ProjectFieldValue -Project $Project -Path 'deployment.integrations'
+    }
+
     New-PackageManifest @manifestArgs
 }

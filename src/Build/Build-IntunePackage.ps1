@@ -43,6 +43,7 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 . (Join-Path $repoRoot 'src\Core\Platform.ps1')
+. (Join-Path $repoRoot 'src\Core\Integrations.ps1')
 . (Join-Path $repoRoot 'src\Core\PackageManifest.ps1')
 . (Join-Path $repoRoot 'src\Core\PreBuildValidator.ps1')
 . (Join-Path $repoRoot 'src\Core\CommandParser.ps1')
@@ -112,7 +113,8 @@ $manifest = New-PackageManifest -ApplicationName    $config.ApplicationName `
                                 -Architecture       $(if ($config.PSObject.Properties.Name -contains 'Architecture') { $config.Architecture } else { 'x64' }) `
                                 -MinimumOS          $(if ($config.PSObject.Properties.Name -contains 'MinimumOS') { $config.MinimumOS } else { 'W10_1809' }) `
                                 -ExpectedExitCodes  $(if ($config.PSObject.Properties.Name -contains 'ExpectedExitCodes') { $config.ExpectedExitCodes } else { @(0, 1641, 3010) }) `
-                                -RebootBehavior     $(if ($config.PSObject.Properties.Name -contains 'RebootBehavior') { $config.RebootBehavior } else { 'BasedOnReturnCode' })
+                                -RebootBehavior     $(if ($config.PSObject.Properties.Name -contains 'RebootBehavior') { $config.RebootBehavior } else { 'BasedOnReturnCode' }) `
+                                -Integrations       $(if ($config.PSObject.Properties.Name -contains 'Integrations') { $config.Integrations } else { $null })
 
 Write-Host "$($manifest.ApplicationName) $($manifest.ApplicationVersion) (package $($manifest.PackageVersion))" -ForegroundColor Green
 Write-Host "Install behavior: $($manifest.InstallBehavior) | Architecture: $($manifest.Architecture)" -ForegroundColor Green
@@ -133,6 +135,35 @@ if ($detectionCommand) {
 Write-Host "Install  : $($manifest.InstallCommand)" -ForegroundColor Gray
 Write-Host "Uninstall: $($manifest.UninstallCommand)" -ForegroundColor Gray
 if ($detectionCommand) { Write-Host "Detection: $detectionCommand" -ForegroundColor Gray }
+
+# --- Phase 3b: stage Windows integrations ------------------------------------
+# When the package declares integrations, the engine and the apply/remove
+# scripts are staged beside the wrappers and the integration set is written as
+# integrations.json, so the packaged content is self-contained: Install.ps1
+# applies them on the target and Uninstall.ps1 removes exactly what it owns.
+if ($null -ne $manifest.Integrations) {
+    Write-Phase 'WINDOWS INTEGRATIONS'
+
+    # The engine is shared code from src\Core; the apply/remove wrappers are
+    # templates. Both are staged beside the install wrappers so the package is
+    # self-contained on the target.
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'src\Core\Integrations.ps1') `
+              -Destination (Join-Path $resolvedSource 'Integrations.ps1') -Force
+    foreach ($script in @('Apply-Integrations.ps1', 'Remove-Integrations.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $repoRoot "templates\$script") `
+                  -Destination (Join-Path $resolvedSource $script) -Force
+    }
+
+    $integrationDocument = [PSCustomObject]@{
+        ApplicationKey = $manifest.ApplicationName
+        Integrations   = $manifest.Integrations
+    }
+    ($integrationDocument | ConvertTo-Json -Depth 8) |
+        Set-Content -LiteralPath (Join-Path $resolvedSource 'integrations.json') -Encoding UTF8
+
+    $staged = @(ConvertTo-IntegrationConfig -Integrations $manifest.Integrations)
+    Write-Host "Staged $($staged.Count) integration(s): $((($staged | ForEach-Object { "$($_.Kind)/$($_.Mode)" }) -join ', '))" -ForegroundColor Green
+}
 
 # --- Phase 4: pre-build validation -------------------------------------------
 Write-Phase 'PRE-BUILD VALIDATION'

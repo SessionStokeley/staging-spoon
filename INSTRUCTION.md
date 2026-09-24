@@ -581,10 +581,57 @@ the tool warns you that the run does not prove what you need it to prove.
 
 ---
 
+## Windows integrations (PATH, shortcut, context menu, file association)
+
+A package can own four Windows integrations. Declare them in `package.json`
+under `Integrations`; see `examples/package.intellij-integrations.json`.
+
+Each is set to one of three modes:
+
+| Mode | What the package does |
+| --- | --- |
+| `DISABLED` | Nothing. |
+| `VALIDATE` | Only checks the vendor installer created it correctly. Never creates or removes it. |
+| `MANAGE` | Creates it, records ownership, and removes only what it created at uninstall. |
+
+The four kinds and their key fields:
+
+| Kind | Fields |
+| --- | --- |
+| `Path` | `Entry` (the directory to add, e.g. the app's `bin`), `Scope` (`Machine` or `User`) |
+| `Shortcut` | `Name`, `Target`, optional `Arguments`, `WorkingDirectory`, `Icon`, `Location` (`Public`, `User`, `Custom` + `LocationPath`) |
+| `ContextMenu` | `Verb`, `DisplayName`, `Executable`, `Target` (`File`/`Folder`/`Directory`/`AllFiles`), `Extensions` (for `File`), optional `Arguments` (default `"%1"`), `Scope` |
+| `FileAssociation` | `Extension`, `ProgId`, `Executable`, optional `FriendlyName`, `Arguments`, `Icon`, `Scope` |
+
+What happens at each stage:
+
+- **Build** stages the integration engine and the apply/remove scripts into the
+  package and writes `integrations.json`.
+- **Install** applies the `MANAGE` integrations and verifies the `VALIDATE`
+  ones after the installer succeeds. A failure here fails the deployment — an
+  application whose PATH entry or shortcut is missing is not correctly
+  installed.
+- **Validation** (`Test-IntunePackage.ps1`) inspects the real machine: the
+  shortcut's target, the registry command, the PATH entry — not just the
+  config. On a non-Windows host these stages report `NOT TESTED`.
+- **Uninstall** removes exactly what install recorded owning, leaving
+  pre-existing PATH entries, unrelated shortcuts, and vendor-created
+  associations untouched.
+
+**Under SYSTEM (how Intune runs), use machine scope.** The Public desktop,
+`Machine` PATH, and `Machine` class scope reach every user. A `User`-scoped
+integration applied from SYSTEM lands in the service profile no one signs into;
+the tool reports that rather than claiming success, so choose `Machine` for a
+device-wide deployment.
+
+---
+
 ## Building the .intunewin
 
 ```
-source folder (installer + Install.ps1 + Uninstall.ps1 + Detection.ps1)
+source folder (installer + Install.ps1 + Uninstall.ps1 + Detection.ps1
+               + Integrations.ps1 + Apply-/Remove-Integrations.ps1
+               + integrations.json, when integrations are declared)
         |
         v
   Win32 Content Prep Tool

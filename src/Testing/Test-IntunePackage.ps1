@@ -46,6 +46,7 @@ $coreRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'Core'
 . (Join-Path $coreRoot 'FailureClassifier.ps1')
 . (Join-Path $coreRoot 'ProcessRunner.ps1')
 . (Join-Path $coreRoot 'DetectionContract.ps1')
+. (Join-Path $coreRoot 'Integrations.ps1')
 . (Join-Path $PSScriptRoot 'SystemContext.ps1')
 
 function Write-Stage {
@@ -298,6 +299,39 @@ try {
 
     Write-Stage "      +$($installDelta.Applications.Added.Count) applications, +$($installDelta.Files.Added.Count) files, +$($installDelta.Services.Added.Count) services" 'Pass'
 
+    # --- 6b. Windows integrations --------------------------------------------
+    # Install.ps1 applied them; here they are verified against the real machine
+    # state - the shortcut's target, the registry command, the PATH entry - not
+    # merely against the configuration. Registry and shortcut inspection need
+    # Windows, so off Windows this is skipped rather than faked.
+    $integrationConfigPath = Join-Path $testRoot 'integrations.json'
+    if (Test-Path -LiteralPath $integrationConfigPath) {
+        Write-Stage "[6b/9] Validating Windows integrations"
+
+        if (-not (Test-WindowsPlatform)) {
+            Add-Stage -Name 'Integration validation' -Result 'NOT TESTED' -Detail 'Requires Windows to inspect the registry, shortcuts and PATH'
+            Write-Stage "      Skipped - integration state can only be inspected on Windows" 'Skip'
+        } else {
+            $integrationDoc = Get-Content -LiteralPath $integrationConfigPath -Raw | ConvertFrom-Json
+            $integrationDefs = ConvertTo-IntegrationConfig -Integrations $integrationDoc.Integrations
+            $integrationResults = Invoke-IntegrationSet -Phase 'Validate' -Definitions $integrationDefs `
+                                                        -RunningAsSystem:$SystemContext
+            $integrationFailures = @($integrationResults | Where-Object { -not $_.Success -and -not $_.Skipped })
+
+            foreach ($result in $integrationResults) {
+                $status = if ($result.Skipped) { 'Skip' } elseif ($result.Success) { 'Pass' } else { 'Fail' }
+                Write-Stage "      $($result.Kind) $($result.Id) ($($result.Mode)): $($result.Reason)" $status
+            }
+
+            if ($integrationFailures.Count -eq 0) {
+                Add-Stage -Name 'Integration validation' -Result 'PASS' -Detail "$($integrationResults.Count) integration(s) verified"
+            } else {
+                Add-Stage -Name 'Integration validation' -Result 'FAIL' `
+                          -Detail (($integrationFailures | ForEach-Object { "$($_.Kind) $($_.Id): $($_.Reason)" }) -join '; ')
+            }
+        }
+    }
+
     if ($PostInstallExpectation.Count -gt 0) {
         Write-Stage "[7/9] Validating declared application state"
         $postInstall = Test-PostInstallState -Expectation $PostInstallExpectation
@@ -400,6 +434,34 @@ try {
 
             if (-not $failureClassification) {
                 $failureClassification = Get-FailureClassification -Stage 'DetectionRemoval' -DetectionResult $true
+            }
+        }
+
+        # --- Integration cleanup: owned removed, others preserved ------------
+        # Uninstall.ps1 removed what the package recorded owning. Here the
+        # managed integrations are confirmed gone. Vendor-owned (VALIDATE)
+        # integrations are deliberately not checked for removal - the package
+        # never owned them and must not have touched them.
+        if (Test-Path -LiteralPath $integrationConfigPath) {
+            if (-not (Test-WindowsPlatform)) {
+                Add-Stage -Name 'Integration cleanup' -Result 'NOT TESTED' -Detail 'Requires Windows to inspect the registry, shortcuts and PATH'
+                Write-Stage "      Integration cleanup check skipped - requires Windows" 'Skip'
+            } else {
+                $cleanupDoc  = Get-Content -LiteralPath $integrationConfigPath -Raw | ConvertFrom-Json
+                $cleanupDefs = ConvertTo-IntegrationConfig -Integrations $cleanupDoc.Integrations
+                $managed = @($cleanupDefs | Where-Object { $_.Mode -eq 'MANAGE' })
+                $lingering = @(
+                    Invoke-IntegrationSet -Phase 'Validate' -Definitions $managed -RunningAsSystem:$SystemContext |
+                        Where-Object { $_.Success -and -not $_.Skipped }
+                )
+                if ($lingering.Count -eq 0) {
+                    Add-Stage -Name 'Integration cleanup' -Result 'PASS' -Detail "$($managed.Count) managed integration(s) removed"
+                    Write-Stage "      All package-owned integrations removed" 'Pass'
+                } else {
+                    Add-Stage -Name 'Integration cleanup' -Result 'FAIL' `
+                              -Detail (($lingering | ForEach-Object { "$($_.Kind) $($_.Id) still present" }) -join '; ')
+                    Write-Stage "      $($lingering.Count) package-owned integration(s) still present after uninstall" 'Fail'
+                }
             }
         }
     }

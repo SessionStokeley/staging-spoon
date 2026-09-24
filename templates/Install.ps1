@@ -162,5 +162,22 @@ try {
     exit 1
 }
 
+# --- Windows integrations (only when the package declares any) ---------------
+# Additive and guarded: a package with no integrations.json behaves exactly as
+# before. When present, the managed integrations are established and the
+# vendor-owned ones verified after a successful install; a failure there fails
+# the deployment, because an application whose PATH entry or shortcut is missing
+# is not correctly installed.
+$applyIntegrations = Join-Path $PackageRoot 'Apply-Integrations.ps1'
+$integrationConfig = Join-Path $PackageRoot 'integrations.json'
+if ((Test-Path -LiteralPath $applyIntegrations -PathType Leaf) -and (Test-Path -LiteralPath $integrationConfig -PathType Leaf)) {
+    Write-Log "Applying Windows integrations"
+    & $applyIntegrations -ConfigPath $integrationConfig 2>&1 | ForEach-Object { Write-Log $_ }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "Integration application failed with exit code $LASTEXITCODE" -Level ERROR
+        exit $LASTEXITCODE
+    }
+}
+
 # Always terminate explicitly; never rely on implicit exit behaviour.
 exit $exitCode

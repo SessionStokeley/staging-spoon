@@ -85,6 +85,17 @@ try {
     Write-Log "Package root: $PackageRoot"
     Write-Log "Running as: $($identity.Name) (System=$($identity.IsSystem))"
 
+    # Remove only the integrations this package recorded owning. Driven by the
+    # saved ownership state, so a vendor-created (VALIDATE) association, and any
+    # PATH entry or key the package did not add, is left untouched. Runs first
+    # and independently of the vendor uninstall, so it happens even when the app
+    # is already gone.
+    $removeIntegrations = Join-Path $PackageRoot 'Remove-Integrations.ps1'
+    if (Test-Path -LiteralPath $removeIntegrations -PathType Leaf) {
+        Write-Log "Removing package-owned Windows integrations"
+        & $removeIntegrations 2>&1 | ForEach-Object { Write-Log $_ }
+    }
+
     $filePath = $null
     $arguments = @()
 

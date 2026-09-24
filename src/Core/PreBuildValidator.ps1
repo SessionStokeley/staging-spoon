@@ -274,10 +274,17 @@ function Invoke-PreBuildValidation {
         @()
     }
 
+    # The integration engine, its wrappers and integrations.json carry absolute
+    # Windows paths on purpose: the install target (C:\Program Files\...), the
+    # Public desktop, and worked examples in the engine's own comments. Those
+    # are declared targets and documentation, not a wrapper leaking a build
+    # machine's path, so they are exempt from the hygiene scan.
+    $integrationFiles = @('Integrations.ps1', 'Apply-Integrations.ps1', 'Remove-Integrations.ps1', 'integrations.json')
+
     $pathResult = Invoke-PathValidation -PackagePath $resolvedSource `
                                         -InstallBehavior $Manifest.InstallBehavior `
                                         -AllowedPath $AllowedPath `
-                                        -ExcludeScript $detectionScriptName
+                                        -ExcludeScript (@($detectionScriptName) + $integrationFiles)
 
     $invalid = @($pathResult.InvalidPaths)
     $checks.Add((New-ValidationCheck -Name 'No invalid absolute paths' -Passed ($invalid.Count -eq 0) `
