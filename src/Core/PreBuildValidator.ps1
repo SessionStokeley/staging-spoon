@@ -33,27 +33,29 @@ function New-ValidationCheck {
 function Get-WrapperInstallerReference {
     <#
     .SYNOPSIS
-        Reads the installer file name an install wrapper declares.
+        Reads the installer name the install command passes to the wrapper.
     .DESCRIPTION
-        Only a literal assignment can be checked. A computed value is reported
-        as undeclared rather than guessed at, because a wrong guess here would
-        block a package that is actually correct.
+        The wrapper no longer names its own installer; the generated command
+        does, through -InstallerName, so package.json stays the single source.
+        The name is therefore read from the command rather than the template. A
+        command that passes no explicit -InstallerName is reported as undeclared
+        rather than guessed at, since a wrong guess would block a correct
+        package.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$ScriptPath)
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$CommandLine)
 
-    if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
         return [PSCustomObject]@{ Declared = $false; InstallerName = '' }
     }
 
-    $content = Get-Content -LiteralPath $ScriptPath -Raw
-    $match = [regex]::Match($content, '(?m)^\s*\$InstallerName\s*=\s*[''"]([^''"]+)[''"]')
-
+    $match = [regex]::Match($CommandLine, '-InstallerName\s+(?:"([^"]+)"|(\S+))')
     if (-not $match.Success) {
         return [PSCustomObject]@{ Declared = $false; InstallerName = '' }
     }
 
-    [PSCustomObject]@{ Declared = $true; InstallerName = $match.Groups[1].Value }
+    $name = if ($match.Groups[1].Success) { $match.Groups[1].Value } else { $match.Groups[2].Value }
+    [PSCustomObject]@{ Declared = $true; InstallerName = $name }
 }
 
 # The example values the templates ship with. A package that still carries any
@@ -193,22 +195,26 @@ function Invoke-PreBuildValidation {
                      })))
     }
 
-    # The wrapper names its own installer. Left at the template default while
-    # the package ships something else, it throws before the vendor installer
-    # is ever started - which surfaces only as a bare exit 1 after a full
-    # install/uninstall cycle has already run.
-    $installerReference = Get-WrapperInstallerReference -ScriptPath $installScript
-    if ($installerReference.Declared) {
-        $matchesManifest = $installerReference.InstallerName -eq $Manifest.SourceInstaller
-        $checks.Add((New-ValidationCheck -Name 'Install.ps1 targets the packaged installer' -Passed $matchesManifest `
-                     -Detail $(if ($matchesManifest) {
-                         $installerReference.InstallerName
-                     } else {
-                         "Install.ps1 sets `$InstallerName = '$($installerReference.InstallerName)' but the package ships '$($Manifest.SourceInstaller)'"
-                     })))
-    } else {
-        $checks.Add((New-ValidationCheck -Name 'Install.ps1 targets the packaged installer' -Passed $true -Severity 'Warning' `
-                     -Detail 'Install.ps1 does not declare $InstallerName as a literal; cannot verify it against the manifest'))
+    # The install command names the installer it runs, via -InstallerName. Point
+    # it at a file the package does not ship and the wrapper throws before the
+    # vendor installer ever starts - which otherwise surfaces only as a bare
+    # exit 1 after a full install/uninstall cycle has run. Checked only for a
+    # wrapper command; a bare installer command names the installer as its own
+    # executable, covered by the source-installer existence check above.
+    if ($Manifest.InstallCommand -match '(?i)Install\.ps1') {
+        $installerReference = Get-WrapperInstallerReference -CommandLine $Manifest.InstallCommand
+        if ($installerReference.Declared) {
+            $matchesManifest = $installerReference.InstallerName -eq $Manifest.SourceInstaller
+            $checks.Add((New-ValidationCheck -Name 'Install.ps1 targets the packaged installer' -Passed $matchesManifest `
+                         -Detail $(if ($matchesManifest) {
+                             $installerReference.InstallerName
+                         } else {
+                             "The install command runs '$($installerReference.InstallerName)' but the package ships '$($Manifest.SourceInstaller)'"
+                         })))
+        } else {
+            $checks.Add((New-ValidationCheck -Name 'Install.ps1 targets the packaged installer' -Passed $true -Severity 'Warning' `
+                         -Detail 'The install command passes no -InstallerName; regenerate package.json with New-PackageProject.ps1 so it does'))
+        }
     }
 
     if ($Manifest.DetectionMethod -eq 'Script') {

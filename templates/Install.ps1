@@ -16,10 +16,25 @@
     installer. Leaving a helper or updater resident is normal behaviour, not an
     unfinished installation, and waiting for one that never exits stalls the
     deployment. The installer's own exit code is what says it finished.
+
+    The installer name and its silent arguments are NOT written into this file.
+    They are passed in as parameters by the generated install command, so
+    package.json is the single source of both. -InstallerName is the file to
+    run; the silent switches follow as ordinary arguments and are collected by
+    -InstallerArguments, which keeps each switch a separate value.
 #>
 
 [CmdletBinding()]
 param(
+    [string]$InstallerName = '',
+
+    # Position 0 makes this the one positional parameter, so the silent switches
+    # that follow -InstallerName collect here even when another parameter (such
+    # as -RebootStrategy) is also present. Without an explicit position a bare
+    # switch like /S would bind to whichever parameter came first.
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+    [string[]]$InstallerArguments = @(),
+
     [ValidateSet('Preserve', 'Translate')]
     [string]$RebootStrategy = 'Preserve'
 )
@@ -28,9 +43,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # --- Package configuration ---------------------------------------------------
-$PackageRoot  = $PSScriptRoot
-$InstallerName = 'Setup.exe'
-$InstallerArguments = @('/S', '/v/qn')
+$PackageRoot = $PSScriptRoot
 
 $SuccessExitCodes = @(0)
 $RebootExitCodes  = @(1641, 3010)
@@ -72,17 +85,29 @@ try {
     Write-Log "Running as: $($identity.Name) (System=$($identity.IsSystem), Interactive=$([Environment]::UserInteractive))"
     Write-Log "Process architecture: $(if ([Environment]::Is64BitProcess) { 'x64' } else { 'x86' })"
 
+    # The name is supplied by the generated command, not hard-coded here. An
+    # empty value means the package was generated before the wrapper took
+    # parameters; regenerate package.json rather than guess which file to run.
+    if (-not $InstallerName) {
+        throw "No installer name was passed to Install.ps1. Regenerate the package with New-PackageProject.ps1 so the install command carries -InstallerName."
+    }
+
     $installerPath = Join-Path $PackageRoot $InstallerName
     if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
         throw "Installer not found in package: $installerPath"
     }
 
-    # Arguments are joined into one string and quoted only where a value
-    # contains whitespace, so the installer receives exactly what it would from
-    # a command prompt.
+    # Joined into the single string the process boundary takes. A value the
+    # author already quoted is emitted as written, so the quotes land where the
+    # installer expects them; a value that merely contains a space, and carries
+    # no quotes of its own, is wrapped whole. This is the last layer, so the
+    # string is the installer's own command-line syntax, not PowerShell's.
     $argumentLine = (
         $InstallerArguments | ForEach-Object {
-            if ($_ -match '\s' -and -not ($_.StartsWith('"') -and $_.EndsWith('"'))) { '"' + $_ + '"' } else { $_ }
+            if ([string]::IsNullOrEmpty($_)) { return }
+            if ($_ -match '"') { $_ }
+            elseif ($_ -match '\s') { '"' + $_ + '"' }
+            else { $_ }
         }
     ) -join ' '
 

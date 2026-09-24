@@ -57,10 +57,64 @@ function Format-CommandToken {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Token)
 
     if ([string]::IsNullOrEmpty($Token)) { return '""' }
-    if ($Token.StartsWith('"') -and $Token.EndsWith('"') -and $Token.Length -gt 1) { return $Token }
-    if ($Token -match '\s') { return '"' + $Token + '"' }
 
-    $Token
+    # A token the caller already wrapped in quotes is passed through unchanged:
+    # the MSI command builders quote their own file and log paths.
+    if ($Token.StartsWith('"') -and $Token.EndsWith('"') -and $Token.Length -gt 1) { return $Token }
+
+    # A token that needs no quoting is emitted bare, so a command carries no
+    # quote it does not need.
+    if ($Token -notmatch '\s' -and $Token -notmatch '"') { return $Token }
+
+    # Anything with whitespace or an interior quote is wrapped, doubling any
+    # interior quote. The next layer to parse this command line - powershell.exe
+    # reading its -File arguments - collapses the doubled quotes and recovers the
+    # token exactly, so an installer argument such as PROP="C:\Program Files\X"
+    # survives the round trip instead of arriving split or unbalanced.
+    '"' + ($Token -replace '"', '""') + '"'
+}
+
+function ConvertTo-ArgumentTokens {
+    <#
+    .SYNOPSIS
+        Splits an argument string into tokens, honouring quoted spans.
+    .DESCRIPTION
+        installer.silentArguments is authored as one string. Splitting it on
+        whitespace alone breaks an argument whose value contains a space, so the
+        split respects quotes: whitespace inside a quoted span does not end a
+        token, and each token keeps its own quotes verbatim. A value the author
+        quoted for the installer therefore reaches the installer quoted the same
+        way.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$ArgumentString)
+
+    if ([string]::IsNullOrWhiteSpace($ArgumentString)) { return @() }
+
+    $tokens   = [System.Collections.Generic.List[string]]::new()
+    $current  = [System.Text.StringBuilder]::new()
+    $inQuotes = $false
+
+    foreach ($char in $ArgumentString.ToCharArray()) {
+        if ($char -eq '"') {
+            $inQuotes = -not $inQuotes
+            [void]$current.Append($char)
+            continue
+        }
+
+        if (($char -eq ' ' -or $char -eq "`t") -and -not $inQuotes) {
+            if ($current.Length -gt 0) {
+                $tokens.Add($current.ToString())
+                [void]$current.Clear()
+            }
+            continue
+        }
+
+        [void]$current.Append($char)
+    }
+
+    if ($current.Length -gt 0) { $tokens.Add($current.ToString()) }
+    $tokens.ToArray()
 }
 
 function New-PowerShellScriptCommand {
@@ -75,7 +129,9 @@ function New-PowerShellScriptCommand {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ScriptName,
-        [string[]]$ScriptArguments = @()
+        [string[]]$ScriptArguments = @(),
+        [string]$InstallerName = '',
+        [string[]]$InstallerArguments = @()
     )
 
     # "./" rather than ".\": PowerShell accepts either on Windows, and the
@@ -99,7 +155,20 @@ function New-PowerShellScriptCommand {
         '-ExecutionPolicy', 'Bypass'
         '-NonInteractive'
         '-File', $relative
-    ) + $ScriptArguments
+    )
+
+    # The installer name and its silent arguments are passed to the wrapper as
+    # parameters, so the values in package.json are the ones that execute. The
+    # name binds to -InstallerName; the arguments follow as trailing tokens the
+    # wrapper collects with ValueFromRemainingArguments, which keeps each one a
+    # separate argument through powershell.exe's own -File parsing rather than
+    # collapsing them into a single mis-quoted string.
+    if ($InstallerName) {
+        $arguments += @('-InstallerName', $InstallerName)
+        $arguments += @($InstallerArguments)
+    }
+
+    $arguments += $ScriptArguments
 
     New-StructuredCommand -Executable 'powershell.exe' -Arguments $arguments
 }

@@ -103,14 +103,16 @@ source\
   Detection.ps1      from templates\
 ```
 
-Copy the three scripts from `templates\` and edit the variables at the top of
-each. They already resolve their payload relative to themselves, preserve the
-vendor's exit code, write a log, and implement Intune's detection contract, so
-editing the variables is normally all that is needed.
+Copy the three scripts from `templates\`. They already resolve their payload
+relative to themselves, preserve the vendor's exit code, write a log, and
+implement Intune's detection contract. `Install.ps1` takes the installer name
+and its silent switches as parameters from `package.json`, so it needs no
+per-package edits; `Uninstall.ps1` and `Detection.ps1` have a few criteria to
+set at the top, below.
 
 | Script | What to set |
 | --- | --- |
-| `Install.ps1` | `$InstallerName` (must match the file name) and `$InstallerArguments` (the silent switches) |
+| `Install.ps1` | Nothing per package. The installer name and its silent switches come from `package.json` (`SourceInstaller` and the install command's `-InstallerName` and trailing switches), passed in when the wrapper runs. Set them once in `package.json`, not in the script. |
 | `Uninstall.ps1` | `$DisplayName` **or** `$ProductCode`, matching what the installer registers |
 | `Detection.ps1` | `$DisplayName` (matched against the registry with `-like`, so `Example App*` handles a version suffix), `$ExpectedVersion` (a **minimum**, not an exact match), `$ExpectedFile` (relative to Program Files), `$ProgramFilesVariable` (set it to `ProgramFiles(x86)` for a 32-bit application) |
 
@@ -812,22 +814,26 @@ vendor installer ever started. Open the `## Output` section of
 line before the failure names the cause. The same lines are in
 `%ProgramData%\IntuneDeployment\Logs`.
 
-The most common cause is `$InstallerName` in `Install.ps1` still holding the
-template default `Setup.exe` while the package ships something else, such as
-`ideaIU-262.9437.185.exe`. The wrapper cannot find it and stops. Pre-build
-validation now checks this against the manifest and blocks the build, so the
-message to look for is:
+The most common cause is the install command naming an installer the package
+does not ship — `SourceInstaller` and the `-InstallerName` in the install
+command disagreeing with the file that is actually present. The wrapper cannot
+find it and stops. Pre-build validation checks the command against the manifest
+and blocks the build, so the message to look for is:
 
 ```
 [FAIL] Install.ps1 targets the packaged installer
-       Install.ps1 sets $InstallerName = 'Setup.exe' but the package ships '<your installer>'
+       The install command runs 'Setup.exe' but the package ships '<your installer>'
 ```
 
-The second most common cause is `$InstallerArguments`. The template ships
-`@('/S', '/v/qn')`, which is a placeholder, not a universal switch set — `/S`
-is NSIS and `/v/qn` is InstallShield. Replace it with the switches your
-vendor documents. Exit 1 from a vendor installer given switches it does not
-understand is common.
+The fix is to regenerate `package.json` with `New-PackageProject.ps1` against
+the real installer, rather than editing the wrapper: the installer name and its
+silent switches live in `package.json` and are passed to `Install.ps1` when it
+runs. Nothing about the installer is written inside the template.
+
+The second most common cause is the silent switches themselves. `/S` is NSIS,
+`/VERYSILENT` is Inno, `/qn` is MSI — there is no universal set. Exit 1 from a
+vendor installer given switches it does not understand is common; use the ones
+the vendor documents, set in `package.json`.
 
 ### The installer works manually but fails through Intune
 

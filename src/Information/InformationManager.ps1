@@ -221,15 +221,26 @@ function New-DeploymentBlueprint {
     $productCode       = Get-ProjectFieldValue -Project $Project -Path 'installer.productCode' -Default ''
     $uninstallString   = Get-ProjectFieldValue -Project $Project -Path 'installation.uninstallString' -Default ''
 
+    # Silent arguments are authored as one string but travel as tokens, so an
+    # argument whose value contains a space stays one argument.
+    $argumentTokens = ConvertTo-ArgumentTokens -ArgumentString $silentArguments
+
     # A wrapper script is the default because it is what preserves the vendor
-    # exit code and writes a log; a bare installer command does neither.
+    # exit code and writes a log; a bare installer command does neither. The
+    # wrapper is handed the installer name and its silent arguments from the
+    # information model, so package.json is the single source of both and they
+    # are never restated inside the template.
     $installCommand = if ($UseWrapperScripts -or -not $installerFileName) {
-        New-PowerShellScriptCommand -ScriptName 'Install.ps1'
+        if ($installerFileName) {
+            New-PowerShellScriptCommand -ScriptName 'Install.ps1' `
+                -InstallerName $installerFileName -InstallerArguments $argumentTokens
+        } else {
+            New-PowerShellScriptCommand -ScriptName 'Install.ps1'
+        }
     } elseif ($installerType -eq 'MSI') {
         New-MsiInstallCommand -InstallerFileName $installerFileName
     } else {
-        $arguments = if ($silentArguments) { @($silentArguments -split '\s+') } else { @() }
-        New-StructuredCommand -Executable ".\$installerFileName" -Arguments $arguments
+        New-StructuredCommand -Executable ".\$installerFileName" -Arguments $argumentTokens
     }
 
     $uninstallCommand = if ($UseWrapperScripts -or (-not $productCode -and -not $uninstallString)) {

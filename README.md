@@ -260,6 +260,14 @@ template's example values.
 executable plus an argument list and renders the string at the end. Re-parsing
 a command string is where quoting bugs and duplicated switches come from.
 
+**One source for the installer name and switches.** They live in `package.json`
+(`installer.fileName` and `installer.silentArguments`). `CommandModel.ps1` puts
+them into the generated install command — `-InstallerName` for the file, the
+silent switches as trailing arguments — and `Install.ps1` takes them as
+parameters. The template hard-codes neither, so the configured values apply
+exactly once, on both the normal and the SYSTEM-context execution paths, rather
+than being restated inside the wrapper where they could drift.
+
 **One canonical path format, converted only at the edge.** Every stored and
 displayed path uses forward slashes, on every platform. A single form means a
 path reads identically in `project.json`, the manifest, the HTML report and the
