@@ -812,6 +812,57 @@ $invalidPaths = @($dirtyResult.PathValidation.InvalidPaths)
 Test-Case 'developer path found' (@($invalidPaths | Where-Object { $_.Path -like '*jsmith*' }).Count -ge 1)
 Test-Case 'UNC path found'       (@($invalidPaths | Where-Object { $_.Path -like '\\fileserver*' }).Count -ge 1)
 
+# --- Stale-artifact matching: -like, not the provider -Filter ----------------
+# On Windows the FileSystem provider's -Filter matches "*.log" against names
+# like "ad.logconfig" (legacy short-name wildcard semantics), which flagged
+# required vendor configuration files as stale logs. The scan now matches names
+# with -like, which does not over-match. Asserted on the specific check so the
+# result is independent of the other pre-build gates.
+Write-Host "`nStale-artifact matching"
+
+$staleWork = Join-Path $WorkPath 'stale-matching'
+New-Item -Path $staleWork -ItemType Directory -Force | Out-Null
+'binary' | Set-Content -LiteralPath (Join-Path $staleWork 'Setup.exe')
+foreach ($name in @('Install.ps1', 'Uninstall.ps1', 'Detection.ps1')) {
+    Copy-Item -LiteralPath (Join-Path $repo "templates/$name") -Destination (Join-Path $staleWork $name)
+}
+# Vendor configuration files (Autodesk / log4cplus) that must NOT be flagged.
+'log4cplus' | Set-Content -LiteralPath (Join-Path $staleWork 'ad.logconfig')
+'log4cplus' | Set-Content -LiteralPath (Join-Path $staleWork 'add.logconfig')
+
+$staleManifest = New-PackageManifest -ApplicationName 'Vendor App' -ApplicationVersion '1.0' `
+    -PackageVersion '1.0.0' -InstallerType 'EXE' -SourceInstaller 'Setup.exe' `
+    -InstallCommand 'powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File ./Install.ps1 -InstallerName Setup.exe /S' `
+    -UninstallCommand 'powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File ./Uninstall.ps1' `
+    -DetectionMethod 'Script' -DetectionScript 'Detection.ps1' -ContentDirectory $staleWork
+
+function Get-StaleCheck {
+    param([string]$Source, [PSCustomObject]$Manifest)
+    $result = Invoke-PreBuildValidation -SourcePath $Source -Manifest $Manifest
+    [PSCustomObject]@{
+        Check    = @($result.Checks | Where-Object { $_.Name -eq 'No stale build artifacts in source' })[0]
+        CanBuild = $result.CanBuild
+    }
+}
+
+$noStale = Get-StaleCheck -Source $staleWork -Manifest $staleManifest
+Test-Case 'ad.logconfig is not a stale artifact'  ($noStale.Check.Passed) $noStale.Check.Detail
+Test-Case 'add.logconfig is not a stale artifact' ($noStale.Check.Detail -notmatch 'logconfig')
+
+# A genuine stale log, plus a nested one, prove detection and recursion.
+'log' | Set-Content -LiteralPath (Join-Path $staleWork 'foo.log')
+$staleSub = Join-Path $staleWork 'resources'
+New-Item -Path $staleSub -ItemType Directory -Force | Out-Null
+'tmp' | Set-Content -LiteralPath (Join-Path $staleSub 'deep.tmp')
+
+$withStale = Get-StaleCheck -Source $staleWork -Manifest $staleManifest
+Test-Case 'foo.log is detected as stale'          ($withStale.Check.Detail -match 'foo\.log')
+Test-Case 'existing patterns still match (.tmp)'   ($withStale.Check.Detail -match 'deep\.tmp')
+Test-Case 'recursive scan finds nested stale file' ($withStale.Check.Detail -match 'deep\.tmp')
+Test-Case 'stale artifact fails the check'         (-not $withStale.Check.Passed)
+Test-Case 'stale artifact blocks the build'        (-not $withStale.CanBuild)
+Test-Case '.logconfig not flagged beside real stale files' ($withStale.Check.Detail -notmatch 'logconfig')
+
 # --- Intune configuration export ---------------------------------------------
 Write-Host "`nIntune configuration export"
 

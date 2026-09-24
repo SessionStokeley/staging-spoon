@@ -311,9 +311,21 @@ function Invoke-PreBuildValidation {
     $checks.Add((New-ValidationCheck -Name 'No nested .intunewin files' -Passed ($nested.Count -eq 0) `
                  -Detail (@($nested | ForEach-Object { $_.Name }) -join ', ')))
 
+    # Matching is done with PowerShell's -like against the file name, not the
+    # provider's -Filter. On Windows -Filter delegates to the Win32 file-matching
+    # API, whose legacy short-name wildcard semantics make "*.log" also match
+    # names like "ad.logconfig" - a vendor configuration file, not a stale log.
+    # -like has none of that: "*.log" matches only names ending in ".log", and
+    # behaves identically on every platform.
+    $allSourceFiles = @(Get-ChildItem -LiteralPath $resolvedSource -Recurse -File -ErrorAction SilentlyContinue)
     $stale = @(
-        foreach ($pattern in $script:StaleArtifactPatterns) {
-            Get-ChildItem -LiteralPath $resolvedSource -Recurse -File -Filter $pattern -ErrorAction SilentlyContinue
+        foreach ($file in $allSourceFiles) {
+            foreach ($pattern in $script:StaleArtifactPatterns) {
+                if ($file.Name -like $pattern) {
+                    $file
+                    break
+                }
+            }
         }
     )
     $checks.Add((New-ValidationCheck -Name 'No stale build artifacts in source' -Passed ($stale.Count -eq 0) `
