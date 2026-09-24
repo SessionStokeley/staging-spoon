@@ -100,15 +100,13 @@ Test-Case 'all spellings agree' (
     (@($equivalentPaths | ForEach-Object { ConvertTo-CanonicalPath -Path $_ } | Select-Object -Unique)).Count -eq 1
 )
 
-# The execution boundary hands back the host's own spelling.
+# The execution boundary hands back the native Windows spelling.
 $nativeSample = ConvertTo-NativePath -Path 'C:/Users/Example/App'
-Test-Case 'native form matches the host' (
-    $nativeSample -eq $(if (Test-WindowsPlatform) { 'C:\Users\Example\App' } else { 'C:/Users/Example/App' })
-) $nativeSample
+Test-Case 'native form is a Windows path' ($nativeSample -eq 'C:\Users\Example\App') $nativeSample
 Test-Case 'native round trips to canonical' ((ConvertTo-CanonicalPath -Path $nativeSample) -eq 'C:/Users/Example/App')
 
-# System.IO.Path only honours the running platform's separator, so canonical
-# Windows paths have to be split here or they come back empty off Windows.
+# Canonical Windows paths are split by the helpers directly so the result does
+# not depend on the runtime's path separator.
 Test-Case 'parent of a nested path'      ((Split-CanonicalPath -Path 'C:\A\B\c.exe') -eq 'C:/A/B')
 Test-Case 'parent at the drive root'     ((Split-CanonicalPath -Path 'C:\c.exe') -eq 'C:/')
 Test-Case 'bare name has no parent'      ((Split-CanonicalPath -Path 'c.exe') -eq '')

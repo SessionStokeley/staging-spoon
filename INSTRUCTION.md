@@ -613,7 +613,7 @@ What happens at each stage:
   installed.
 - **Validation** (`Test-IntunePackage.ps1`) inspects the real machine: the
   shortcut's target, the registry command, the PATH entry — not just the
-  config. On a non-Windows host these stages report `NOT TESTED`.
+  config.
 - **Uninstall** removes exactly what install recorded owning, leaving
   pre-existing PATH entries, unrelated shortcuts, and vendor-created
   associations untouched.

@@ -104,9 +104,6 @@ function ConvertTo-NativePath {
 
     $canonical = ConvertTo-CanonicalPath -Path $Path
 
-    # On a non-Windows host the canonical form is already native.
-    if (-not (Test-WindowsPlatform)) { return $canonical }
-
     $native = $canonical -replace '/', '\'
     if ($native -match '^[A-Za-z]:$') { return $native + '\' }
 

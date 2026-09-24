@@ -6,14 +6,12 @@
     context menu, file association - across the three modes (DISABLED, VALIDATE,
     MANAGE), with ownership tracking that removes only what the package created.
 
-    The risk-bearing logic runs for real on any platform: PATH add/deduplicate/
-    validate/remove and preserve-others through an in-memory environment
-    accessor; ownership save/load and removal against real temporary files;
-    registry command and ProgID generation; mode and SYSTEM-scope resolution;
-    and capture that identifies only application-relevant associations. The raw
-    Windows calls (the COM .lnk, the live registry, the persistent machine PATH)
-    are exercised only on Windows; off Windows those specific assertions report
-    SKIP rather than being faked.
+    The risk-bearing logic is exercised directly: PATH add/deduplicate/validate/
+    remove and preserve-others through an in-memory environment accessor;
+    ownership save/load and removal against real temporary files; registry
+    command and ProgID generation; mode and SYSTEM-scope resolution; and capture
+    that identifies only application-relevant associations. The real-state
+    section drives the COM .lnk and the live registry directly.
 .EXAMPLE
     pwsh -NoProfile -File .\tests\Run-IntegrationTests.ps1
 #>
@@ -246,11 +244,7 @@ Test-Case 'E2E: base PATH intact'           ($e2eStore['Machine:Path'] -eq 'C:\W
 Test-Case 'E2E: unrelated shortcut intact'  (Test-Path -LiteralPath $vendorShortcut)
 
 # ============================================================================
-Write-Host "`nWindows-only real-state checks"
-if (-not (Test-WindowsPlatform)) {
-    Write-Host "  SKIP shortcut .lnk create/read/remove (requires Windows COM)"
-    Write-Host "  SKIP registry context-menu and file-association apply/validate/remove (requires Windows)"
-} else {
+Write-Host "`nReal-state checks (COM shortcuts and the registry)"
     $winDesktop = Join-Path $WorkPath 'win-desktop'
     New-Item -Path $winDesktop -ItemType Directory -Force | Out-Null
     $lnk = Join-Path $winDesktop 'IntelliJ IDEA.lnk'
@@ -274,7 +268,6 @@ if (-not (Test-WindowsPlatform)) {
     Remove-OwnedIntegrations -State $st -RunningAsSystem $false | Out-Null
     Test-Case 'context-menu key removed'  (-not (Test-Path -LiteralPath $plan.Keys[0].VerbKey))
     Remove-Item -LiteralPath 'HKCU:\SOFTWARE\StagingSpoonTests' -Recurse -Force -ErrorAction SilentlyContinue
-}
 
 # ============================================================================
 Remove-Item -LiteralPath $WorkPath -Recurse -Force -ErrorAction SilentlyContinue

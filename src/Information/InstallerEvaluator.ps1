@@ -222,12 +222,9 @@ function Get-UninstallRegistration {
     .DESCRIPTION
         Extends the basic lookup with QuietUninstallString, which is the only
         string a vendor has actually promised will run without a user.
-        Windows only; returns nothing elsewhere.
     #>
     [CmdletBinding()]
     param([string]$NameLike = '*')
-
-    if (-not (Test-WindowsPlatform)) { return @() }
 
     $roots = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'

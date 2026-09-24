@@ -191,10 +191,6 @@ if ($SkipValidation) {
 } else {
     Write-Phase 'DEPLOYMENT VALIDATION'
 
-    if (-not (Test-WindowsPlatform)) {
-        Stop-Build 'Deployment validation requires Windows. Use -SkipValidation only to produce an unvalidated package.'
-    }
-
     # The manifest is written to the source so the test runs against the exact
     # content that will be packaged.
     $stagedManifestPath = Join-Path $resolvedSource 'PackageManifest.json'

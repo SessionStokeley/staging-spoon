@@ -151,8 +151,7 @@ reimplementing any of the logic that decided to ask.
 - **No external modules.** Everything uses in-box cmdlets and .NET types.
 - **`IntuneWinAppUtil.exe`** (Microsoft Win32 Content Prep Tool) for packaging.
 - **JSON** for every persisted artifact.
-- **COM (`WindowsInstaller.Installer`)** for the MSI property table, guarded so
-  non-Windows hosts degrade rather than fail.
+- **COM (`WindowsInstaller.Installer`)** for the MSI property table.
 
 ## Repository structure
 
@@ -218,10 +217,9 @@ The engine, `src/Core/Integrations.ps1`, is self-contained so it can be staged
 into the package. Its decision logic — PATH add/deduplicate/remove and
 preserve-others, ownership selection, the registry command and ProgID
 generation, mode and scope resolution, and capture that identifies only
-application-relevant associations — is pure and tested on any platform; the raw
-Windows calls (COM `.lnk`, the live registry, the persistent machine PATH) run
-only on Windows, and `Test-IntunePackage.ps1` reports its integration stages as
-NOT TESTED off Windows rather than faking them.
+application-relevant associations — is kept separate from the operating-system
+calls it drives (COM `.lnk`, the live registry, the machine PATH), which
+`Test-IntunePackage.ps1` verifies against real machine state after install.
 
 ## Configuration architecture
 
@@ -411,9 +409,10 @@ cd staging-spoon
 pwsh -NoProfile -File ./tests/Run-Tests.ps1
 ```
 
-PowerShell 7 is enough for development and for the whole test suite. Only the
-deployment validation itself requires Windows, elevation and a disposable
-machine — it genuinely installs and uninstalls software.
+The tool targets Windows and runs on Windows PowerShell 5.1 (the in-box
+edition) and on PowerShell 7. Deployment validation additionally needs
+elevation and a disposable machine — it genuinely installs and uninstalls
+software.
 
 To work with the information layer interactively:
 
@@ -428,19 +427,19 @@ Get-InformationInventory -Project $project | Format-Table
 
 ## Testing architecture
 
-Three suites, all runnable on Linux:
-
-```
-pwsh -NoProfile -File ./tests/Run-Tests.ps1               # 50 tests
-pwsh -NoProfile -File ./tests/Run-InformationTests.ps1    # 167 tests
-pwsh -NoProfile -File ./tests/Run-CompatibilityTests.ps1  # static scan
+```powershell
+pwsh -NoProfile -File .\tests\Run-Tests.ps1
+pwsh -NoProfile -File .\tests\Run-InformationTests.ps1
+pwsh -NoProfile -File .\tests\Run-CompatibilityTests.ps1
+pwsh -NoProfile -File .\tests\Run-IntegrationTests.ps1
 ```
 
 | Suite | Covers |
 | --- | --- |
 | `Run-Tests.ps1` | Command parsing, path classification, manifest validation, failure classification, the pre-build gate against clean and deliberately dirty packages, Intune config export including drift detection, HTML report encoding |
 | `Run-InformationTests.ps1` | Field model and source arbitration, facts versus decisions, resource identity and recovery, filename derivation, the command model, capture integration, requirement calculation, and an end-to-end acceptance scenario |
-| `Run-CompatibilityTests.ps1` | Static scan for constructs that work in PowerShell 7 but break on 5.1 |
+| `Run-IntegrationTests.ps1` | The four Windows integrations, the three modes, ownership-driven removal, and the real-state checks against COM shortcuts and the registry |
+| `Run-CompatibilityTests.ps1` | Static scan for constructs that work in PowerShell 7 but break on Windows PowerShell 5.1 |
 
 The acceptance scenario in `Run-InformationTests.ps1` is the important one. It
 asserts the behaviour the information layer exists to provide: after an
@@ -448,22 +447,18 @@ installer is selected and a capture imported, nothing already discovered is
 asked for, only policy decisions remain, answering them once is enough, and
 reopening the project asks nothing.
 
-Everything except MSI property reading, uninstall-registry lookup and the
-deployment validation itself is platform-independent, which is what allows the
-suites to run in CI.
-
 ### Compatibility
 
-`Run-CompatibilityTests.ps1` exists because the suite cannot execute Windows
-PowerShell 5.1, so it scans the source instead — for `$IsWindows`,
-`[System.Text.Encoding]::Latin1`, `??`, `&&`, `-Parallel`, `-AsHashtable`,
-non-ASCII console output, and `int + "string"` concatenation.
+The target is Windows on both PowerShell editions. `Run-CompatibilityTests.ps1`
+guards against constructs that work in PowerShell 7 but break on Windows
+PowerShell 5.1: it scans the source for `$IsWindows` and the other automatic
+platform variables, `[System.Text.Encoding]::Latin1`, `??`, `&&`, `-Parallel`,
+`-AsHashtable`, non-ASCII console output, and `int + "string"` concatenation.
 
-Use `Test-WindowsPlatform` and `Get-Latin1Encoding` from
-`src/Core/Platform.ps1` rather than the PowerShell 7 equivalents. `$IsWindows`
-does not exist on 5.1 and, under `Set-StrictMode`, reading it throws rather
-than returning false — guarding it with a version check does not help, because
-the reference is evaluated before the guard.
+Use `Get-Latin1Encoding` from `src/Core/Platform.ps1` rather than
+`[System.Text.Encoding]::Latin1`, which is .NET 5 and later only. The automatic
+`$Is*` variables do not exist on 5.1 and, under `Set-StrictMode`, reading one
+throws rather than returning false, so the code does not reference them.
 
 All source files set `Set-StrictMode -Version Latest`. Functions that may
 return an empty collection are wrapped in `@()` at the call site, because

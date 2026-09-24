@@ -144,9 +144,8 @@ function Get-InstallerFamily {
     if ((Get-CanonicalExtension -Path $Path).ToLowerInvariant() -eq '.msi') { return 'MSI' }
 
     try {
-        # Paths reaching here are in the platform's canonical Windows form,
-        # which the raw file APIs cannot open on a non-Windows host. The
-        # provider resolves it to something they can.
+        # Paths reaching here are in canonical forward-slash form; resolve them
+        # to the native provider path the raw file APIs expect.
         $nativePath = (Resolve-Path -LiteralPath $Path).ProviderPath
 
         $stream = [System.IO.File]::OpenRead($nativePath)
@@ -207,7 +206,6 @@ function Get-MsiProperty {
 
     $properties = @{}
 
-    if (-not (Test-WindowsPlatform)) { return $properties }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $properties }
 
     $installer = $null
@@ -248,12 +246,10 @@ function Get-MsiProperty {
 function Find-InstalledApplication {
     <#
     .SYNOPSIS
-        Reads Add/Remove Programs from both registry views. Windows only.
+        Reads Add/Remove Programs from both registry views.
     #>
     [CmdletBinding()]
     param([string]$NameLike = '*')
-
-    if (-not (Test-WindowsPlatform)) { return @() }
 
     $roots = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'

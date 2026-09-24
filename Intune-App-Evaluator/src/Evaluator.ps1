@@ -4,8 +4,8 @@
 .DESCRIPTION
     Orchestrates discovery of the installed application into a set of fields,
     each carrying its source, confidence and verification. Reads the live
-    machine on Windows; accepts injected fixtures otherwise, so the whole
-    orchestration is testable without a Windows host.
+    machine by default; accepts injected evidence so the orchestration can be
+    driven from fixtures under test.
 #>
 
 Set-StrictMode -Version Latest
@@ -21,8 +21,8 @@ function Invoke-ApplicationEvaluation {
         the installer type and a toolkit-suggested silent switch (flagged for
         confirmation, never presented as verified).
     .PARAMETER ArpRecords / MachinePath / UserPath / Executables / Shortcuts
-        Injected evidence. When omitted on Windows, each is read live; supplying
-        them (as tests do) drives the same orchestration off Windows.
+        Injected evidence. When omitted, each is read from the live machine;
+        supplying them (as tests do) drives the same orchestration from fixtures.
     #>
     [CmdletBinding()]
     param(
@@ -88,7 +88,7 @@ function Invoke-ApplicationEvaluation {
     }
     $mainExe = Resolve-MainExecutable -DisplayIcon $app.DisplayIcon -InstallLocation $installLocation -ApplicationName $app.DisplayName -Executables @($Executables)
     if ($null -ne $mainExe) {
-        $verified = (Test-WindowsPlatform) -and (Test-Path -LiteralPath $mainExe.Path)
+        $verified = Test-Path -LiteralPath $mainExe.Path
         $null = Add-EvaluatedField -Result $result -Field (New-EvaluatedField -Path 'installation.executable' -Value $mainExe.Path `
             -Source 'InstalledSystem' -Confidence $mainExe.Confidence -Verified $verified -Group 'Application' -Evidence $mainExe.Reason)
     } else {
@@ -160,7 +160,7 @@ function Invoke-ApplicationEvaluation {
     }
 
     # --- Shortcuts ----------------------------------------------------------
-    if (-not $PSBoundParameters.ContainsKey('Shortcuts') -and (Test-WindowsPlatform)) {
+    if (-not $PSBoundParameters.ContainsKey('Shortcuts')) {
         $snapshot = New-SystemStateSnapshot
         $Shortcuts = @($snapshot.Shortcuts)
     }

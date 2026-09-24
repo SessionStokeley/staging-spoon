@@ -15,26 +15,14 @@
     The decisions that make these safe - never removing a resource the package
     did not create, never adding a PATH entry twice, resolving where a resource
     lives under SYSTEM rather than assuming the calling user's profile - are
-    pure functions tested on any platform. The raw operating-system calls (the
-    COM shortcut, the registry, the machine PATH) are thin adapters guarded by
-    Test-WindowsPlatform, because only Windows has them to call.
+    kept as their own functions, separate from the operating-system calls (the
+    COM shortcut, the registry, the machine PATH) they drive.
 
     This file is self-contained so it can be staged into a package and run on
     the target beside Install.ps1 and Uninstall.ps1.
 #>
 
 Set-StrictMode -Version Latest
-
-# Platform probe, redefined only if the package staged this file without
-# Platform.ps1 beside it. Test-WindowsPlatform from Platform.ps1 wins when both
-# are present, because dot-sourcing order leaves the last definition in force.
-if (-not (Get-Command -Name 'Test-WindowsPlatform' -ErrorAction SilentlyContinue)) {
-    function Test-WindowsPlatform {
-        $variable = Get-Variable -Name 'IsWindows' -ErrorAction SilentlyContinue
-        if ($null -eq $variable) { return $true }
-        [bool]$variable.Value
-    }
-}
 
 $script:IntegrationModes = @('DISABLED', 'VALIDATE', 'MANAGE')
 $script:IntegrationKinds = @('Path', 'Shortcut', 'ContextMenu', 'FileAssociation')
@@ -136,9 +124,9 @@ function New-EnvironmentAccessor {
     .DESCRIPTION
         The default accessor is the real Windows environment. Tests pass a
         hashtable-backed accessor instead, so the add/deduplicate/remove and
-        preserve-others logic runs for real off Windows without touching the
-        machine. Both honour the same contract: Get returns the current value,
-        Set replaces it.
+        preserve-others logic can be exercised without touching the machine.
+        Both honour the same contract: Get returns the current value, Set
+        replaces it.
     #>
     [CmdletBinding()]
     param([hashtable]$Store)
@@ -402,8 +390,6 @@ function Resolve-DesktopLocation {
             [PSCustomObject]@{ Directory = $CustomPath; ReachesIntendedUsers = $true; Limitation = '' }
         }
         'User' {
-            # Built by string join, not Join-Path: these are Windows target
-            # paths and Join-Path rejects the C: drive when this runs on Linux.
             $dir = if ($env:USERPROFILE) { ($env:USERPROFILE.TrimEnd('\', '/') + '\Desktop') } else { '' }
             [PSCustomObject]@{
                 Directory            = $dir
@@ -425,8 +411,7 @@ function Set-Shortcut {
     .SYNOPSIS
         Creates or overwrites a .lnk with the given target and options.
     .DESCRIPTION
-        Uses the WScript.Shell COM object, which exists only on Windows; the
-        caller guards with Test-WindowsPlatform. Returns the shortcut path so
+        Uses the WScript.Shell COM object. Returns the shortcut path so
         ownership can record it.
     #>
     [CmdletBinding()]
@@ -571,7 +556,7 @@ function Get-IntegrationScopeValue {
     if ($Definition.PSObject.Properties.Name -contains 'Scope' -and $Definition.Scope) { [string]$Definition.Scope } else { $Default }
 }
 
-# --- PATH orchestration (pure, tested cross-platform) -----------------------
+# --- PATH orchestration ------------------------------------------------------
 
 function Invoke-PathIntegration {
     <#
@@ -651,13 +636,7 @@ function Invoke-ShortcutIntegration {
     $location = if ($Definition.PSObject.Properties.Name -contains 'Location' -and $Definition.Location) { [string]$Definition.Location } else { 'Public' }
     $custom   = if ($Definition.PSObject.Properties.Name -contains 'LocationPath') { [string]$Definition.LocationPath } else { '' }
     $resolved = Resolve-DesktopLocation -Location $location -CustomPath $custom -RunningAsSystem $RunningAsSystem
-    # String join, not Join-Path: the desktop directory is a Windows path that
-    # Join-Path would reject for its C: drive when this is exercised on Linux.
     $linkPath = ($resolved.Directory.TrimEnd('\', '/') + '\' + $Definition.Name + '.lnk')
-
-    if (-not (Test-WindowsPlatform)) {
-        return [PSCustomObject]@{ Success = $false; Skipped = $true; Reason = 'Shortcut operations require Windows'; Path = $linkPath }
-    }
 
     switch ($Action) {
         'Apply' {
@@ -753,9 +732,6 @@ function Invoke-ContextMenuIntegration {
         -Extensions @(if ($Definition.PSObject.Properties.Name -contains 'Extensions') { $Definition.Extensions } else { @() }) `
         -Icon $(if ($Definition.PSObject.Properties.Name -contains 'Icon') { [string]$Definition.Icon } else { '' })
 
-    if (-not (Test-WindowsPlatform)) {
-        return [PSCustomObject]@{ Success = $false; Skipped = $true; Reason = 'Registry operations require Windows'; Plan = $plan }
-    }
     if ($Action -ne 'Validate' -and -not $classes.ReachesIntendedUsers) {
         return [PSCustomObject]@{ Success = $false; Reason = $classes.Limitation; Plan = $plan }
     }
@@ -811,9 +787,6 @@ function Invoke-FileAssociationIntegration {
         -Arguments $(if ($Definition.PSObject.Properties.Name -contains 'Arguments' -and $Definition.Arguments) { [string]$Definition.Arguments } else { '"%1"' }) `
         -Icon $(if ($Definition.PSObject.Properties.Name -contains 'Icon') { [string]$Definition.Icon } else { '' })
 
-    if (-not (Test-WindowsPlatform)) {
-        return [PSCustomObject]@{ Success = $false; Skipped = $true; Reason = 'Registry operations require Windows'; Plan = $plan }
-    }
     if ($Action -ne 'Validate' -and -not $classes.ReachesIntendedUsers) {
         return [PSCustomObject]@{ Success = $false; Reason = $classes.Limitation; Plan = $plan }
     }
@@ -937,9 +910,7 @@ function Remove-OwnedIntegrations {
         Driven entirely by the saved state, never by the current configuration,
         so a VALIDATE integration (never recorded) is never touched, an entry
         the package did not add is never removed, and an unrelated PATH entry or
-        registry key is left alone. PATH removal runs through the accessor, so
-        preserve-others is exercised on any platform; shortcut and registry
-        removal are Windows-only.
+        registry key is left alone. PATH removal runs through the accessor.
     #>
     [CmdletBinding()]
     param(
@@ -963,26 +934,16 @@ function Remove-OwnedIntegrations {
         $results.Add([PSCustomObject]@{ Kind = 'EnvVar'; Resource = "$($owned.Scope):$($owned.Name)"; Removed = $true })
     }
 
-    # A shortcut is a recorded file path; deleting exactly that path works on
-    # any platform, so the remove-owned / preserve-others behaviour is not
-    # Windows-gated.
+    # A shortcut is a recorded file path; delete exactly the recorded path.
     foreach ($link in @($State.Shortcuts)) {
         $existed = Test-Path -LiteralPath $link
         if ($existed) { Remove-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue }
         $results.Add([PSCustomObject]@{ Kind = 'Shortcut'; Resource = $link; Removed = $existed })
     }
 
-    # Registry keys can only be removed on Windows; elsewhere the recorded keys
-    # are reported as skipped rather than silently treated as removed.
-    if (Test-WindowsPlatform) {
-        foreach ($key in @($State.RegistryKeys)) {
-            if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue }
-            $results.Add([PSCustomObject]@{ Kind = 'Registry'; Resource = $key; Removed = $true })
-        }
-    } else {
-        foreach ($key in @($State.RegistryKeys)) {
-            $results.Add([PSCustomObject]@{ Kind = 'Registry'; Resource = $key; Removed = $false; Skipped = $true })
-        }
+    foreach ($key in @($State.RegistryKeys)) {
+        if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue }
+        $results.Add([PSCustomObject]@{ Kind = 'Registry'; Resource = $key; Removed = $true })
     }
 
     $results.ToArray()

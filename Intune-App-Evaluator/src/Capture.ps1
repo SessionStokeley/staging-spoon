@@ -4,8 +4,8 @@
 .DESCRIPTION
     Capturing the machine, installing, capturing again and diffing gives far
     better evidence than reading an installer: what actually changed is what the
-    application needs. The snapshot reader is Windows-only; the diff and the
-    attribution of changes to the application are pure and tested anywhere.
+    application needs. The snapshot reader touches the live machine; the diff
+    and the attribution of changes to the application are kept separate from it.
 #>
 
 Set-StrictMode -Version Latest
@@ -15,9 +15,7 @@ function New-SystemStateSnapshot {
     .SYNOPSIS
         A point-in-time picture of the integration-relevant Windows state.
     .DESCRIPTION
-        On Windows it reads the live machine through the inspector adapters. Off
-        Windows it returns an empty snapshot, so a caller can still construct and
-        diff snapshots supplied from fixtures.
+        Reads the live machine through the inspector adapters.
     #>
     [CmdletBinding()]
     param()
@@ -29,8 +27,6 @@ function New-SystemStateSnapshot {
         UserPath     = ''
         Shortcuts    = @()
     }
-
-    if (-not (Test-WindowsPlatform)) { return $snapshot }
 
     $snapshot.Applications = @(Read-UninstallRegistry)
     $snapshot.MachinePath  = Read-PathValue -Scope 'Machine'

@@ -34,16 +34,13 @@ function Stop-ProcessTree {
     try {
         $Process.Kill($true)
     } catch {
-        # Either the overload is missing (5.1) or the tree kill failed.
-        if (Test-WindowsPlatform) {
-            try {
-                Start-Process -FilePath 'taskkill.exe' `
-                              -ArgumentList '/PID', $processId, '/T', '/F' `
-                              -Wait -NoNewWindow -ErrorAction Stop | Out-Null
-            } catch {
-                try { $Process.Kill() } catch { }
-            }
-        } else {
+        # Either the Kill(bool) overload is missing (Windows PowerShell 5.1) or
+        # the tree kill failed; fall back to taskkill, then to a plain Kill.
+        try {
+            Start-Process -FilePath 'taskkill.exe' `
+                          -ArgumentList '/PID', $processId, '/T', '/F' `
+                          -Wait -NoNewWindow -ErrorAction Stop | Out-Null
+        } catch {
             try { $Process.Kill() } catch { }
         }
     }

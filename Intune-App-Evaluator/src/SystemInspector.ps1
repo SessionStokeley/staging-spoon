@@ -4,21 +4,12 @@
 .DESCRIPTION
     The selection and parsing logic - which ARP entry is the application, which
     executable is the main one, which PATH entries and shortcuts and registry
-    verbs belong to it - is pure and tested on any platform. The functions that
-    read the live machine (the uninstall registry, the machine PATH, .lnk files
-    through COM, the file-class registry) are thin adapters that only run on
-    Windows and feed those selectors.
+    verbs belong to it - is kept separate from the functions that read the live
+    machine (the uninstall registry, the machine PATH, .lnk files through COM,
+    the file-class registry), which feed those selectors.
 #>
 
 Set-StrictMode -Version Latest
-
-if (-not (Get-Command -Name 'Test-WindowsPlatform' -ErrorAction SilentlyContinue)) {
-    function Test-WindowsPlatform {
-        $variable = Get-Variable -Name 'IsWindows' -ErrorAction SilentlyContinue
-        if ($null -eq $variable) { return $true }
-        [bool]$variable.Value
-    }
-}
 
 # --- Pure selection and parsing ---------------------------------------------
 
@@ -235,8 +226,6 @@ function Read-UninstallRegistry {
     #>
     [CmdletBinding()]
     param()
-    if (-not (Test-WindowsPlatform)) { return @() }
-
     $keys = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
@@ -268,7 +257,6 @@ function Read-UninstallRegistry {
 function Read-PathValue {
     [CmdletBinding()]
     param([ValidateSet('Machine', 'User')][string]$Scope = 'Machine')
-    if (-not (Test-WindowsPlatform)) { return '' }
     [string][Environment]::GetEnvironmentVariable('Path', $Scope)
 }
 
@@ -283,7 +271,7 @@ function Read-ExecutablesUnder {
 function Read-ShortcutTarget {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
-    if (-not (Test-WindowsPlatform) -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
     $shell = New-Object -ComObject WScript.Shell
     try {
         $s = $shell.CreateShortcut($Path)
@@ -302,7 +290,7 @@ function Read-ShortcutsIn {
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Folder, [string]$Location = 'Unknown', [bool]$MachineWide = $false)
-    if (-not (Test-WindowsPlatform) -or -not (Test-Path -LiteralPath $Folder)) { return @() }
+    if (-not (Test-Path -LiteralPath $Folder)) { return @() }
     @(Get-ChildItem -LiteralPath $Folder -Recurse -Filter '*.lnk' -File -ErrorAction SilentlyContinue | ForEach-Object {
         $sc = Read-ShortcutTarget -Path $_.FullName
         if ($sc) {

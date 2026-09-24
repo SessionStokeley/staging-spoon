@@ -5,8 +5,8 @@
     Exercises the evidence model, the pure selectors, the capture diff and
     attribution, the evaluator orchestration (driven by injected fixtures), and
     the export - including a real check that the exported package.json is
-    accepted by staging-spoon's own manifest and integration validators. Live
-    Windows reads are gated and reported as SKIP off Windows.
+    accepted by staging-spoon's own manifest and integration validators, and a
+    live-inspection read of the machine.
 .EXAMPLE
     pwsh -NoProfile -File .\tests\Run-EvaluatorTests.ps1
 #>
@@ -185,14 +185,10 @@ $check = Test-PackageManifest -Manifest $manifest
 Test-Case 'staging-spoon manifest is valid'   $check.IsValid ($check.Errors -join '; ')
 
 # ============================================================================
-Write-Host "`nWindows-only live inspection"
-if (-not (Test-WindowsPlatform)) {
-    Write-Host "  SKIP live snapshot / registry / .lnk reads (require Windows)"
-} else {
-    $snap = New-SystemStateSnapshot
-    Test-Case 'live snapshot reads applications' (@($snap.Applications).Count -ge 0)
-    Test-Case 'live snapshot reads machine PATH' ($null -ne $snap.MachinePath)
-}
+Write-Host "`nLive inspection"
+$snap = New-SystemStateSnapshot
+Test-Case 'live snapshot reads applications' (@($snap.Applications).Count -ge 0)
+Test-Case 'live snapshot reads machine PATH' ($null -ne $snap.MachinePath)
 
 # ============================================================================
 Write-Host ''

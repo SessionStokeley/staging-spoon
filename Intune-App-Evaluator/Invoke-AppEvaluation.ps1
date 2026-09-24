@@ -11,9 +11,6 @@
     verified. Values that still need a person's eye (a guessed silent switch,
     a per-user install's SYSTEM behaviour) are reported as requiring
     confirmation and, unless -Force, block export.
-
-    Reading the live machine requires Windows. Off Windows the evaluation still
-    runs against injected evidence, which is how the test suite drives it.
 .PARAMETER Name
     The application to evaluate, as it appears in Add/Remove Programs.
 .PARAMETER InstallerPath
@@ -42,12 +39,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'src/Load.ps1')
-
-if (-not (Test-WindowsPlatform)) {
-    Write-Host 'This evaluator reads the live Windows registry, PATH and shortcuts; run it on the target Windows machine.' -ForegroundColor Yellow
-    Write-Host 'Continuing would produce an empty evaluation, so stopping here.' -ForegroundColor Yellow
-    exit 2
-}
 
 $evalArgs = @{ Name = $Name }
 if ($InstallerPath) { $evalArgs['InstallerPath'] = $InstallerPath }

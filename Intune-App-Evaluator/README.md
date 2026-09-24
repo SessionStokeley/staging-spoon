@@ -39,8 +39,8 @@ export unless you pass `-Force` or correct them.
 .\Invoke-AppEvaluation.ps1 -Name 'IntelliJ IDEA*' -Export -OutputPath .\out
 ```
 
-Reading the live machine requires Windows; run it on the target. The report
-prints a status per value:
+Run it on the machine where the application is installed. The report prints a
+status per value:
 
 ```
 [+] detected (observed on the system)   [*] confirmed (you set it)
@@ -96,22 +96,22 @@ snapshot again, diff, and keep the changes that belong to the application.
 
 ```
 src/EvidenceModel.ps1     Fields with source / confidence / verified / status
-src/SystemInspector.ps1   Pure selectors + Windows-only live readers
+src/SystemInspector.ps1   Pure selectors + live registry/PATH/COM readers
 src/Capture.ps1           Before/after snapshot, diff, attribution
 src/Evaluator.ps1         Orchestration into an evidenced result
 src/PackageExport.ps1     Export to staging-spoon package.json + report
 Invoke-AppEvaluation.ps1  Entry point
-tests/                    Cross-platform tests + a staging-spoon interop check
+tests/                    Unit tests + a staging-spoon interop check
 examples/                 A worked IntelliJ export
 ```
 
 ## Design
 
-The selection, attribution, evidence and export logic is pure and tested on any
-platform. The raw operating-system reads — the uninstall registry, the machine
-PATH, `.lnk` files through COM — run only on Windows; the test suite drives the
-orchestration with injected fixtures and gates the live reads with a Windows
-check, so it never fakes a Windows-state assertion it cannot make.
+The selection, attribution, evidence and export logic is kept separate from the
+operating-system reads — the uninstall registry, the machine PATH, `.lnk` files
+through COM — so the test suite can drive the orchestration with injected
+fixtures and assert the logic directly, while the live-inspection test reads the
+real machine.
 
 This tool has no dependency on staging-spoon; the interop test dot-sources
 staging-spoon's validators only to prove the exported `package.json` is accepted

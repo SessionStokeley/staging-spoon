@@ -61,8 +61,8 @@ $script:CompatibilityRule = @(
     @{
         Name    = 'automatic platform variables'
         Pattern = '\$Is(Windows|Linux|MacOS)\b'
-        Reason  = 'introduced in PowerShell 6; under StrictMode 5.1 throws on the reference. Use Test-WindowsPlatform.'
-        Exclude = @('Platform.ps1')
+        Reason  = 'introduced in PowerShell 6; under StrictMode Windows PowerShell 5.1 throws on the reference.'
+        Exclude = @()
     }
     @{
         Name    = 'Encoding::Latin1'
@@ -138,12 +138,7 @@ foreach ($file in $files) {
 }
 Test-Case 'no count added to a string' ($numericConcat.Count -eq 0) ($numericConcat -join ', ')
 
-Write-Host "`nPlatform probe"
-
-$probe = Test-WindowsPlatform
-Test-Case 'probe returns a boolean'   ($probe -is [bool])
-Test-Case 'probe agrees with the host' ($probe -eq [bool](Get-Variable -Name 'IsWindows' -ValueOnly -ErrorAction SilentlyContinue) -or
-                                        $null -eq (Get-Variable -Name 'IsWindows' -ErrorAction SilentlyContinue))
+Write-Host "`nEncoding helper"
 
 $encoding = Get-Latin1Encoding
 Test-Case 'latin-1 encoding available' ($null -ne $encoding)

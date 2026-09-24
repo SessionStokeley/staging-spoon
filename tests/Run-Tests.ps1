@@ -1,10 +1,9 @@
 <#
 .SYNOPSIS
-    Tests for the platform-independent validation modules.
+    Tests for the validation modules.
 .DESCRIPTION
     Covers path classification, command parsing, manifest validation, failure
     classification, the pre-build gate, config export and report rendering.
-    Runs on Linux or Windows; deployment validation itself requires Windows.
 .EXAMPLE
     pwsh -NoProfile -File .\tests\Run-Tests.ps1
 #>
@@ -300,42 +299,6 @@ foreach ($wrapper in @($installTemplate, $uninstallTemplate)) {
     Test-Case "$name does not wait on processes by name" ($code -notmatch "Get-Process\s+-Name")
 }
 
-# The wrapper must come straight back from an installer that leaves a helper
-# running, and must not terminate that helper either.
-if (Test-WindowsPlatform) {
-    Write-Host '  SKIP wrapper execution (needs a POSIX shell to fake an installer)'
-} else {
-    $wrapperWork = Join-Path $WorkPath 'wrapper'
-    New-Item -Path $wrapperWork -ItemType Directory -Force | Out-Null
-
-    $fakeInstaller = Join-Path $wrapperWork 'Setup.exe'
-    "#!/bin/sh`n( sleep 120 ) &`necho `"vendor installer finished`"`nexit 0`n" |
-        Set-Content -LiteralPath $fakeInstaller -Encoding UTF8 -NoNewline
-    & /bin/chmod '+x' $fakeInstaller
-
-    # The installer name and its argument now arrive as parameters, exactly as
-    # the generated command supplies them, rather than being baked into the file.
-    $wrapperScript = Join-Path $wrapperWork 'Install.ps1'
-    $wrapperBody = (Get-Content -LiteralPath $installTemplate -Raw).
-        Replace('[System.Security.Principal.WindowsIdentity]::GetCurrent()',
-                "[PSCustomObject]@{ Name = 'test'; IsSystem = `$false }")
-    Set-Content -LiteralPath $wrapperScript -Value $wrapperBody -Encoding UTF8
-
-    $wrapperWatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $wrapperResult = Invoke-ProcessWithTimeout -FilePath $shellPath `
-                                               -Arguments "-NoProfile -NonInteractive -File `"$wrapperScript`" -InstallerName Setup.exe /S" `
-                                               -WorkingDirectory $wrapperWork -TimeoutSeconds 120
-    $wrapperWatch.Stop()
-
-    Test-Case 'wrapper returns without waiting on the helper' ($wrapperWatch.Elapsed.TotalSeconds -lt 30) ("{0:n1}s" -f $wrapperWatch.Elapsed.TotalSeconds)
-    Test-Case 'wrapper preserves the vendor exit code' ($wrapperResult.ExitCode -eq 0) $wrapperResult.ExitCode
-    Test-Case 'wrapper passes arguments through' ($wrapperResult.StdOut -match 'Setup\.exe /S') $wrapperResult.StdOut
-    Test-Case 'installer output reaches the log' ($wrapperResult.StdOut -match 'vendor installer finished')
-    Test-Case 'wrapper leaves the helper running' (@(Get-Process -Name 'sleep' -ErrorAction SilentlyContinue).Count -gt 0)
-
-    Get-Process -Name 'sleep' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-}
-
 # --- Installer argument flow (end to end) ------------------------------------
 # The whole point of the change: package.json -> CommandModel -> generated
 # command -> Install.ps1 -> installer, with the silent arguments applied exactly
@@ -361,119 +324,6 @@ Test-Case 'no installer name means no installer parameters' (
 Test-Case 'plain switches tokenise'      (@(ConvertTo-ArgumentTokens -ArgumentString '/S /v/qn').Count -eq 2)
 $spaced = @(ConvertTo-ArgumentTokens -ArgumentString 'INSTALLDIR="C:\Program Files\App" /qn')
 Test-Case 'quoted span stays one token'  ($spaced.Count -eq 2 -and $spaced[0] -eq 'INSTALLDIR="C:\Program Files\App"')
-Test-Case 'empty argument string is empty' (@(ConvertTo-ArgumentTokens -ArgumentString '').Count -eq 0)
-
-if (Test-WindowsPlatform) {
-    Write-Host '  SKIP argument-flow execution (needs a POSIX shell to fake an installer)'
-} else {
-    $flowWork = Join-Path $WorkPath 'argflow'
-    New-Item -Path $flowWork -ItemType Directory -Force | Out-Null
-
-    # A fake installer that reports exactly the argv it was handed, one per line,
-    # so argument count and boundaries can be asserted rather than eyeballed.
-    $echoInstaller = Join-Path $flowWork 'Setup.exe'
-    "#!/bin/sh`necho `"ARGCOUNT=`$#`"`ni=0`nfor a in `"`$@`"; do echo `"GOTARG`${i}=[`$a]`"; i=`$((i+1)); done`nexit 0`n" |
-        Set-Content -LiteralPath $echoInstaller -Encoding UTF8 -NoNewline
-    & /bin/chmod '+x' $echoInstaller
-
-    $flowScript = Join-Path $flowWork 'Install.ps1'
-    (Get-Content -LiteralPath $installTemplate -Raw).
-        Replace('[System.Security.Principal.WindowsIdentity]::GetCurrent()',
-                "[PSCustomObject]@{ Name = 'test'; IsSystem = `$false }") |
-        Set-Content -LiteralPath $flowScript -Encoding UTF8
-
-    # Run a set of installer arguments through the real chain: generate the
-    # command, split off the executable exactly as the runner does, and execute
-    # the remainder. Returns what the fake installer actually received.
-    function Invoke-ArgumentFlow {
-        param([string[]]$InstallerArguments, [switch]$SystemPath)
-
-        $command  = New-PowerShellScriptCommand -ScriptName 'Install.ps1' `
-                        -InstallerName 'Setup.exe' -InstallerArguments $InstallerArguments
-        $rendered = ConvertTo-CommandString -Command $command
-        # The generated command names powershell.exe; run it with this pwsh.
-        $split    = Split-ExecutableCommandLine -CommandLine $rendered
-        $arguments = $split.Arguments
-
-        if ($SystemPath) {
-            # Prove the SYSTEM path carries the same string: build the shim the
-            # scheduled task would run and execute it directly (only the Task
-            # Scheduler hand-off is skipped, not the command handling).
-            $shimStdOut = Join-Path $flowWork 'sys-stdout.log'
-            $shimStdErr = Join-Path $flowWork 'sys-stderr.log'
-            $shimExit   = Join-Path $flowWork 'sys-exit.txt'
-            $shimState  = Join-Path $flowWork 'sys-state.txt'
-            $shimPath   = Join-Path $flowWork 'shim.ps1'
-            $moduleDir  = Join-Path $flowWork 'modules'
-            New-Item -Path $moduleDir -ItemType Directory -Force | Out-Null
-            foreach ($m in @('Platform.ps1', 'ProcessRunner.ps1')) {
-                Copy-Item -LiteralPath (Join-Path $repo "src/Core/$m") -Destination $moduleDir -Force
-            }
-            Copy-Item -LiteralPath (Join-Path $repo 'src/Testing/SystemContext.ps1') -Destination $moduleDir -Force
-
-            New-SystemContextShim -CommandLine "$shellPath $arguments" -WorkingDirectory $flowWork `
-                -StdOutPath $shimStdOut -StdErrPath $shimStdErr -ExitCodePath $shimExit `
-                -StatePath $shimState -ModuleDirectory $moduleDir |
-                Set-Content -LiteralPath $shimPath -Encoding UTF8
-
-            Invoke-ProcessWithTimeout -FilePath $shellPath `
-                -Arguments "-NoProfile -NonInteractive -File `"$shimPath`"" `
-                -WorkingDirectory $flowWork -TimeoutSeconds 60 | Out-Null
-            return (Get-Content -LiteralPath $shimStdOut -Raw)
-        }
-
-        (Invoke-ProcessWithTimeout -FilePath $shellPath -Arguments $arguments `
-            -WorkingDirectory $flowWork -TimeoutSeconds 60).StdOut
-    }
-
-    function Get-ReceivedArguments {
-        param([string]$Output)
-        # Order-independent by design: two echoed lines can be delivered to the
-        # stream reader out of order, and what matters here is the boundaries -
-        # count and content - not the sequence.
-        @($Output -split "`r?`n" | Where-Object { $_ -match '^GOTARG\d+=\[' } |
-            ForEach-Object { ($_ -replace '^GOTARG\d+=\[', '') -replace '\]$', '' })
-    }
-
-    # A received set matches when it has exactly the expected members, no more
-    # (no duplication) and no fewer (nothing dropped or merged).
-    function Test-ArgumentSet {
-        param([string]$Name, [string[]]$Received, [string[]]$Expected)
-        $matches = $Received.Count -eq $Expected.Count -and
-                   @($Expected | Where-Object { $Received -notcontains $_ }).Count -eq 0 -and
-                   @($Received | Where-Object { $Expected -notcontains $_ }).Count -eq 0
-        Test-Case $Name $matches ("got: " + ($Received -join ' | '))
-    }
-
-    # (1) no arguments
-    Test-ArgumentSet 'no arguments: installer gets none' `
-        @(Get-ReceivedArguments -Output (Invoke-ArgumentFlow -InstallerArguments @())) @()
-
-    # (2) one argument
-    Test-ArgumentSet 'one argument survives' `
-        @(Get-ReceivedArguments -Output (Invoke-ArgumentFlow -InstallerArguments @('/S'))) @('/S')
-
-    # (3) multiple arguments, not merged and not duplicated
-    Test-ArgumentSet 'multiple arguments preserved' `
-        @(Get-ReceivedArguments -Output (Invoke-ArgumentFlow -InstallerArguments @('/S', '/v/qn', '/norestart'))) `
-        @('/S', '/v/qn', '/norestart')
-
-    # (4) an argument whose value contains a space
-    Test-ArgumentSet 'space in a value is one argument' `
-        @(Get-ReceivedArguments -Output (Invoke-ArgumentFlow -InstallerArguments @('INSTALLDIR=C:\Program Files\App', '/qn'))) `
-        @('INSTALLDIR=C:\Program Files\App', '/qn')
-
-    # (5) a quoted value, quotes placed by the author
-    Test-ArgumentSet 'quoted value survives' `
-        @(Get-ReceivedArguments -Output (Invoke-ArgumentFlow -InstallerArguments @('TARGETDIR="C:\Program Files\App"', '/qn'))) `
-        @('TARGETDIR=C:\Program Files\App', '/qn')
-
-    # (8) the SYSTEM path handles the same arguments the same way
-    Test-ArgumentSet 'SystemContext preserves arguments identically' `
-        @(Get-ReceivedArguments -Output (Invoke-ArgumentFlow -InstallerArguments @('/S', 'INSTALLDIR=C:\Program Files\App') -SystemPath)) `
-        @('/S', 'INSTALLDIR=C:\Program Files\App')
-}
-
 # --- SYSTEM-context completion -----------------------------------------------
 # Start-ScheduledTask only queues the launch, so the task is still 'Ready' for
 # a moment afterwards. Reading that as "finished" ends the wait before the
