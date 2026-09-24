@@ -432,6 +432,7 @@ pwsh -NoProfile -File .\tests\Run-Tests.ps1
 pwsh -NoProfile -File .\tests\Run-InformationTests.ps1
 pwsh -NoProfile -File .\tests\Run-CompatibilityTests.ps1
 pwsh -NoProfile -File .\tests\Run-IntegrationTests.ps1
+pwsh -NoProfile -File .\tests\Run-WindowsExecutionTests.ps1
 ```
 
 | Suite | Covers |
@@ -439,7 +440,12 @@ pwsh -NoProfile -File .\tests\Run-IntegrationTests.ps1
 | `Run-Tests.ps1` | Command parsing, path classification, manifest validation, failure classification, the pre-build gate against clean and deliberately dirty packages, Intune config export including drift detection, HTML report encoding |
 | `Run-InformationTests.ps1` | Field model and source arbitration, facts versus decisions, resource identity and recovery, filename derivation, the command model, capture integration, requirement calculation, and an end-to-end acceptance scenario |
 | `Run-IntegrationTests.ps1` | The four Windows integrations, the three modes, ownership-driven removal, and the real-state checks against COM shortcuts and the registry |
+| `Run-WindowsExecutionTests.ps1` | End-to-end execution through the deployment wrapper against a compiled fake installer: helper-survival, exit-code preservation, and installer-argument boundaries on the ordinary and SYSTEM paths |
 | `Run-CompatibilityTests.ps1` | Static scan for constructs that work in PowerShell 7 but break on Windows PowerShell 5.1 |
+
+`Run-IntegrationTests.ps1` and `Run-WindowsExecutionTests.ps1` read live Windows
+state — the registry, COM shortcuts, and a native executable they compile — so
+they are run on a Windows host.
 
 The acceptance scenario in `Run-InformationTests.ps1` is the important one. It
 asserts the behaviour the information layer exists to provide: after an

@@ -103,6 +103,28 @@ Test-Case 'registry path still ignored' (
     @($spacedFindings | Where-Object { $_.Path -like '*SOFTWARE*' }).Count -eq 0
 )
 
+# A JSON config escapes a backslash as "\\", so a relative library path such as
+# ".\vk_swiftshader.dll" (a Vulkan ICD manifest) sits in the raw text as
+# ".\\vk_swiftshader.dll". That doubled backslash must not be read as a UNC
+# path: it is relative, and required vendor files must not be flagged.
+$jsonSource = Join-Path $WorkPath 'json-escaped'
+New-Item -Path (Join-Path $jsonSource 'Setup\ui-launcher') -ItemType Directory -Force | Out-Null
+@'
+{
+    "file_format_version": "1.0.0",
+    "ICD": { "library_path": ".\\vk_swiftshader.dll", "api_version": "1.3.0" }
+}
+'@ | Set-Content -LiteralPath (Join-Path $jsonSource 'Setup\ui-launcher\vk_swiftshader_icd.json')
+$jsonFindings = @(Find-AbsolutePath -PackagePath $jsonSource)
+Test-Case 'JSON-escaped relative path is not a UNC path' (
+    @($jsonFindings | Where-Object { $_.Path -like '*vk_swiftshader*' }).Count -eq 0
+) (($jsonFindings | ForEach-Object { "$($_.Classification) $($_.Path)" }) -join ' | ')
+
+# A genuine UNC (\\host\share\...) is still invalid; a lone "\\name" with no
+# share component is not treated as a UNC.
+Test-Case 'real UNC still invalid'      ((Get-PathClassification -Path '\\fileserver\share\config.xml').Classification -eq 'INVALID')
+Test-Case 'lone \\name is not a UNC'    ((Get-PathClassification -Path '\\vk_swiftshader.dll').Classification -ne 'INVALID')
+
 # --- SYSTEM-context shim -----------------------------------------------------
 # The scheduled task itself needs Windows, but the shim it runs is an ordinary
 # script. Generating and executing one here covers the quoting that previously

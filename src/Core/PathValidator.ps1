@@ -70,7 +70,10 @@ function Get-PathClassification {
         }
     }
 
-    if ($Path -match '^\\\\') {
+    # A UNC path is \\host\share\... - a host and a share, separated. A lone
+    # "\\name" is not a usable UNC (and is often a relative path a JSON file
+    # doubled the separator of), so only the real \\host\share shape is flagged.
+    if ($Path -match '^\\\\[^\\/]+[\\/][^\\/]+') {
         return [PSCustomObject]@{
             Path           = $Path
             Classification = 'INVALID'
@@ -130,7 +133,11 @@ function Find-AbsolutePath {
 
     # The lookbehind stops a registry provider path such as HKLM:\SOFTWARE
     # from matching as drive "M:\". Without it every package that reads the
-    # registry would be reported as referencing a non-system drive.
+    # registry would be reported as referencing a non-system drive. The dot and
+    # backslash in the class also stop a relative path whose separator a JSON
+    # file has escaped - ".\\vk_swiftshader.dll" in the raw text - from being
+    # read as a "\\..." UNC path: the "\\" there follows a ".", which is
+    # relative, not absolute.
     #
     # A single interior space is part of the path, because the most common
     # system locations contain one: stopping at whitespace truncates
@@ -138,7 +145,7 @@ function Find-AbsolutePath {
     # known-good location and is reported as an unclassified path on virtually
     # every real package. Runs of two spaces, and a trailing space, end the
     # match so prose following a path is not swallowed.
-    $pathRegex = '(?<![A-Za-z0-9_$:])(?:[A-Za-z]:\\|\\\\)' +
+    $pathRegex = '(?<![A-Za-z0-9_$:.\\])(?:[A-Za-z]:\\|\\\\)' +
                  '(?:[^\s"''<>|*?\r\n;]|(?<![\s]) (?=[^\s"''<>|*?\r\n;$]))+'
 
     $files = Get-ChildItem -LiteralPath $PackagePath -Recurse -File |
