@@ -167,6 +167,8 @@ templates/         Reference Install / Uninstall / Detection scripts,
                    plus Apply-/Remove-Integrations wrappers
 examples/          Example configuration files
 tests/             Test suites
+Intune-App-Evaluator/  Sibling tool: inspects an installed application and
+                   exports a package.json for this packager (see its README)
 ```
 
 Entry points:
