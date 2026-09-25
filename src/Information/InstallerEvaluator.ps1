@@ -173,8 +173,12 @@ function Get-ScriptInstallerReference {
         }
 
         # --- Call operator, or a bare executable in a batch file ------------
+        # Two spellings of the target: quoted (may contain spaces, e.g. a path
+        # under "C:\Program Files\...") or bare (no spaces). The quoted branch is
+        # tried first so a spaced path is captured whole instead of truncating at
+        # the first space.
         $executable = [regex]::Match($line,
-            '(?i)(?:^|\bstart\b[^"]*?\s|&\s*)"?(?<exe>(?:[A-Za-z]:[\\/]|\.[\\/]|%~dp0|\$PSScriptRoot[\\/])?[^"\s|&]*\.(?:exe|msi))"?(?<args>[^&|]*)')
+            '(?i)(?:^|\bstart\b[^"]*?\s|&\s*)(?:"(?<exe>(?:[A-Za-z]:[\\/]|\.[\\/]|%~dp0|\$PSScriptRoot[\\/])?[^"]*\.(?:exe|msi))"|(?<exe>(?:[A-Za-z]:[\\/]|\.[\\/]|%~dp0|\$PSScriptRoot[\\/])?[^"\s|&]*\.(?:exe|msi)))(?<args>[^&|]*)')
 
         if ($executable.Success) {
             $target = $executable.Groups['exe'].Value
@@ -441,7 +445,8 @@ function Invoke-InstallerEvaluation {
     # A wrapper script is not the installer. What it runs is.
     if (Test-ScriptInstallerKind -Kind $kind) {
         $scriptAnalysis = Get-ScriptInstallerReference -Path $canonical
-        $primary = @($scriptAnalysis.Invocations)[0]
+        $invocationList = @($scriptAnalysis.Invocations)
+        $primary = if ($invocationList.Count -gt 0) { $invocationList[0] } else { $null }
 
         if ($null -eq $primary) {
             $notes.Add("$kind wrapper: no installer invocation found in the script")
