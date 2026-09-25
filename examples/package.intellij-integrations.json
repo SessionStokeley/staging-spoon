@@ -1,0 +1,55 @@
+{
+  "ApplicationName": "IntelliJ IDEA",
+  "ApplicationVersion": "2024.1",
+  "PackageVersion": "1.0.0",
+  "InstallerType": "EXE",
+  "SourceInstaller": "ideaIU-2024.1.exe",
+  "InstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File ./Install.ps1 -InstallerName ideaIU-2024.1.exe /S",
+  "UninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File ./Uninstall.ps1",
+  "DetectionMethod": "Script",
+  "DetectionScript": "Detection.ps1",
+  "InstallBehavior": "System",
+  "Architecture": "x64",
+  "MinimumOS": "W10_1809",
+  "ExpectedExitCodes": [0, 1641, 3010],
+  "RebootBehavior": "BasedOnReturnCode",
+  "Integrations": {
+    "Path": [
+      {
+        "Mode": "MANAGE",
+        "Entry": "C:\\Program Files\\JetBrains\\IntelliJ IDEA\\bin",
+        "Scope": "Machine"
+      }
+    ],
+    "Shortcut": [
+      {
+        "Mode": "MANAGE",
+        "Name": "IntelliJ IDEA",
+        "Target": "C:\\Program Files\\JetBrains\\IntelliJ IDEA\\bin\\idea64.exe",
+        "WorkingDirectory": "C:\\Program Files\\JetBrains\\IntelliJ IDEA\\bin",
+        "Icon": "C:\\Program Files\\JetBrains\\IntelliJ IDEA\\bin\\idea64.exe",
+        "Location": "Public"
+      }
+    ],
+    "ContextMenu": [
+      {
+        "Mode": "MANAGE",
+        "Verb": "JetBrains.IntelliJ.Open",
+        "DisplayName": "Open with IntelliJ IDEA",
+        "Executable": "C:\\Program Files\\JetBrains\\IntelliJ IDEA\\bin\\idea64.exe",
+        "Arguments": "\"%1\"",
+        "Target": "File",
+        "Extensions": [".java", ".kt", ".gradle"],
+        "Scope": "Machine"
+      }
+    ],
+    "FileAssociation": [
+      {
+        "Mode": "VALIDATE",
+        "Extension": ".java",
+        "ProgId": "IntelliJIDEA.java",
+        "Executable": "C:\\Program Files\\JetBrains\\IntelliJ IDEA\\bin\\idea64.exe"
+      }
+    ]
+  }
+}

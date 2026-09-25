@@ -1,0 +1,46 @@
+# Build artifacts
+*.intunewin
+*.zip
+build/
+dist/
+out/
+
+# Logs
+logs/
+*.log
+
+# Test artifacts
+TestResults/
+test-output/
+*.test.results
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.temp
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node/npm (if needed)
+node_modules/
+package-lock.json
+yarn.lock
+
+# Python (if needed)
+__pycache__/
+*.pyc
+venv/
+env/
+
+# Environment files
+.env
+.env.local
+*.env

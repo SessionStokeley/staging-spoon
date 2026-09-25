@@ -1,0 +1,29 @@
+{
+  "ApplicationName": "Contoso Reader",
+  "ApplicationVersion": "4.2.1",
+  "PackageVersion": "1.0.0",
+  "InstallerType": "EXE",
+  "SourceInstaller": "Setup.exe",
+  "InstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File ./Install.ps1 -InstallerName Setup.exe /S",
+  "UninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File ./Uninstall.ps1",
+  "DetectionMethod": "Script",
+  "DetectionScript": "Detection.ps1",
+  "InstallBehavior": "System",
+  "Architecture": "x64",
+  "MinimumOS": "W10_1809",
+  "ExpectedExitCodes": [0, 1641, 3010],
+  "RebootBehavior": "BasedOnReturnCode",
+  "RequiredFiles": [],
+  "AllowedPaths": [],
+  "PostInstallExpectation": {
+    "File": [
+      "C:\\Program Files\\Contoso\\Reader\\Reader.exe"
+    ],
+    "UninstallDisplayName": [
+      "Contoso Reader*"
+    ],
+    "RegistryKey": [
+      "HKLM:\\SOFTWARE\\Contoso\\Reader"
+    ]
+  }
+}
