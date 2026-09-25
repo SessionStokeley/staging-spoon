@@ -131,7 +131,8 @@ function New-PowerShellScriptCommand {
         [Parameter(Mandatory)][string]$ScriptName,
         [string[]]$ScriptArguments = @(),
         [string]$InstallerName = '',
-        [string[]]$InstallerArguments = @()
+        [string[]]$InstallerArguments = @(),
+        [ValidateSet('', 'Silent', 'SuppressUI', 'NormalUI', 'Custom')][string]$UiMode = ''
     )
 
     # "./" rather than ".\": PowerShell accepts either on Windows, and the
@@ -163,6 +164,10 @@ function New-PowerShellScriptCommand {
     # wrapper collects with ValueFromRemainingArguments, which keeps each one a
     # separate argument through powershell.exe's own -File parsing rather than
     # collapsing them into a single mis-quoted string.
+    # -UiMode is named, so it binds by name and never collides with the trailing
+    # installer switches the wrapper collects positionally.
+    if ($UiMode) { $arguments += @('-UiMode', $UiMode) }
+
     if ($InstallerName) {
         $arguments += @('-InstallerName', $InstallerName)
         $arguments += @($InstallerArguments)

@@ -9,6 +9,12 @@
 
 [CmdletBinding()]
 param(
+    # UI behaviour of the uninstall, configured independently of the install.
+    # Silent runs with no UI, SuppressUI shows progress only, NormalUI lets the
+    # uninstaller show its UI, and Custom adds no UI switch of its own.
+    [ValidateSet('Silent', 'SuppressUI', 'NormalUI', 'Custom')]
+    [string]$UiMode = 'Silent',
+
     [ValidateSet('Preserve', 'Translate')]
     [string]$RebootStrategy = 'Preserve'
 )
@@ -20,7 +26,18 @@ $ErrorActionPreference = 'Stop'
 $PackageRoot   = $PSScriptRoot
 $DisplayName   = 'Vendor Application'
 $ProductCode   = ''          # Set for MSI packages, e.g. '{GUID}'
-$FallbackArguments = @('/S')
+
+# The UI switches are derived from the selected mode, so the same registration
+# uninstalls silently or interactively without a second source of truth. For
+# Windows Installer, /qn is no UI and /qb is progress only; NormalUI and Custom
+# add none. The EXE fallback only carries a silent switch when a silent mode is
+# chosen - a switch a non-silent mode must not pass.
+$MsiUiArguments = switch ($UiMode) {
+    'Silent'     { @('/qn') }
+    'SuppressUI' { @('/qb') }
+    default      { @() }
+}
+$FallbackArguments = if ($UiMode -in @('Silent', 'SuppressUI')) { @('/S') } else { @() }
 
 $SuccessExitCodes = @(0, 1605)   # 1605: already absent
 $RebootExitCodes  = @(1641, 3010)
@@ -99,9 +116,11 @@ try {
     $filePath = $null
     $arguments = @()
 
+    Write-Log "Uninstall UI mode: $UiMode"
+
     if ($ProductCode) {
         $filePath  = "$env:SystemRoot\System32\msiexec.exe"
-        $arguments = @('/x', $ProductCode, '/qn', '/norestart')
+        $arguments = @('/x', $ProductCode) + $MsiUiArguments + @('/norestart')
         Write-Log "Uninstalling by product code: $ProductCode"
     } else {
         $registration = Get-UninstallRegistration -Name $DisplayName
@@ -116,7 +135,7 @@ try {
 
         if ($registration.ProductCode -match '^\{[0-9A-Fa-f-]{36}\}$') {
             $filePath  = "$env:SystemRoot\System32\msiexec.exe"
-            $arguments = @('/x', $registration.ProductCode, '/qn', '/norestart')
+            $arguments = @('/x', $registration.ProductCode) + $MsiUiArguments + @('/norestart')
         } elseif ($registration.UninstallString) {
             # Split a quoted executable from its trailing arguments.
             if ($registration.UninstallString -match '^"([^"]+)"\s*(.*)$') {

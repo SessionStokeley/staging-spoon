@@ -560,6 +560,13 @@ Test-Case 'install command generated'   ($blueprint.Install.Rendered -match 'Ins
 Test-Case 'uninstall command generated' ($blueprint.Uninstall.Rendered -match 'Uninstall\.ps1')
 Test-Case 'generated command is valid'  (Test-StructuredCommand -Command $blueprint.Install.Structured).IsValid
 
+# UI mode: detected silent switches make Silent the default and are carried.
+# Read-only against the acceptance project, so it is left in the detected state
+# the manifest section below depends on.
+Test-Case 'ui mode defaults to Silent'      ((Get-ProjectFieldValue -Project $project -Path 'installer.uiMode') -eq 'Silent')
+Test-Case 'silent command carries the mode' ($blueprint.Install.Rendered -match '-UiMode Silent')
+Test-Case 'silent command carries switches' ($blueprint.Install.Rendered -match '(?<!\S)/S(?!\S)')
+
 # Remaining questions are genuine policy, asked once and in priority order.
 $remaining = @(Get-PendingPrompt -Project $project -Operation 'BuildPackage')
 $remainingPaths = @($remaining.Path)
@@ -640,6 +647,56 @@ Test-Case 'second migration is a no-op' (@(Update-ProjectPathFormat -Project $le
 Test-Case 'reopened project asks nothing' (@(Get-PendingPrompt -Project $reopened -Operation 'BuildPackage').Count -eq 0)
 Test-Case 'reopened project keeps decisions' ((Get-Decision -Store $reopened.Evidence -Key 'decision.applyMachinePath').Value -eq $false)
 Test-Case 'reopened project keeps evidence'  (@(Get-Fact -Store $reopened.Evidence -Key 'application.name').Count -ge 1)
+
+# --- UI mode overrides (isolated project) ------------------------------------
+# The administrator can override the detected UI behaviour before building, and
+# the install and uninstall UI modes are configured independently. Run on a
+# throwaway project so the acceptance state above is untouched.
+Write-Host "`nUI mode overrides"
+
+$modeRoot = Join-Path $WorkPath 'ui-mode'
+New-FakeInstaller -Path (Join-Path $modeRoot 'source/ContosoReader-4.2.1-x64.exe') | Out-Null
+$modeProject = Initialize-InformationProject -Root $modeRoot -Name 'Contoso Reader'
+Select-ProjectInstaller -Project $modeProject -Path (Join-Path $modeRoot 'source/ContosoReader-4.2.1-x64.exe') | Out-Null
+
+# Detected default carries the switches and the mode.
+$silentBp = New-DeploymentBlueprint -Project $modeProject -UseWrapperScripts
+Test-Case 'default mode is Silent'          ((Get-ProjectFieldValue -Project $modeProject -Path 'installer.uiMode') -eq 'Silent')
+Test-Case 'silent carries switches'         ($silentBp.Install.Rendered -match '(?<!\S)/S(?!\S)')
+
+# Administrator override to NormalUI: the same installer is packaged to show
+# its UI, and its silent switches are deliberately not passed.
+Set-ProjectField -Project $modeProject -Path 'installer.uiMode' -Value 'NormalUI' `
+    -Source 'USER_SELECTED' -Evidence 'Administrator chose an interactive install' | Out-Null
+$normalBp = New-DeploymentBlueprint -Project $modeProject -UseWrapperScripts
+Test-Case 'NormalUI carries the mode'       ($normalBp.Install.Rendered -match '-UiMode NormalUI')
+Test-Case 'NormalUI drops silent switches'  ($normalBp.Install.Rendered -notmatch '(?<!\S)/S(?!\S)')
+Test-Case 'NormalUI install still valid'    (Test-StructuredCommand -Command $normalBp.Install.Structured).IsValid
+
+# Uninstall UI mode is independent of the install mode.
+Set-ProjectField -Project $modeProject -Path 'installer.uninstallUiMode' -Value 'Silent' `
+    -Source 'USER_SELECTED' -Evidence 'Uninstall stays silent regardless of install UI' | Out-Null
+$mixedBp = New-DeploymentBlueprint -Project $modeProject -UseWrapperScripts
+Test-Case 'uninstall mode independent'      ($mixedBp.Uninstall.Rendered -match '-UiMode Silent')
+
+# The mode round-trips through the manifest. Satisfy the remaining build
+# prerequisites on the throwaway project so the export can run.
+New-FakeInstaller -Path (Join-Path $modeRoot 'tools/IntuneWinAppUtil.exe') | Out-Null
+foreach ($prompt in @(Get-PendingPrompt -Project $modeProject -Operation 'BuildPackage')) {
+    $value = switch ($prompt.Path) {
+        'installation.context'         { 'System' }
+        'deployment.rebootBehavior'    { 'BasedOnReturnCode' }
+        'deployment.packageVersion'    { '1.0.0' }
+        'deployment.detectionMethod'   { 'Script' }
+        'package.intuneWinAppUtilPath' { Join-Path $modeRoot 'tools/IntuneWinAppUtil.exe' }
+        default                        { 'System' }
+    }
+    Resolve-InformationPrompt -Project $modeProject -Path $prompt.Path -Value $value -Method 'Choice' | Out-Null
+}
+$modeManifest = Export-ProjectManifest -Project $modeProject
+Test-Case 'manifest records UiMode'          ($modeManifest.UiMode -eq 'NormalUI')
+Test-Case 'manifest records UninstallUiMode' ($modeManifest.UninstallUiMode -eq 'Silent')
+Test-Case 'manifest with modes is valid'     (Test-PackageManifest -Manifest $modeManifest).IsValid
 
 # 22-23. A new version reuses the previous build and asks only about changes.
 $manifestPath = Join-Path $WorkPath 'previous-manifest.json'

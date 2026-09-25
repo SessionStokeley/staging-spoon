@@ -424,6 +424,21 @@ function Invoke-InstallerDiscovery {
         }
     }
 
+    # Default the UI mode from evidence, never from assumption. Silent is only
+    # the default when silent switches were actually detected; with none, the
+    # default is NormalUI so the installer shows its UI rather than being run
+    # with a guessed switch. The administrator can override this before build.
+    if (-not (Test-ProjectFieldKnown -Project $Project -Path 'installer.uiMode')) {
+        if (Test-ProjectFieldKnown -Project $Project -Path 'installer.silentArguments') {
+            Set-ProjectField -Project $Project -Path 'installer.uiMode' -Value 'Silent' `
+                -Source 'DERIVED' -Evidence 'Silent switches were detected, so a silent install is the default' | Out-Null
+        } else {
+            Set-ProjectField -Project $Project -Path 'installer.uiMode' -Value 'NormalUI' `
+                -Source 'DERIVED' -Evidence 'No silent switches detected; the installer runs with its UI rather than a guessed switch' | Out-Null
+        }
+        $found.Add('installer.uiMode')
+    }
+
     [PSCustomObject]@{
         InstallerPath = $InstallerPath
         Family        = $family

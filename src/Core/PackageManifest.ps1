@@ -29,6 +29,7 @@ $script:RequiredManifestFields = @(
 )
 
 $script:ValidInstallerTypes  = @('MSI', 'EXE', 'MSIX', 'APPX', 'Script', 'Wrapper')
+$script:ValidUiModes         = @('Silent', 'SuppressUI', 'NormalUI', 'Custom')
 $script:ValidInstallBehavior = @('System', 'User')
 $script:ValidArchitectures   = @('x64', 'x86', 'ARM64', 'Neutral')
 $script:ValidDetectionMethods = @('Script', 'MSI', 'File', 'Registry')
@@ -63,6 +64,8 @@ function New-PackageManifest {
         [int[]]$ExpectedExitCodes = @(0, 1641, 3010),
         [ValidateScript({ $_ -in $script:ValidRebootBehavior })][string]$RebootBehavior = 'BasedOnReturnCode',
         [string]$PackageHash = '',
+        [ValidateScript({ $_ -in $script:ValidUiModes })][string]$UiMode = 'Silent',
+        [ValidateScript({ $_ -in $script:ValidUiModes })][string]$UninstallUiMode = 'Silent',
         [AllowNull()]$Integrations = $null
     )
 
@@ -85,6 +88,8 @@ function New-PackageManifest {
         ContentDirectory   = $ContentDirectory
         BuildTimestamp     = (Get-Date).ToString('o')
         PackageHash        = $PackageHash
+        UiMode             = $UiMode
+        UninstallUiMode    = $UninstallUiMode
         Integrations       = $Integrations
     }
 }
@@ -179,6 +184,8 @@ function Test-PackageManifest {
         @{ Field = 'Architecture';    Valid = $script:ValidArchitectures }
         @{ Field = 'DetectionMethod'; Valid = $script:ValidDetectionMethods }
         @{ Field = 'RebootBehavior';  Valid = $script:ValidRebootBehavior }
+        @{ Field = 'UiMode';          Valid = $script:ValidUiModes }
+        @{ Field = 'UninstallUiMode'; Valid = $script:ValidUiModes }
     )
 
     foreach ($check in $enumChecks) {

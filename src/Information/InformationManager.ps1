@@ -221,30 +221,40 @@ function New-DeploymentBlueprint {
     $productCode       = Get-ProjectFieldValue -Project $Project -Path 'installer.productCode' -Default ''
     $uninstallString   = Get-ProjectFieldValue -Project $Project -Path 'installation.uninstallString' -Default ''
 
+    # UI mode decides whether the detected silent switches are applied at all.
+    # It is evidence-driven: Silent only when switches were verified, otherwise
+    # NormalUI, so nothing is ever run with a guessed switch. The administrator
+    # may have overridden it; that override is honoured here.
+    $uiMode = Get-ProjectFieldValue -Project $Project -Path 'installer.uiMode' `
+        -Default $(if ($silentArguments) { 'Silent' } else { 'NormalUI' })
+    $uninstallUiMode = Get-ProjectFieldValue -Project $Project -Path 'installer.uninstallUiMode' -Default $uiMode
+
     # Silent arguments are authored as one string but travel as tokens, so an
-    # argument whose value contains a space stays one argument.
-    $argumentTokens = ConvertTo-ArgumentTokens -ArgumentString $silentArguments
+    # argument whose value contains a space stays one argument. NormalUI applies
+    # none of them: the installer is meant to show its UI, so its silent
+    # switches are deliberately not passed.
+    $argumentTokens = if ($uiMode -eq 'NormalUI') { @() } else { ConvertTo-ArgumentTokens -ArgumentString $silentArguments }
 
     # A wrapper script is the default because it is what preserves the vendor
     # exit code and writes a log; a bare installer command does neither. The
-    # wrapper is handed the installer name and its silent arguments from the
-    # information model, so package.json is the single source of both and they
-    # are never restated inside the template.
+    # wrapper is handed the installer name, its silent arguments and the UI
+    # mode from the information model, so package.json is the single source of
+    # all three and they are never restated inside the template.
     $installCommand = if ($UseWrapperScripts -or -not $installerFileName) {
         if ($installerFileName) {
-            New-PowerShellScriptCommand -ScriptName 'Install.ps1' `
+            New-PowerShellScriptCommand -ScriptName 'Install.ps1' -UiMode $uiMode `
                 -InstallerName $installerFileName -InstallerArguments $argumentTokens
         } else {
-            New-PowerShellScriptCommand -ScriptName 'Install.ps1'
+            New-PowerShellScriptCommand -ScriptName 'Install.ps1' -UiMode $uiMode
         }
-    } elseif ($installerType -eq 'MSI') {
+    } elseif ($installerType -eq 'MSI' -and $uiMode -ne 'NormalUI') {
         New-MsiInstallCommand -InstallerFileName $installerFileName
     } else {
         New-StructuredCommand -Executable ".\$installerFileName" -Arguments $argumentTokens
     }
 
     $uninstallCommand = if ($UseWrapperScripts -or (-not $productCode -and -not $uninstallString)) {
-        New-PowerShellScriptCommand -ScriptName 'Uninstall.ps1'
+        New-PowerShellScriptCommand -ScriptName 'Uninstall.ps1' -UiMode $uninstallUiMode
     } elseif ($productCode) {
         New-MsiUninstallCommand -ProductCode $productCode
     } else {
@@ -457,6 +467,11 @@ function Export-ProjectManifest {
         ExpectedExitCodes  = @(Get-ProjectFieldValue -Project $Project -Path 'deployment.expectedExitCodes' -Default @(0, 1641, 3010))
         RebootBehavior     = Get-ProjectFieldValue -Project $Project -Path 'deployment.rebootBehavior' -Default 'BasedOnReturnCode'
     }
+
+    $resolvedUiMode = Get-ProjectFieldValue -Project $Project -Path 'installer.uiMode' `
+        -Default $(if (Test-ProjectFieldKnown -Project $Project -Path 'installer.silentArguments') { 'Silent' } else { 'NormalUI' })
+    $manifestArgs['UiMode'] = $resolvedUiMode
+    $manifestArgs['UninstallUiMode'] = Get-ProjectFieldValue -Project $Project -Path 'installer.uninstallUiMode' -Default $resolvedUiMode
 
     if ($detectionMethod -eq 'Script') {
         $manifestArgs['DetectionScript'] = 'Detection.ps1'

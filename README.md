@@ -311,6 +311,18 @@ parameters. The template hard-codes neither, so the configured values apply
 exactly once, on both the normal and the SYSTEM-context execution paths, rather
 than being restated inside the wrapper where they could drift.
 
+**Silent is a choice, not an assumption.** A UI mode (`installer.uiMode`, and
+`installer.uninstallUiMode` for the uninstall independently) decides whether the
+detected switches are applied at all: `Silent` (no UI), `SuppressUI` (progress
+only), `NormalUI` (the installer's own UI, no switches passed), or `Custom`
+(exactly the arguments given). The default is evidence-driven — `Silent` only
+when silent switches were actually detected, otherwise `NormalUI`, so nothing
+ever runs with a guessed switch — and the administrator can override it before
+building. `Install.ps1` and `Uninstall.ps1` take `-UiMode`, refuse a `Silent`
+run that has no switches (which would hang session 0) and warn when `NormalUI`
+is selected without an interactive desktop. Detection and uninstall discovery
+are automatic regardless of the mode.
+
 **One canonical path format, converted only at the edge.** Every stored and
 displayed path uses forward slashes, on every platform. A single form means a
 path reads identically in `project.json`, the manifest, the HTML report and the

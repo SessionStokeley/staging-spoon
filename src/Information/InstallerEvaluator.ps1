@@ -567,6 +567,8 @@ function Get-EvaluationSummary {
             'installer.fileName'
             'installer.type'
             'installer.silentArguments'
+            'installer.uiMode'
+            'installer.uninstallUiMode'
             'installer.productCode'
             'installation.context'
             'installation.installLocation'

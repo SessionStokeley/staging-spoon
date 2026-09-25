@@ -103,6 +103,28 @@ Test-Case 'wrapper preserves the vendor exit code' ($wrapperResult.ExitCode -eq 
 Test-Case 'installer output reaches the log' ($wrapperResult.StdOut -match 'vendor installer finished')
 Test-Case 'wrapper passes the installer name and switches through' ($wrapperResult.StdOut -match 'Setup\.exe /S /norestart')
 
+# --- UI mode honoured by the wrapper -----------------------------------------
+Write-Host "`nUI mode"
+
+$wrapperScript = Join-Path $wrapperDir 'Install.ps1'
+
+# NormalUI with no arguments: the installer runs and receives none. The wrapper
+# runs it exactly once and preserves its exit code.
+$normal = Invoke-ProcessWithTimeout -FilePath $shellPath `
+    -Arguments ("-NoProfile -NonInteractive -File `"{0}`" -UiMode NormalUI -InstallerName Setup.exe" -f $wrapperScript) `
+    -WorkingDirectory $wrapperDir -TimeoutSeconds 60
+Test-Case 'NormalUI runs the installer'        ($normal.StdOut -match 'vendor installer finished')
+Test-Case 'NormalUI passes no arguments'       ($normal.StdOut -match 'ARGCOUNT=0')
+Test-Case 'NormalUI logs the mode'             ($normal.StdOut -match 'Install UI mode: NormalUI')
+
+# Silent with no arguments is the misconfiguration that would hang session 0.
+# The wrapper must refuse it before starting the installer, not run it.
+$silentEmpty = Invoke-ProcessWithTimeout -FilePath $shellPath `
+    -Arguments ("-NoProfile -NonInteractive -File `"{0}`" -UiMode Silent -InstallerName Setup.exe" -f $wrapperScript) `
+    -WorkingDirectory $wrapperDir -TimeoutSeconds 60
+Test-Case 'Silent without switches fails'      ($silentEmpty.ExitCode -ne 0) $silentEmpty.ExitCode
+Test-Case 'Silent without switches never runs' (-not ($silentEmpty.StdOut -match 'vendor installer finished'))
+
 # --- Argument flow: package.json -> command -> Install.ps1 -> installer ------
 Write-Host "`nInstaller argument flow (through a real installer)"
 

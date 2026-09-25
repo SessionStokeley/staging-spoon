@@ -35,6 +35,13 @@ param(
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$InstallerArguments = @(),
 
+    # How the installer is meant to run. The generated command sets this from
+    # package.json; it is metadata about the arguments already chosen there, not
+    # a second place that suppresses UI. Silent/SuppressUI/Custom carry their
+    # switches in -InstallerArguments; NormalUI carries none and shows the UI.
+    [ValidateSet('Silent', 'SuppressUI', 'NormalUI', 'Custom')]
+    [string]$UiMode = 'Silent',
+
     [ValidateSet('Preserve', 'Translate')]
     [string]$RebootStrategy = 'Preserve'
 )
@@ -95,6 +102,29 @@ try {
     $installerPath = Join-Path $PackageRoot $InstallerName
     if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
         throw "Installer not found in package: $installerPath"
+    }
+
+    # Honour the selected UI mode. The arguments were already chosen for the
+    # mode when the command was generated; the checks here catch the two ways a
+    # mode and its arguments can disagree in a way that would hang or surprise a
+    # deployment that runs with no desktop.
+    Write-Log "Install UI mode: $UiMode"
+    $hasArguments = @($InstallerArguments | Where-Object { -not [string]::IsNullOrEmpty($_) }).Count -gt 0
+
+    if ($UiMode -eq 'Silent' -and -not $hasArguments) {
+        # A silent install with no switches would run the installer's UI and, in
+        # Intune's session-0 context, wait forever for input. Fail fast and
+        # legibly instead of timing out.
+        throw "UiMode is Silent but no installer arguments were provided. Verify the vendor's silent switches and set installer.silentArguments, or choose NormalUI to run the installer with its UI."
+    }
+
+    if ($UiMode -eq 'NormalUI') {
+        if ($hasArguments) {
+            Write-Log "NormalUI selected but arguments were supplied; they are passed through as given" -Level WARN
+        }
+        if ($identity.IsSystem -or -not [Environment]::UserInteractive) {
+            Write-Log "NormalUI selected while running without an interactive desktop (SYSTEM/session 0); the installer's UI will not be visible and may block. NormalUI is intended for a user-context or interactive deployment." -Level WARN
+        }
     }
 
     # Joined into the single string the process boundary takes. A value the

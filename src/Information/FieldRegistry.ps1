@@ -155,6 +155,19 @@ function Get-FieldCatalog {
             -Discoverers @('InstallerMetadata') -InputMethods @('UseDetected', 'FreeText') `
             -Priority 'Cosmetic' -Group 'Installer'
 
+        New-FieldDefinition -Path 'installer.uiMode' -Label 'Install UI Mode' -Type 'Choice' `
+            -Why 'A silent install is not always wanted. This chooses whether the installer runs with no UI (Silent), a progress-only UI (SuppressUI), its full interactive UI (NormalUI), or exactly the arguments provided (Custom). Silent needs verified silent switches; without them the default is NormalUI so nothing is invented.' `
+            -RequiredFor @('GenerateScripts', 'BuildPackage') `
+            -Choices @('Silent', 'SuppressUI', 'NormalUI', 'Custom') `
+            -DerivesFrom @('installer.silentArguments') -Discoverers @('Derivation') `
+            -InputMethods @('UseDetected', 'Choice') -Priority 'InstallSuccess' -Group 'Installer'
+
+        New-FieldDefinition -Path 'installer.uninstallUiMode' -Label 'Uninstall UI Mode' -Type 'Choice' `
+            -Why 'The UI behavior of the uninstall, configured independently of the install.' `
+            -Choices @('Silent', 'SuppressUI', 'NormalUI', 'Custom') `
+            -DerivesFrom @('installer.uiMode') -Discoverers @('Derivation') `
+            -InputMethods @('UseDetected', 'Choice') -Priority 'Uninstall' -Group 'Installer'
+
         # --- Application ----------------------------------------------------
         New-FieldDefinition -Path 'application.name' -Label 'Application Name' -Type 'String' `
             -Why 'The display name of the application in Intune.' `
