@@ -1,0 +1,20 @@
+{
+  "ApplicationName": "Autodesk Revit 2027.3",
+  "ApplicationVersion": "2027.3",
+  "PackageVersion": "1.0.0",
+  "InstallerType": "Wrapper",
+  "SourceInstaller": "image/Installer.exe",
+  "InstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File ./Install.ps1",
+  "UninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -NonInteractive -File ./Uninstall.ps1",
+  "DetectionMethod": "Script",
+  "DetectionScript": "Detection.ps1",
+  "InstallBehavior": "System",
+  "Architecture": "x64",
+  "MinimumOS": "W11_21H2",
+  "ExpectedExitCodes": [0, 1641, 3010],
+  "RebootBehavior": "BasedOnReturnCode",
+  "PostInstallExpectation": {
+    "File": ["C:/Program Files/Autodesk/Revit 2027/Revit.exe"],
+    "UninstallDisplayName": ["Revit 2027*"]
+  }
+}
